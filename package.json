@@ -49,11 +49,11 @@
     "ROADMAP.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "compile": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src test",
     "format": "biome format --write src test",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run compile && node --test test/*.test.mjs",
     "check": "npm run lint && npm run typecheck && npm test"
   },
   "keywords": [

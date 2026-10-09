@@ -11,6 +11,7 @@ const plugin: TuiPlugin.Definition = {
         {
           title: "OpenCode Offpeak",
           description: "Queue tasks and inspect off-peak pricing controls",
+          id: "opencode-offpeak.command",
           slash: { name: "offpeak", aliases: ["op"], arguments: true },
           run: async (input = "") => {
             try {
