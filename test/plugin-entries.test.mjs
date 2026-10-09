@@ -117,14 +117,15 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       },
     };
     tuiPlugin.setup(tuiContext);
+    assert.equal(layer.mode, "global");
     const command = layer.commands.find((entry) => entry.slash?.name === "offpeak");
     assert.ok(command);
     assert.equal(command.id, "opencode-offpeak.command");
     assert.equal(command.slash.arguments, true);
     assert.deepEqual(command.slash.aliases, ["op"]);
-    await command.run("status");
+    await command.run("/offpeak status");
     assert.match(toasts.at(-1).message, /Plugin: DISABLED/);
-    await command.run("queue from the TUI");
+    await command.run("/op queue from the TUI");
     assert.match(toasts.at(-1).message, /Queued [a-f0-9-]+/);
     assert.equal((await rpcHandlers.control({ action: "list" })).tasks.length, 2);
   } finally {
