@@ -2,9 +2,9 @@
 
 ## Release status
 
-`opencode-offpeak@0.1.0` is implemented and release-ready for GitHub. The public GitHub repository is `https://github.com/lutzkind/opencode-offpeak`. npm publication remains blocked because this host has no authenticated npm identity (`npm whoami` returns `ENEEDAUTH`); the package is not yet present in the registry. Do not describe the npm package as published until registry readback succeeds.
+`opencode-offpeak@0.1.0` is published as a public GitHub release at `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.0`. The release tag points to `a77808de7bbb6c91a1460fbc47942ab1d3941814`. The tested npm tarball is attached as `opencode-offpeak-0.1.0.tgz` (SHA-256 `ac3bb427385f9482a20a86e0024837bf3c3dff620eb11d4aee75d690152633d5`). npm registry publication remains blocked because this host has no authenticated npm identity (`npm whoami` returns `ENEEDAUTH`); the package is not present in the registry. Do not describe the npm package as published until registry readback succeeds.
 
-The implementation commit at final audit was `2782893c2e09eff6116f77c62b6a4344f92c8224` (`fix: keep v2 entrypoints source-compatible for Git installs`). This handoff update is a documentation-only closeout; the `v0.1.0` GitHub tag/release is to point at the final closeout commit after its CI run passes.
+The implementation commit at final audit was `2782893c2e09eff6116f77c62b6a4344f92c8224` (`fix: keep v2 entrypoints source-compatible for Git installs`). Release `v0.1.0` was cut from the CI-passing closeout commit above. This later `HANDOFF.md` update records the completed release and tag-based install verification; it does not change the package contents.
 
 ## Repository and compatibility
 
@@ -37,9 +37,11 @@ The built-in `deepseek-opencode-go` policy matches the OpenCode Go provider and 
 ## Verification performed
 
 - `npm run check`: lint and typecheck passed; all 28 tests passed, including lifecycle, OFF preservation, same-session resume, request-boundary, override, crash recovery, policy boundary, timezone/DST, and OpenCode v2 registration tests.
-- GitHub Actions run `37944688036` passed on both `ubuntu-latest` and `macos-latest` for implementation commit `2782893c2e09eff6116f77c62b6a4344f92c8224`. The final documentation-only commit must also pass CI before tagging.
+- GitHub Actions run `37944688036` passed on both `ubuntu-latest` and `macos-latest` for implementation commit `2782893c2e09eff6116f77c62b6a4344f92c8224`.
+- GitHub Actions run `37946282697` passed on both `ubuntu-latest` and `macos-latest` for release commit `a77808de7bbb6c91a1460fbc47942ab1d3941814`.
 - `npm pack --dry-run` passed. A clean consumer installed the generated tarball; Node imports confirmed both packaged server and TUI `setup` entrypoints. The artifact contained 41 files (37,375 bytes compressed; 147,140 bytes unpacked).
 - A fresh OpenCode CLI v2.0.26 Git install loaded the exact implementation commit. In the TUI, `/offpeak off`, `/offpeak on`, `/offpeak status`, `/offpeak queue`, `/offpeak list`, and `/offpeak cancel` worked. `OFF` persisted across a graceful server restart; the queued task remained queued with its record preserved and was not started while disabled.
+- The documented `#v0.1.0` install command completed successfully from GitHub. Its fresh OpenCode TUI loaded `/offpeak status`; `/offpeak off` and `/offpeak on` worked, and `config/offpeak.json` ended with `enabled: true`.
 - Against a localhost-only OpenAI-compatible fixture using that exact Git-installed commit, an interactive request blocked by policy exited with code 1 and made zero fixture requests. An allowed request completed with `fixture-ok`; the fixture observed the provider transport calls. No real model key or paid provider was used.
 - Lifecycle tests simulate `ON → OFF_PEAK → RUNNING → PEAK → WAITING_OFFPEAK → OFF_PEAK → same session resumed → COMPLETED`, and the OFF/ON pause-preservation sequence. The real TUI smoke covered persistence, queueing while OFF, and no automatic start while OFF; automated tests cover the full boundary/resume lifecycle.
 - Current OpenCode v2 plugin API, lifecycle, CLI installation, and Go pricing sources were reviewed. The package was implemented independently; prior queue/scheduler projects are acknowledged as inspirations, with no code copied.
