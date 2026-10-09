@@ -6,7 +6,7 @@ const plugin: TuiPlugin.Definition = {
   id: "opencode-offpeak",
   setup: (context) => {
     context.keymap.layer(() => ({
-      mode: "base",
+      mode: "global",
       commands: [
         {
           title: "OpenCode Offpeak",
@@ -38,7 +38,7 @@ const plugin: TuiPlugin.Definition = {
 };
 
 async function invoke(context: TuiPlugin.Context, rawInput: string): Promise<OffpeakRpcOutput> {
-  const input = rawInput.trim();
+  const input = rawInput.trim().replace(/^\/(?:offpeak|op)(?=\s|$)\s*/i, "");
   const space = input.indexOf(" ");
   const action = (space < 0 ? input : input.slice(0, space)).toLowerCase() || "status";
   const argument = space < 0 ? "" : input.slice(space + 1).trim();

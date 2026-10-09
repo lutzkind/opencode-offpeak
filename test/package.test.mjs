@@ -10,9 +10,13 @@ test("package root, TUI subpath, and Node build exports match the v2 plugin layo
   assert.equal(manifest.main, "./src/server.ts");
   assert.equal(manifest.exports["."].bun, "./src/server.ts");
   assert.equal(manifest.exports["."].import, "./dist/server.js");
-  assert.equal(manifest.exports["./tui"].bun, "./src/tui.ts");
+  assert.equal(manifest.exports["./tui"].bun, "./tui.ts");
   assert.equal(manifest.exports["./tui"].import, "./dist/tui.js");
+  assert.ok(manifest.files.includes("index.ts"));
+  assert.ok(manifest.files.includes("tui.ts"));
   assert.equal(manifest.dependencies["@opencode/plugin"], "2.0.26");
+  assert.match(await readFile(path.join(root, "index.ts"), "utf8"), /src\/server\.ts/);
+  assert.match(await readFile(path.join(root, "tui.ts"), "utf8"), /src\/tui\.ts/);
 
   const server = await import("../dist/server.js");
   const tui = await import("../dist/tui.js");

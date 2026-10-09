@@ -22,7 +22,7 @@
     },
     "./tui": {
       "types": "./dist/tui.d.ts",
-      "bun": "./src/tui.ts",
+      "bun": "./tui.ts",
       "import": "./dist/tui.js"
     },
     "./core": {
@@ -38,6 +38,8 @@
   "files": [
     "src",
     "dist",
+    "index.ts",
+    "tui.ts",
     "docs",
     "README.md",
     "LICENSE",
