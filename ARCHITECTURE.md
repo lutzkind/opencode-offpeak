@@ -23,7 +23,7 @@ flowchart LR
 
 The queue is one versioned JSON document in OpenCode plugin storage. Each task stores its ID, prompt, working directory, provider/model, policy ID, state, explicit OpenCode session ID, timestamps, retry metadata, last error, and any expiring override. There is no database or second queue service.
 
-The setting file is `$XDG_CONFIG_HOME/opencode/offpeak.json`, defaulting to `~/.config/opencode/offpeak.json`. It is canonical for the persistent enabled toggle, execution mode, display timezone, and policy definitions. Commands write it atomically with owner-only permissions. The queue remains in OpenCode storage.
+The setting file is `$OPENCODE_CONFIG_DIR/offpeak.json` when `OPENCODE_CONFIG_DIR` is set; otherwise it is `$XDG_CONFIG_HOME/opencode/offpeak.json`, defaulting to `~/.config/opencode/offpeak.json`. `OPENCODE_OFFPEAK_CONFIG` can override the file path. It is canonical for the persistent enabled toggle, execution mode, display timezone, and policy definitions. Commands write it atomically with owner-only permissions. The queue remains in OpenCode storage.
 
 ## State machine
 
@@ -45,7 +45,7 @@ OFF does not delete state. It stops automatic starts and resumes. If a queued ta
 
 ## Request guard and policy evaluation
 
-The server plugin attaches to OpenCode v2's `session.http.request`, `experimental.ws.handshake`, and `experimental.ws.send` hooks. These are before the provider transport sends the request/frame. A blocked interactive request throws a useful error. A queued `auto` task transitions to `WAITING_OFFPEAK` and holds that same session at the request boundary until the plugin is enabled and the pricing policy allows it (or its explicit override is still valid).
+The server plugin attaches through `context.session.hook()` to OpenCode v2's `http.request`, `experimental.ws.handshake`, and `experimental.ws.send` hooks. These run before the provider transport sends the request/frame. A blocked interactive request throws a useful error. A queued `auto` task transitions to `WAITING_OFFPEAK` and holds that same session at the request boundary until the plugin is enabled and the pricing policy allows it (or its explicit override is still valid).
 
 Policy matching uses provider IDs and exact/glob model IDs. A configured provider with an unknown model is `UNKNOWN` and blocked. Invalid timezone or schedule data is blocked. Providers without an installed policy are `UNTRACKED`; they are not covered by this plugin until a policy is added. Queue tasks must match a valid policy.
 

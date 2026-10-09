@@ -119,6 +119,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     tuiPlugin.setup(tuiContext);
     const command = layer.commands.find((entry) => entry.slash?.name === "offpeak");
     assert.ok(command);
+    assert.equal(command.id, "opencode-offpeak.command");
     assert.equal(command.slash.arguments, true);
     assert.deepEqual(command.slash.aliases, ["op"]);
     await command.run("status");
