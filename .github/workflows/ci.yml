@@ -1,8 +1,11 @@
 name: CI
 
 on:
-  push:
   pull_request:
+
+concurrency:
+  group: opencode-offpeak-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:
