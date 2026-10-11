@@ -12,7 +12,7 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.0
 ```
 
-The package includes both server and TUI entrypoints, so this one command installs the request guard and the `/offpeak` command on OpenCode v2. When an npm release becomes available, `opencode plugin add opencode-offpeak` is the shorter equivalent.
+This installs the released `v0.1.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 

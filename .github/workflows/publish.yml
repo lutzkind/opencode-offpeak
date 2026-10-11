@@ -13,7 +13,8 @@ concurrency:
 
 jobs:
   publish:
-    if: startsWith(github.event.release.tag_name, 'v') && !github.event.release.prerelease
+    # npm is an optional channel. Enable only after the package and trusted publisher exist.
+    if: vars.NPM_TRUSTED_PUBLISHING == 'enabled' && startsWith(github.event.release.tag_name, 'v') && !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:
       contents: read
