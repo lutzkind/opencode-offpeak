@@ -1,10 +1,27 @@
-# Handoff — 2026-10-09
+# Handoff — 2026-10-11
 
 ## Release status
 
-`opencode-offpeak@0.1.0` is published as a public GitHub release at `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.0`. The release tag points to `a77808de7bbb6c91a1460fbc47942ab1d3941814`. The tested npm tarball is attached as `opencode-offpeak-0.1.0.tgz` (SHA-256 `ac3bb427385f9482a20a86e0024837bf3c3dff620eb11d4aee75d690152633d5`). npm registry publication remains blocked because this host has no authenticated npm identity (`npm whoami` returns `ENEEDAUTH`); the package is not present in the registry. Do not describe the npm package as published until registry readback succeeds.
+`opencode-offpeak@0.1.0` is published as a public GitHub release at `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.0`. The release tag points to `a77808de7bbb6c91a1460fbc47942ab1d3941814`. The attached `opencode-offpeak-0.1.0.tgz` has SHA-256 `ac3bb427385f9482a20a86e0024837bf3c3dff620eb11d4aee75d690152633d5`.
 
-The implementation commit at final audit was `2782893c2e09eff6116f77c62b6a4344f92c8224` (`fix: keep v2 entrypoints source-compatible for Git installs`). Release `v0.1.0` was cut from the CI-passing closeout commit above. This later `HANDOFF.md` update records the completed release and tag-based install verification; it does not change the package contents.
+npm publication remains blocked. A fresh `npm whoami` returns `ENEEDAUTH`, and `npm view opencode-offpeak version` returns 404. The package is not in the public registry. Do not describe it as npm-published until registry readback succeeds.
+
+The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6a4344f92c8224` (`fix: keep v2 entrypoints source-compatible for Git installs`). Release `v0.1.0` was cut from the CI-passing closeout commit. Release automation was merged to `main` by PR #2 at `89f64a47348025fd63d34fab29c682e9423b5620`; it adds release automation and maintainer instructions only. A fresh `npm pack` of the package matches the attached v0.1.0 tarball byte-for-byte, so the npm version remains 0.1.0 and no new package version or GitHub release was created.
+
+## 2026-10-11 closeout
+
+- GitHub PR #2 (`ci: add OIDC npm release workflow`) merged as `89f64a47348025fd63d34fab29c682e9423b5620`.
+- PR CI run `38112325926` passed on Ubuntu and macOS. Repository standard run `38112325962` passed. A post-merge standard run on `main`, `38112467515`, also passed.
+- The only remote branch is `main`; the merged `ci/standard-v2.5.2` branch was removed. There are no open PRs or issues.
+- The existing GitHub release remains the single `v0.1.0` release. A freshly packed artifact matched its release asset byte-for-byte (SHA-256 `ac3bb427385f9482a20a86e0024837bf3c3dff620eb11d4aee75d690152633d5`).
+- The package name is still absent from npm. The npm CLI has no authenticated identity or token in its user config/environment; `npm trust list opencode-offpeak` returns 401. GitHub Actions has no npm publishing secret.
+- npm's trusted-publisher API requires an existing package and an authenticated maintainer with 2FA. The new `.github/workflows/publish.yml` uses pinned Actions and GitHub OIDC for stable, version-matched future GitHub releases; it does not store an npm token. It cannot bootstrap the first package version.
+- `RELEASING.md` documents the remaining one-time npm account action: authenticate an authorized npm maintainer, publish the reviewed v0.1.0 tag contents, then create the `publish.yml` trusted-publisher relationship. After that, future stable GitHub releases publish through OIDC.
+- Current release artifact clean-install smoke: installed the GitHub release tarball into an empty consumer directory; both `opencode-offpeak/server` and `opencode-offpeak/tui` export plugin objects with callable `setup` functions.
+- Current OpenCode smoke: installed `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.0` into an isolated OpenCode CLI v2.0.26 config and ran `/offpeak status` in the TUI. The plugin loaded and displayed status. No model request was made.
+- Request guard fixture: a blocked DeepSeek request was rejected before transport; the localhost-only provider fixture observed zero HTTP requests. No paid provider was contacted.
+- Fresh `npm ci` passed with 0 reported vulnerabilities; lint and typecheck passed; all 28 tests passed; `npm pack --dry-run` passed; both package entrypoints loaded from a clean local-tarball consumer.
+- `actionlint` passed the new workflow and all workflows when configured to recognize this repository's existing custom self-hosted labels. The agent-friendliness contract passed.
 
 ## Repository and compatibility
 
@@ -61,12 +78,12 @@ Task-scoped test services were stopped through `opencode service stop` after con
 - Ambiguous provider outcomes after a crash are not replayed automatically; delivery is not exactly-once.
 - Providers without a configured policy are `UNTRACKED`; this plugin does not guard them until a verified policy is added.
 - Machine-boot startup depends on the user's OS service manager.
-- npm installation and registry readback are not verified because registry authentication is unavailable.
+- npm installation and registry readback are not verified because the first npm publication and trusted-publisher setup require an authenticated maintainer with 2FA. Future OIDC release automation is present, but cannot bootstrap the package.
 
 ## Remaining external step
 
-Authenticate an authorized npm publisher, publish the reviewed `0.1.0` package, then verify `npm view opencode-offpeak version`, install it from the registry in a clean OpenCode config, and read back plugin loading. Do not make a second version or republish until the package name and registry state are checked.
+Have an authorized npm maintainer complete the one-time bootstrap in `RELEASING.md`: log in interactively, publish the reviewed `v0.1.0` contents, and configure `publish.yml` as a trusted publisher with direct publish permission. Then verify `npm view opencode-offpeak version`, install `opencode-offpeak@0.1.0` from npm in a clean OpenCode config, and confirm both plugin entrypoints and `/offpeak status`. Do not create another package version or republish until registry state has been checked.
 
 ## Next normal maintenance
 
-Before changing the built-in pricing schedule or model list, inspect the current OpenCode Go pricing page and OpenCode v2 plugin documentation, update the single policy definition and verification date, run `npm run check`, build and pack, verify the supported CLI version range, and publish a new pre-1.0 version only after a registry-authenticated release check.
+Before changing the built-in pricing schedule or model list, inspect the current OpenCode Go pricing page and OpenCode v2 plugin documentation, update the single policy definition and verification date, run `npm run check`, build and pack, verify the supported CLI version range, and publish a new pre-1.0 version only after a registry-authenticated release check. For package releases, keep `RELEASING.md` and the OIDC workflow aligned and verify the npm registry after every publication.
