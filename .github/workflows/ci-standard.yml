@@ -8,7 +8,6 @@ on:
       - '.github/ci-standard/agent_friendliness.py'
       - '.github/workflows/ci-standard-heavy.yml'
       - '.github/workflows/ci-standard.yml'
-      - '.github/workflows/publish.yml'
   workflow_dispatch:
 
 permissions:
