@@ -1,10 +1,12 @@
-import type { Plugin as TuiPlugin } from "@opencode/plugin/tui";
+import { Plugin } from "@opencode/plugin/tui";
+import { assertSupportedOpenCode } from "./compat.js";
 import { formatInTimeZone } from "./policy.js";
 import { OFFPEAK_RPC, type OffpeakRpcOutput } from "./rpc.js";
 
-const plugin: TuiPlugin.Definition = {
+export default Plugin.define({
   id: "opencode-offpeak",
   setup: (context) => {
+    assertSupportedOpenCode(context.app, "TUI");
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
@@ -35,9 +37,9 @@ const plugin: TuiPlugin.Definition = {
       ],
     }));
   },
-};
+});
 
-async function invoke(context: TuiPlugin.Context, rawInput: string): Promise<OffpeakRpcOutput> {
+async function invoke(context: Plugin.Context, rawInput: string): Promise<OffpeakRpcOutput> {
   const input = rawInput.trim().replace(/^\/(?:offpeak|op)(?=\s|$)\s*/i, "");
   const space = input.indexOf(" ");
   const action = (space < 0 ? input : input.slice(0, space)).toLowerCase() || "status";
@@ -57,7 +59,7 @@ async function invoke(context: TuiPlugin.Context, rawInput: string): Promise<Off
       modelID: model.modelID,
     }) as Promise<OffpeakRpcOutput>;
   }
-  if (["cancel", "retry", "resume", "run-now"].includes(action)) {
+  if (["cancel", "remove", "retry", "resume", "run-now"].includes(action)) {
     if (!argument) throw new Error(`Usage: /offpeak ${action} <task-id>`);
     return client.control({ action, id: argument }) as Promise<OffpeakRpcOutput>;
   }
@@ -124,5 +126,3 @@ function summarize(output: OffpeakRpcOutput): string {
     .filter(Boolean)
     .join("\n");
 }
-
-export default plugin;

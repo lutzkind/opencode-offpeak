@@ -1,12 +1,14 @@
-import type { Plugin } from "@opencode/plugin";
+import { Plugin } from "@opencode/plugin";
+import { assertSupportedOpenCode } from "./compat.js";
 import { ConfigRepository } from "./config.js";
 import { OffpeakEngine, type SessionDriver } from "./engine.js";
 import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
 import { QueueRepository } from "./store.js";
 
-const plugin: Plugin.Plugin = {
+export default Plugin.define({
   id: "opencode-offpeak",
   setup: async (context) => {
+    assertSupportedOpenCode(context.app, "server");
     const config = new ConfigRepository(context.options);
     const repository = new QueueRepository({
       get: (key) => context.storage.get(key),
@@ -108,6 +110,12 @@ const plugin: Plugin.Plugin = {
             if (!id) throw new Error("Usage: /offpeak cancel <task-id>");
             await engine.cancel(id);
             return { message: `Cancelled ${id}. Its OpenCode session is preserved.` };
+          case "remove":
+            if (!id) throw new Error("Usage: /offpeak remove <task-id>");
+            await engine.remove(id);
+            return {
+              message: `Removed ${id} from the queue. Its OpenCode session is preserved.`,
+            };
           case "retry":
             if (!id) throw new Error("Usage: /offpeak retry <task-id>");
             await engine.retry(id);
@@ -124,7 +132,7 @@ const plugin: Plugin.Plugin = {
             return { message: `Explicit 15-minute peak-price override active for ${id}.` };
           default:
             throw new Error(
-              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|retry|resume|run-now",
+              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now",
             );
         }
       },
@@ -137,6 +145,4 @@ const plugin: Plugin.Plugin = {
       await rpc.dispose();
     };
   },
-};
-
-export default plugin;
+});

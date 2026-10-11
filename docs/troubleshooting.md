@@ -2,7 +2,11 @@
 
 ## `/offpeak` is not recognized
 
-Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.0`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+
+## `Keymap.Provider is missing` in the TUI
+
+This error means the TUI process is running an OpenCode build older than 2.0.26. Those releases activate TUI plugins outside the keymap provider owner, so `context.keymap.layer()` cannot register `/offpeak`. It is a host-version problem, not a plugin setting: there is no keymap provider to configure. Update OpenCode with `opencode upgrade` and restart the TUI process (a long-running TUI keeps its old code until it restarts). Current releases of this plugin check the host version at startup and report an explicit compatibility error instead.
 
 ## Queue does not start
 

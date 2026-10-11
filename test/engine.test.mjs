@@ -180,6 +180,43 @@ test("queue order, persistence, cancellation, and retry metadata are retained", 
   }
 });
 
+test("remove deletes only terminal tasks and persists the deletion", async () => {
+  const h = await harness("2026-10-12T00:30:00Z");
+  try {
+    const completed = await h.engine.queue({
+      prompt: "completed task",
+      cwd: "/project",
+      model: selectedModel,
+    });
+    await until(async () => (await h.engine.list())[0]?.state === "COMPLETED");
+    await h.engine.setEnabled(false);
+    const queued = await h.engine.queue({
+      prompt: "still queued",
+      cwd: "/project",
+      model: selectedModel,
+    });
+    await assert.rejects(h.engine.remove(queued.id), /cancel it before removing/);
+    await assert.rejects(h.engine.remove("missing-task"), /was not found/);
+    await h.engine.remove(completed.id);
+    assert.deepEqual(
+      (await h.engine.list()).map((task) => task.id),
+      [queued.id],
+    );
+    await h.close();
+    const restarted = await harness("2026-10-12T00:30:00Z", { storage: h.storage });
+    try {
+      assert.deepEqual(
+        (await restarted.engine.list()).map((task) => task.id),
+        [queued.id],
+      );
+    } finally {
+      await restarted.close();
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test("OFF preserves queued tasks and does not start them or permit peak inference", async () => {
   const h = await harness("2026-10-12T00:30:00Z");
   try {

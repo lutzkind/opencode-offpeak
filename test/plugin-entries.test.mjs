@@ -23,6 +23,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
   let rpcHandlers;
   const serverContext = {
     options: { configPath },
+    app: { name: "opencode", version: "2.0.26", channel: "latest" },
     location: { directory: "/fixture-project" },
     storage: {
       async get(key) {
@@ -103,6 +104,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
 
     let layer;
     const tuiContext = {
+      app: { name: "opencode", version: "2.0.26", channel: "latest" },
       keymap: { layer: (factory) => (layer = factory()) },
       client: {
         rpc: (definition) => {
@@ -127,9 +129,60 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.match(toasts.at(-1).message, /Plugin: DISABLED/);
     await command.run("/op queue from the TUI");
     assert.match(toasts.at(-1).message, /Queued [a-f0-9-]+/);
-    assert.equal((await rpcHandlers.control({ action: "list" })).tasks.length, 2);
+    const tasks = (await rpcHandlers.control({ action: "list" })).tasks;
+    assert.equal(tasks.length, 2);
+    await command.run(`/offpeak cancel ${tasks[0].id}`);
+    assert.match(toasts.at(-1).message, /Cancelled/);
+    await command.run(`/offpeak remove ${tasks[0].id}`);
+    assert.match(toasts.at(-1).message, /Removed/);
+    assert.equal((await rpcHandlers.control({ action: "list" })).tasks.length, 1);
   } finally {
     await dispose?.();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("both entrypoints reject unsupported OpenCode hosts with an actionable error", async () => {
+  const oldHost = { name: "opencode", version: "2.0.18", channel: "latest" };
+  await assert.rejects(async () => {
+    await serverPlugin.setup({
+      options: {},
+      app: oldHost,
+      location: { directory: "/fixture-project" },
+      storage: { get: async () => undefined, set: async () => undefined },
+      session: {
+        hook: async () => ({ dispose: async () => undefined }),
+        create: async () => ({ id: "session" }),
+        prompt: async () => ({}),
+        wait: async () => undefined,
+        get: async () => ({}),
+        interrupt: async () => ({}),
+      },
+      rpc: { register: async () => ({ dispose: async () => undefined }) },
+    });
+  }, /requires OpenCode >=2\.0\.26 <2\.1\.0; this server host runs 2\.0\.18/);
+  await assert.rejects(async () => {
+    await tuiPlugin.setup({
+      app: oldHost,
+      keymap: { layer: () => assert.fail("keymap.layer must not run on an unsupported host") },
+      client: { rpc: () => ({ control: async () => ({}) }) },
+      location: { directory: "/fixture-project" },
+      ui: {
+        model: { current: () => undefined },
+        toast: { show: () => undefined },
+      },
+    });
+  }, /requires OpenCode >=2\.0\.26 <2\.1\.0; this TUI host runs 2\.0\.18/);
+  await assert.rejects(async () => {
+    await tuiPlugin.setup({
+      app: undefined,
+      keymap: { layer: () => assert.fail("keymap.layer must not run without a host version") },
+      client: { rpc: () => ({ control: async () => ({}) }) },
+      location: { directory: "/fixture-project" },
+      ui: {
+        model: { current: () => undefined },
+        toast: { show: () => undefined },
+      },
+    });
+  }, /this TUI host runs an unknown version/);
 });

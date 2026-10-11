@@ -1,3 +1,8 @@
+export {
+  assertSupportedOpenCode,
+  isSupportedOpenCodeVersion,
+  SUPPORTED_OPENCODE_RANGE,
+} from "./compat.js";
 export type {
   OffpeakConfig,
   RunMode,

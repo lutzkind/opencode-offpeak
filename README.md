@@ -4,15 +4,15 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 
 `opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. The request guard runs at OpenCode's outbound model transport boundary; a task that reaches peak pricing pauses before its next provider request and keeps its session and project context.
 
-> **Compatibility:** OpenCode CLI `>=2.0.26 <2.1.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26. Later API versions are not claimed until CI and runtime checks cover them.
+> **Compatibility:** OpenCode CLI `>=2.0.26 <2.1.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime. Later API versions are not claimed until CI and runtime checks cover them.
 
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1
 ```
 
-This installs the released `v0.1.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.1.1` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -25,6 +25,7 @@ In the OpenCode TUI:
 /offpeak queue Add a focused test for the date parser and update its documentation.
 /offpeak list
 /offpeak cancel <task-id>
+/offpeak remove <task-id>
 ```
 
 Select the provider and model first. Queueing captures the current model and working directory; it does not send the task prompt to the provider. Tasks run sequentially when policy permits.
@@ -43,6 +44,7 @@ Select the provider and model first. Queueing captures the current model and wor
 - `/offpeak status` shows the toggle, mode, model policy, price state, request decision, next transition, queue counts, active session, and any override.
 - `/offpeak list` shows task IDs, states, stored session IDs, and the last failure.
 - `/offpeak cancel <task-id>` cancels the task and preserves its session record.
+- `/offpeak remove <task-id>` removes a terminal (`COMPLETED`, `FAILED`, or `CANCELLED`) task from the queue. Active tasks must be cancelled first; the OpenCode session is preserved.
 - `/offpeak retry <task-id>` explicitly retries a failed task in its stored session.
 - `/offpeak resume <task-id>` requests a waiting task's continuation in `queue` mode.
 - `/offpeak run-now <task-id>` grants a visible, task-scoped 15-minute peak-price override. It requires the plugin to be ON and can consume OpenCode Go allowance at peak rates.

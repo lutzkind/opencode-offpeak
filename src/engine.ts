@@ -200,6 +200,19 @@ export class OffpeakEngine {
     this.#requestPump();
   }
 
+  async remove(taskID: string): Promise<void> {
+    await this.#lock.run(async () => {
+      const queue = await this.#repo.load();
+      const task = queue.tasks.find((candidate) => candidate.id === taskID);
+      if (!task) throw new Error(`Task ${taskID} was not found.`);
+      if (!["COMPLETED", "FAILED", "CANCELLED"].includes(task.state)) {
+        throw new Error(`Task ${taskID} is ${task.state}; cancel it before removing it.`);
+      }
+      queue.tasks = queue.tasks.filter((candidate) => candidate.id !== taskID);
+      await this.#repo.save(queue);
+    });
+  }
+
   async retry(taskID: string): Promise<void> {
     await this.#updateTask(taskID, (task) => {
       if (task.state !== "FAILED")
