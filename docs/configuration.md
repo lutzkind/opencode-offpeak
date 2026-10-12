@@ -19,7 +19,7 @@ If `policies` is omitted, the built-in DeepSeek/OpenCode Go policy is used. If y
 
 - `schemaVersion`: must be `1`.
 - `enabled`: boolean, default `true`. `/offpeak on|off` updates this same value.
-- `mode`: `auto` (default), `queue`, or `guard`.
+- `mode`: `auto` (default), `queue`, or `guard`. In `auto`, normal interactive peak requests are held at the provider boundary and released when off-peak returns; `queue` and `guard` block interactive peak requests immediately.
 - `displayTimeZone`: valid IANA timezone for status output; defaults to the system timezone.
 - `policies`: complete list of pricing policy definitions. See [pricing policies](pricing-policies.md).
 

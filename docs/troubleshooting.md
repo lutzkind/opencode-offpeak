@@ -2,7 +2,7 @@
 
 ## `/offpeak` is not recognized
 
-Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
 
 ## `Keymap.Provider is missing` in the TUI
 
@@ -17,6 +17,10 @@ Run `/offpeak status` and `/offpeak list`. Confirm the plugin is ON, `mode` is n
 Check status for `PEAK`, `UNKNOWN`, or `UNTRACKED`. `UNKNOWN` for a configured provider usually means a new model ID or invalid policy/config. Fix the policy using current provider pricing sources. Do not disable the plugin as a price override.
 
 If you intentionally accept peak pricing for a queued task, turn the plugin ON and use `/offpeak run-now <task-id>`. The override expires after 15 minutes.
+
+## Interactive message waits at peak
+
+In `auto` mode, a supported interactive request sent during a peak window is held at the provider boundary instead of being discarded, and the same session proceeds automatically when off-peak returns; no second message is needed. `/offpeak status` shows it under `Interactive` while it waits. In `queue` or `guard` mode, and while the plugin is OFF, interactive peak requests are blocked immediately. If a held request fails closed because the plugin or server shut down, resend it after the server is back.
 
 ## Task is waiting
 

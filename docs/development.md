@@ -18,7 +18,7 @@ npm test
 npm pack --dry-run
 ```
 
-`npm test` compiles TypeScript and runs Node's built-in test runner. Pricing and queue tests use deterministic timestamps, fake sessions, and local temporary storage. They do not make provider requests or require API credentials.
+`npm test` compiles TypeScript and runs Node's built-in test runner. Pricing and queue tests use deterministic timestamps, fake sessions, and local temporary storage. Boundary-wait tests additionally use a manual clock whose timers fire only when the test advances time, proving releases come from the scheduled pricing transition. They do not make provider requests or require API credentials.
 
 The suite includes a real OpenCode v2 TUI smoke test (`test/tui-smoke.test.mjs`). When the `opencode` CLI and `tmux` are on `PATH`, it packs the repository, loads the packed package into an isolated OpenCode configuration with `--standalone`, asserts the plugin reconciliation has no `Keymap.Provider is missing` failure, and drives `/offpeak status` in the live TUI. Without those prerequisites the test skips; set `OPENCODE_OFFPEAK_OPENCODE_BIN` to point at a specific OpenCode binary. The smoke test never contacts a model provider and never touches the user's OpenCode configuration.
 

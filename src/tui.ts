@@ -97,6 +97,7 @@ function summarize(output: OffpeakRpcOutput): string {
     displayTimeZone?: string;
     queued?: number;
     waiting?: number;
+    interactiveWaiting?: number;
     running?: { id?: string; sessionID?: string; state?: string };
     failed?: number;
     configError?: string;
@@ -117,6 +118,9 @@ function summarize(output: OffpeakRpcOutput): string {
     `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}${status.pricingState === "UNTRACKED" ? " (untracked policy)" : ""}`,
     `Next transition: ${next}`,
     `Queue: ${status.queued ?? 0} queued, ${status.waiting ?? 0} waiting, ${status.failed ?? 0} failed`,
+    status.interactiveWaiting
+      ? `Interactive: ${status.interactiveWaiting} request${status.interactiveWaiting === 1 ? "" : "s"} waiting for off-peak`
+      : "",
     `Running: ${status.running?.id ?? "none"}${status.running?.sessionID ? ` (session ${status.running.sessionID})` : ""}`,
     status.configError ? `Config error: ${status.configError}` : "",
     status.enabled

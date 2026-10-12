@@ -83,9 +83,24 @@ export class Mutex {
   }
 }
 
+export interface TimerClock {
+  setTimeout(callback: () => void, milliseconds: number): NodeJS.Timeout;
+  clearTimeout(timer: NodeJS.Timeout): void;
+}
+
+const systemTimerClock: TimerClock = {
+  setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
 export class AsyncSignal {
   #version = 0;
   #waiters = new Set<() => void>();
+  readonly #clock: TimerClock;
+
+  constructor(clock: TimerClock = systemTimerClock) {
+    this.#clock = clock;
+  }
 
   version(): number {
     return this.#version;
@@ -105,12 +120,12 @@ export class AsyncSignal {
     await new Promise<void>((resolve) => {
       let timer: NodeJS.Timeout | undefined;
       const finish = () => {
-        if (timer) clearTimeout(timer);
+        if (timer) this.#clock.clearTimeout(timer);
         this.#waiters.delete(finish);
         resolve();
       };
       this.#waiters.add(finish);
-      if (timeoutMs !== undefined) timer = setTimeout(finish, Math.max(0, timeoutMs));
+      if (timeoutMs !== undefined) timer = this.#clock.setTimeout(finish, Math.max(0, timeoutMs));
       if (this.#version !== version) finish();
     });
   }

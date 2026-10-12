@@ -47,6 +47,8 @@ export interface EngineStatus {
   queued: number;
   running?: { id: string; sessionID?: string; state: TaskState };
   waiting: number;
+  /** Interactive requests currently held at the pricing boundary (auto mode). */
+  interactiveWaiting: number;
   failed: number;
   tasks: OffpeakTask[];
   configPath: string;
@@ -86,8 +88,10 @@ export class OffpeakEngine {
   readonly #id: () => string;
   readonly #onError: (error: unknown) => void;
   readonly #lock = new Mutex();
-  readonly #signal = new AsyncSignal();
+  readonly #signal: AsyncSignal;
   readonly #runners = new Set<string>();
+  readonly #interactiveWaiters = new Set<number>();
+  #nextInteractiveWaiter = 0;
   #timer: NodeJS.Timeout | undefined;
   #watcher: FSWatcher | undefined;
   #disposed = false;
@@ -99,6 +103,7 @@ export class OffpeakEngine {
     this.#config = options.config;
     this.#sessions = options.sessions;
     this.#clock = options.clock ?? systemClock;
+    this.#signal = new AsyncSignal(this.#clock);
     this.#id = options.id ?? (() => crypto.randomUUID());
     this.#onError = options.onError ?? (() => undefined);
   }
@@ -312,6 +317,7 @@ export class OffpeakEngine {
           }
         : {}),
       waiting: tasks.filter((task) => task.state === "WAITING_OFFPEAK").length,
+      interactiveWaiting: this.#interactiveWaiters.size,
       failed: tasks.filter((task) => task.state === "FAILED").length,
       tasks,
       configPath: settings.path,
@@ -324,7 +330,7 @@ export class OffpeakEngine {
     const first = await this.#config.read();
     if (!first.config)
       throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${first.error}`);
-    let decision = evaluatePricing(
+    const decision = evaluatePricing(
       first.config.policies,
       input.providerID,
       input.modelID,
@@ -339,22 +345,59 @@ export class OffpeakEngine {
 
     if (task && first.config.mode === "auto") {
       await this.#transition(task.id, "WAITING_OFFPEAK");
+      await this.#holdUntilAllowed(input, task);
+      return;
+    }
+
+    // A normal interactive request in auto mode is held at the boundary instead of
+    // being discarded; the same request and session continue when pricing allows.
+    if (!task && first.config.enabled && first.config.mode === "auto") {
+      await this.#holdUntilAllowed(input);
+      return;
+    }
+
+    if (task) await this.#transition(task.id, "WAITING_OFFPEAK");
+    const reason = !first.config.enabled
+      ? "OpenCode Offpeak is disabled; automatic task execution is paused and peak pricing remains blocked."
+      : `${input.providerID}/${input.modelID} is in a peak-price window under policy ${decision.policy?.id}.`;
+    throw new PricingBlockedError(
+      task
+        ? `${reason} Use /offpeak run-now <task-id> for an explicit 15-minute task override.`
+        : `${reason} Interactive requests wait for off-peak automatically only in auto mode; queue and guard modes block them immediately.`,
+    );
+  }
+
+  /**
+   * Holds a request at the provider transport boundary until the plugin is enabled
+   * and the pricing policy allows it. Used by queue-owned auto tasks and by normal
+   * interactive auto-mode requests.
+   *
+   * The hard guarantee: the caller never crosses the transport boundary while
+   * pricing is blocked. Wake-ups come from the shared config signal and one timer
+   * for the policy's next transition. Queue tasks move through WAITING_OFFPEAK and
+   * may use their explicit override; interactive requests are tracked in memory
+   * (for status) and fail closed on shutdown instead of guessing the price state.
+   */
+  async #holdUntilAllowed(input: GuardInput, task?: OffpeakTask): Promise<void> {
+    const waiter = task ? undefined : this.#registerInteractiveWaiter();
+    try {
       while (!this.#disposed) {
         const signalVersion = this.#signal.version();
         const settings = await this.#config.read();
         if (!settings.config)
           throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${settings.error}`);
-        decision = evaluatePricing(
+        const decision = evaluatePricing(
           settings.config.policies,
           input.providerID,
           input.modelID,
           this.#clock.now(),
         );
         if (decision.state === "UNKNOWN") {
-          await this.#setTaskError(task.id, decision.reason);
+          if (task) await this.#setTaskError(task.id, decision.reason);
           throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${decision.reason}`);
         }
         if (
+          task &&
           settings.config.enabled &&
           this.#hasOverride(await this.#taskByID(task.id), this.#clock.now())
         ) {
@@ -362,7 +405,7 @@ export class OffpeakEngine {
           return;
         }
         if (settings.config.enabled && decision.allowed) {
-          await this.#transition(task.id, "RUNNING");
+          if (task) await this.#transition(task.id, "RUNNING");
           return;
         }
         if (settings.config.enabled && decision.nextTransition === undefined) {
@@ -377,15 +420,15 @@ export class OffpeakEngine {
         await this.#signal.waitSince(signalVersion, delay);
       }
       throw new PricingBlockedError("Offpeak plugin is shutting down; request blocked.");
+    } finally {
+      if (waiter !== undefined) this.#interactiveWaiters.delete(waiter);
     }
+  }
 
-    if (task) await this.#transition(task.id, "WAITING_OFFPEAK");
-    const reason = !first.config.enabled
-      ? "OpenCode Offpeak is disabled; automatic task execution is paused and peak pricing remains blocked."
-      : `${input.providerID}/${input.modelID} is in a peak-price window under policy ${decision.policy?.id}.`;
-    throw new PricingBlockedError(
-      `${reason} Use /offpeak run-now <task-id> for an explicit 15-minute task override.`,
-    );
+  #registerInteractiveWaiter(): number {
+    const waiter = ++this.#nextInteractiveWaiter;
+    this.#interactiveWaiters.add(waiter);
+    return waiter;
   }
 
   #hasOverride(task: OffpeakTask | undefined, nowMs: number): boolean {

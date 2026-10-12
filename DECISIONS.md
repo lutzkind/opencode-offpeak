@@ -51,3 +51,7 @@ The live `Keymap.Provider is missing` failure came from a long-running OpenCode 
 ## 2026-10-11: Terminal task records can be removed
 
 `/offpeak remove <task-id>` deletes a `COMPLETED`, `FAILED`, or `CANCELLED` record from the queue document. Active tasks must be cancelled first, and the OpenCode session is never deleted. This keeps queue hygiene possible without weakening the OFF/override semantics or the fail-closed recovery rules.
+
+## 2026-10-12: Interactive requests wait at the boundary in auto mode
+
+A normal interactive OpenCode request for a supported model was thrown away at peak pricing even though the queue-owned `auto` path already waited for the next boundary. The guard now holds the pending interactive request at the transport boundary when the plugin is ON and mode is `auto`: no task record, no new session, no synthesized prompt, and no persistent state. The hold uses the existing shared signal plus one timer for the policy's `nextTransition`, is released exactly once when the plugin is enabled and the policy allows, and is shown as `interactiveWaiting` in `/offpeak status`. `queue` and `guard` modes keep blocking interactive requests immediately; OFF stays passive and never releases a held request; and shutdown fails held requests closed instead of releasing them under uncertain pricing. Tests use a manual clock to prove the release comes from the scheduled boundary itself, not from an external wake-up.

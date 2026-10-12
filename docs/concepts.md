@@ -10,11 +10,13 @@ Turning the plugin OFF changes only automation. It does not change pricing evalu
 
 ## Modes
 
-`auto` starts and resumes queued tasks when policy allows. `queue` starts queued tasks when allowed but waits for a manual `/offpeak resume` after a peak pause. `guard` enforces interactive model requests and does not automatically start queued tasks.
+`auto` starts and resumes queued tasks when policy allows, and holds normal interactive peak requests until off-peak returns. `queue` starts queued tasks when allowed but waits for a manual `/offpeak resume` after a peak pause, and blocks interactive peak requests immediately. `guard` enforces interactive model requests without automatically starting queued tasks or holding interactive requests for a later window.
 
 ## Boundary behavior
 
 The plugin checks immediately before OpenCode's provider HTTP/WebSocket transport. A request already accepted by the provider cannot be withdrawn. Local tool operations already running are allowed to settle; the next paid model request is the enforcement boundary.
+
+In `auto` mode, an interactive message sent during peak pricing is held at that boundary, and the same session continues automatically when off-peak returns; no second message is needed. The release comes from the scheduled pricing transition (or a config change), never from another message, a status command, or a manual wake-up. `queue`/`guard` modes and the OFF state block interactive peak requests immediately, and a plugin shutdown fails a held request closed rather than sending it.
 
 ## Lifecycle authority
 
