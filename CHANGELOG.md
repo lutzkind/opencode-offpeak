@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 - 2026-10-12
+
+- Normal interactive OpenCode requests now wait at the pricing boundary in `auto` mode instead of being discarded. The same request and session proceed automatically at the policy's next off-peak transition, with no second message, no duplicate prompt, no new session, and zero provider traffic while pricing is blocked.
+- The interactive hold uses the existing shared signal and one boundary timer (`nextTransition`); it adds no daemon, scheduler, database, or polling loop, and fails closed if the plugin shuts down while a request is waiting.
+- `/offpeak status` reports held interactive requests (`Interactive: N request(s) waiting for off-peak`).
+- `queue`/`guard` modes still block interactive peak requests immediately, and OFF stays passive: it never releases a held request and remains no price override.
+- Added deterministic manual-clock regression tests for the interactive hold, boundary release, single release, same-session preservation, OFF passivity, fail-closed shutdown, UNKNOWN/UNTRACKED handling, and unchanged queue-owned auto resume.
+
 ## 0.1.1 - 2026-10-11
 
 - Both entrypoints now declare and enforce the tested OpenCode support range `>=2.0.26 <2.1.0` through `engines.opencode` plus a startup compatibility check. Unsupported hosts fail with an actionable version error instead of the confusing `Keymap.Provider is missing` runtime failure.

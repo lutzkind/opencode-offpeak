@@ -37,6 +37,42 @@ class FakeClock {
   }
 }
 
+class ManualClock {
+  constructor(now) {
+    this.value = Date.parse(now);
+    this.timers = new Set();
+    this.sequence = 0;
+  }
+  now = () => this.value;
+  setTimeout = (callback, milliseconds) => {
+    const timer = { id: ++this.sequence, at: this.value + Math.max(0, milliseconds), callback };
+    this.timers.add(timer);
+    return timer;
+  };
+  clearTimeout = (timer) => {
+    this.timers.delete(timer);
+  };
+  set(value) {
+    this.value = Date.parse(value);
+  }
+  async advanceTo(value) {
+    this.value = Date.parse(value);
+    await this.flush();
+  }
+  async flush() {
+    for (let round = 0; round < 200; round += 1) {
+      const due = [...this.timers].filter((timer) => timer.at <= this.value);
+      if (!due.length) return;
+      for (const timer of due) {
+        this.timers.delete(timer);
+        timer.callback();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    throw new Error("ManualClock did not settle");
+  }
+}
+
 class FakeSessions {
   next = 0;
   prompts = [];
@@ -84,7 +120,7 @@ async function until(predicate, message = "condition was not reached") {
 
 async function harness(now = "2026-10-12T00:30:00Z", options = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-test-"));
-  const clock = new FakeClock(now);
+  const clock = options.clock ?? new FakeClock(now);
   const storage = options.storage ?? new MemoryStorage();
   const sessions = options.sessions ?? new FakeSessions();
   const config = new ConfigRepository({
@@ -797,6 +833,215 @@ test("invalid configuration and unknown configured models block before transport
       h.engine.guardRequest({ sessionID: "interactive", ...selectedModel, transport: "http" }),
       PricingBlockedError,
     );
+  } finally {
+    await h.close();
+  }
+});
+
+test("auto mode holds a normal interactive request at the pricing boundary and releases it at the scheduled transition", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  let releases = 0;
+  let rejections = 0;
+  let providerRequests = 0;
+  const pending = h.engine
+    .guardRequest({ sessionID: "interactive-session-1", ...selectedModel, transport: "http" })
+    .then(
+      () => {
+        releases += 1;
+        providerRequests += 1;
+      },
+      () => {
+        rejections += 1;
+      },
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal(releases, 0);
+    assert.equal(rejections, 0);
+    assert.equal(providerRequests, 0);
+    assert.deepEqual(await h.engine.list(), []);
+    assert.equal(h.sessions.createdTasks.length, 0);
+    assert.equal(h.sessions.prompts.length, 0);
+
+    // Only the scheduled pricing-boundary timer fires here: no config edit, no
+    // new user input, no status command, and no external wake-up.
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => releases === 1);
+    assert.equal(providerRequests, 1);
+    assert.equal(rejections, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(providerRequests, 1);
+    assert.equal(releases, 1);
+    assert.equal(rejections, 0);
+    assert.equal(h.sessions.createdTasks.length, 0);
+    assert.equal(h.sessions.prompts.length, 0);
+    assert.deepEqual(await h.engine.list(), []);
+    await pending;
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF does not release a held interactive request and stays passive at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  let releases = 0;
+  let rejections = 0;
+  const pending = h.engine
+    .guardRequest({ sessionID: "interactive-off", ...selectedModel, transport: "http" })
+    .then(
+      () => {
+        releases += 1;
+      },
+      () => {
+        rejections += 1;
+      },
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    await h.engine.setEnabled(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(releases, 0);
+    assert.equal(rejections, 0);
+
+    // A fresh interactive peak request while OFF is blocked immediately, not held.
+    await assert.rejects(
+      h.engine.guardRequest({
+        sessionID: "interactive-off-2",
+        ...selectedModel,
+        transport: "http",
+      }),
+      PricingBlockedError,
+    );
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 1);
+
+    // The off-peak boundary passes while OFF: the held request is not released.
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(releases, 0);
+    assert.equal(rejections, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 1);
+
+    await h.engine.setEnabled(true);
+    await until(async () => releases === 1);
+    assert.equal(rejections, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+    await pending;
+  } finally {
+    await h.close();
+  }
+});
+
+test("plugin shutdown while an interactive request waits fails closed without transport", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  let providerRequests = 0;
+  const outcome = h.engine
+    .guardRequest({ sessionID: "interactive-shutdown", ...selectedModel, transport: "http" })
+    .then(
+      () => {
+        providerRequests += 1;
+        return undefined;
+      },
+      (error) => error,
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    await h.engine.dispose();
+    const error = await outcome;
+    assert.ok(error instanceof PricingBlockedError);
+    assert.match(error.message, /shutting down/);
+    assert.equal(providerRequests, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("queue and guard modes block interactive requests immediately instead of holding them", async () => {
+  const h = await harness("2026-10-12T01:30:00Z");
+  try {
+    await h.config.write({ ...defaultConfig(), mode: "guard" });
+    await assert.rejects(
+      h.engine.guardRequest({
+        sessionID: "interactive-guard",
+        ...selectedModel,
+        transport: "http",
+      }),
+      PricingBlockedError,
+    );
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+
+    await h.config.write({ ...defaultConfig(), mode: "queue" });
+    await assert.rejects(
+      h.engine.guardRequest({
+        sessionID: "interactive-queue",
+        ...selectedModel,
+        transport: "http",
+      }),
+      PricingBlockedError,
+    );
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("UNKNOWN configured models fail closed and UNTRACKED providers keep passing through", async () => {
+  const h = await harness("2026-10-12T01:30:00Z");
+  try {
+    await assert.rejects(
+      h.engine.guardRequest({
+        sessionID: "interactive-unknown",
+        providerID: "opencode-go",
+        modelID: "unpublished-model",
+        transport: "http",
+      }),
+      PricingBlockedError,
+    );
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+
+    await h.engine.guardRequest({
+      sessionID: "interactive-untracked",
+      providerID: "unrelated-provider",
+      modelID: "unrelated-model",
+      transport: "http",
+    });
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("queue-owned auto tasks still resume at the scheduled boundary without external wake-ups", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  let providerRequests = 0;
+  h.sessions.behavior = async ({ sessionID }) => {
+    await h.engine.guardRequest({ sessionID, ...selectedModel, transport: "http" });
+    providerRequests += 1;
+  };
+  try {
+    const task = await h.engine.queue({
+      prompt: "queue boundary resume",
+      cwd: "/project",
+      model: selectedModel,
+    });
+    await until(
+      async () =>
+        (await h.engine.list()).find((item) => item.id === task.id)?.state === "WAITING_OFFPEAK",
+    );
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(
+      async () =>
+        (await h.engine.list()).find((item) => item.id === task.id)?.state === "COMPLETED",
+    );
+    const stored = (await h.engine.list()).find((item) => item.id === task.id);
+    assert.equal(providerRequests, 1);
+    assert.equal(h.sessions.createdTasks.length, 1);
+    assert.equal(stored.sessionID, h.sessions.createdTasks[0].id);
   } finally {
     await h.close();
   }

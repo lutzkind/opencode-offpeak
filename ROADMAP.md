@@ -6,7 +6,7 @@
 - DeepSeek via OpenCode Go policy.
 - Persistent sequential queue, ON/OFF, status/list/cancel/retry/resume controls.
 - Request-boundary HTTP and experimental WebSocket guard.
-- Same-session automatic pause/resume and task-scoped 15-minute override.
+- Same-session automatic pause/resume, interactive auto-mode boundary hold, and task-scoped 15-minute override.
 - Fail-closed validation and conservative ambiguous-crash recovery.
 
 ## Possible later work

@@ -2,13 +2,13 @@
 
 ## Current public distribution
 
-`v0.1.1` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
+`v0.1.2` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2
 ```
 
-`v0.1.0` remains available at its own tag, but `v0.1.1` is the canonical repaired release: it adds the tested OpenCode compatibility enforcement, the documented `Plugin.define(...)` TUI shape, `/offpeak remove`, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
+`v0.1.0` and `v0.1.1` remain available at their own tags, but `v0.1.2` is the canonical release: it adds the `auto`-mode interactive boundary hold (a supported interactive peak request stays pending and proceeds in the same session when off-peak returns) on top of the v0.1.1 compatibility enforcement, the documented `Plugin.define(...)` TUI shape, `/offpeak remove`, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
 
 ## Optional npm distribution
 

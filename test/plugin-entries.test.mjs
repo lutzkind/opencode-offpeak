@@ -7,6 +7,17 @@ import { defaultConfig, PricingBlockedError } from "../dist/index.js";
 import serverPlugin from "../dist/server.js";
 import tuiPlugin from "../dist/tui.js";
 
+async function assertStillPending(outcome, milliseconds) {
+  const result = await Promise.race([
+    outcome.then(
+      () => "settled",
+      () => "settled",
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("pending"), milliseconds)),
+  ]);
+  assert.equal(result, "pending");
+}
+
 test("OpenCode v2 server and TUI entrypoints register the request gate and /offpeak RPC commands", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-plugin-test-"));
   const configPath = path.join(root, "offpeak.json");
@@ -68,22 +79,39 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
   };
 
   const dispose = await serverPlugin.setup(serverContext);
+  const heldOutcome = hooks
+    .get("http.request")({
+      sessionID: "interactive-session",
+      model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+      request: new Request("http://fixture.invalid"),
+    })
+    .then(
+      () => "resolved",
+      (error) => error,
+    );
   try {
     assert.equal(rpcDefinition.id, "opencode-offpeak");
     assert.ok(hooks.has("http.request"));
     assert.ok(hooks.has("experimental.ws.handshake"));
     assert.ok(hooks.has("experimental.ws.send"));
+
+    // auto + ON + peak: the server entrypoint holds the interactive request at the
+    // boundary instead of discarding it.
+    await assertStillPending(heldOutcome, 60);
+
+    const off = await rpcHandlers.control({ action: "off" });
+    assert.match(off.message, /Peak pricing is still blocked/);
+    // OFF never releases a held request and is not a price override.
+    await assertStillPending(heldOutcome, 60);
+    // A fresh interactive peak request while OFF is blocked immediately.
     await assert.rejects(
       hooks.get("http.request")({
-        sessionID: "interactive-session",
+        sessionID: "interactive-off",
         model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
         request: new Request("http://fixture.invalid"),
       }),
       PricingBlockedError,
     );
-
-    const off = await rpcHandlers.control({ action: "off" });
-    assert.match(off.message, /Peak pricing is still blocked/);
     const queued = await rpcHandlers.control({
       action: "queue",
       prompt: "fixture task",
@@ -101,6 +129,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(status.status.enabled, false);
     assert.equal(status.status.queued, 1);
     assert.equal(status.status.requestsAllowed, false);
+    assert.equal(status.status.interactiveWaiting, 1);
 
     let layer;
     const tuiContext = {
@@ -140,6 +169,11 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     await dispose?.();
     await rm(root, { recursive: true, force: true });
   }
+  // Shutdown fails the still-held request closed instead of releasing it under
+  // an uncertain pricing state.
+  const shutdown = await heldOutcome;
+  assert.ok(shutdown instanceof PricingBlockedError);
+  assert.match(shutdown.message, /shutting down/);
 });
 
 test("both entrypoints reject unsupported OpenCode hosts with an actionable error", async () => {
