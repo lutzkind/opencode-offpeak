@@ -2,19 +2,54 @@
 
 ## Release status
 
-`opencode-offpeak` v0.1.1 is the canonical repaired release:
+`opencode-offpeak` v0.1.2 is the canonical release:
+
+```sh
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2
+```
+
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.2`
+- Tag commit: `7eda2aa7e7eb09254b3b5b86659297076fc0f754` (merge of PR #7)
+- Fix commit: `2792d4bd9e9c65c044eccd2ec473d33366677bff`
+- Attached `opencode-offpeak-0.1.2.tgz` SHA-256: `b16da51a183849791347813add2b2002f0bcc1244ff39d4f8a66b32b969c67b3` (matches `npm pack` from the tag commit)
+- The `v0.1.0` and `v0.1.1` tags were not mutated and remain installable.
+
+The live environment installs the exact tag: `/root/.config/opencode/opencode.json` contains `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`, `/api/plugin` reports `version 7eda2aa7e7eb09254b3b5b86659297076fc0f754` with server and TUI features active, and the live server loads `src/server.ts` from the tag cache.
+
+## 2026-10-12 interactive boundary wait (v0.1.2)
+
+**Defect:** a normal interactive OpenCode request for a supported model was thrown away at peak pricing. Queue-owned `auto` tasks already waited for the next boundary, but `guardRequest()` had no interactive equivalent, so a user message sent during peak failed with `PricingBlockedError` and nothing happened when off-peak returned.
+
+**Fix:**
+
+- `guardRequest()` now holds a normal interactive request at the provider transport boundary when the plugin is ON, mode is `auto`, and the model matches a configured policy that is currently blocked. It creates no task, session, or persistent state.
+- The hold reuses the existing shared signal plus one timer scheduled for the policy's `nextTransition`; it is released exactly once when the plugin is enabled and pricing allows. There is no new daemon, scheduler, database, or polling loop.
+- `queue`/`guard` modes still block interactive peak requests immediately; OFF stays passive and never releases a held request; UNKNOWN still fails closed; UNTRACKED still passes through; shutdown fails a held request closed instead of releasing it under an uncertain pricing state.
+- `/offpeak status` reports held interactive requests (`interactiveWaiting`).
+- Deterministic manual-clock tests cover the hold, the boundary release without external wake-ups, single release, same-session preservation, no duplicate prompt/session, OFF passivity, fail-closed shutdown, mode semantics, and unchanged queue-owned auto resume. The server entrypoint test exercises the real hook end to end.
+
+**Live validation (OpenCode 2.0.26, 2026-10-12):**
+
+- Three consecutive real-TUI holds on the shared live server with a short deterministic test policy (temporary policy scoped to `opencode-go/deepseek-v4.1-flash`, real time off-peak): each interactive reply completed exactly at the scheduled boundary with no further input; each session ended with exactly one user and one assistant message.
+- One live queue-owned task queued during a blocked window went `WAITING_OFFPEAK` and resumed automatically at the boundary in one session with one prompt.
+- A final combined check against the installed `#v0.1.2` tag: interactive reply at the boundary (`offpeak final ok`) and queue-owned task `d14f1a41-2b6c-461a-a484-7e3d042fbb32` completed at the boundary with one session/prompt; both temporary smoke tasks were removed afterwards and the original policy was restored.
+- An isolated single-instance TUI with a local OpenAI-compatible fixture provider showed `Interactive: 2 requests waiting for off-peak` while held, zero fixture traffic until the boundary, and the first provider request at the boundary minute; the session ended with one user and one assistant message (the second request was OpenCode's own title generation).
+- No peak-priced traffic was produced: all released provider calls occurred at real off-peak times, and the fixture tests contacted no provider at all.
+
+**Operational notes from the live run:**
+
+- In the shared live server, plugins load once per workspace, so the in-memory `interactiveWaiting` count is only visible from the plugin instance that holds the request; the live status probes may show `0` even while a request is held (the hold/release behavior itself is unaffected). The counter rendering was verified in the isolated single-instance real-TUI fixture and in the automated entrypoint tests.
+- A pre-existing terminal `COMPLETED` record from the previous closeout (`da6de0b6-9475-41c4-a698-c9c241ff8585`) was removed accidentally during the first live script's task-ID extraction (the extraction picked the first UUID in the list toast). Its OpenCode session is preserved; record removal is a supported operation and deletes no session. The queue was otherwise left clean.
+
+## v0.1.1 (historical)
+
+`opencode-offpeak` v0.1.1 remains installable from its own tag:
 
 ```sh
 opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.1`
-- Tag commit: `764d1ab4b095a17813d0f63d6fdf0d92e8a1d248` (merge of PR #6)
-- Repair commit: `5e9fa10df2178937153500b4984bb1278bf9ca51`
-- Attached `opencode-offpeak-0.1.1.tgz` SHA-256: `36a3b14a1f22be656d5838b2edc2aa7d3a8d9208f457b48d9c5bb589d14a0495` (matches `npm pack` from the tag commit)
-- The `v0.1.0` tag was not mutated. `v0.1.0` remains installable from its own tag.
-
-The live environment installs the exact tag: `/root/.config/opencode/opencode.json` contains `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1`, `/api/plugin` reports `version 764d1ab4b095a17813d0f63d6fdf0d92e8a1d248` with server and TUI features active, and the live server loads `src/server.ts` from the tag cache.
+The release is at `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.1`. Its tag points to `764d1ab4b095a17813d0f63d6fdf0d92e8a1d248` (merge of PR #6), and the attached `opencode-offpeak-0.1.1.tgz` has SHA-256 `36a3b14a1f22be656d5838b2edc2aa7d3a8d9208f457b48d9c5bb589d14a0495`. It added the tested OpenCode compatibility enforcement, the documented `Plugin.define(...)` TUI shape, `/offpeak remove`, and the real-TUI regression smoke test.
 
 ## 2026-10-12 keymap repair (root cause and fix)
 
@@ -71,10 +106,10 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
-- Package: `opencode-offpeak@0.1.1`, MIT
+- Package: `opencode-offpeak@0.1.2`, MIT
 - Verified CLI: OpenCode v2.0.26
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
-- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.1`
+- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
 
 ## Architecture
@@ -118,6 +153,8 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 - OpenCode compatibility is intentionally limited to the declared v2 range until later versions are tested. Hosts before 2.0.26 fail with the explicit compatibility error; the TUI process must be restarted after `opencode upgrade` to pick up a newer binary.
 - WebSocket request hooks are experimental in OpenCode v2.
+- An interactive request held in `auto` mode lives in the running server process; a plugin/server shutdown fails it closed instead of replaying it.
+- In a shared OpenCode server, plugins load once per workspace, so the in-memory `interactiveWaiting` count is visible only from the instance that holds the request. The hold and release behavior is instance-independent and unaffected.
 - A provider request already accepted before a pricing boundary cannot be recalled.
 - Ambiguous provider outcomes after a crash are not replayed automatically; delivery is not exactly-once.
 - Providers without a configured policy are `UNTRACKED`; this plugin does not guard them until a verified policy is added.
@@ -126,7 +163,7 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 ## User action required
 
-None. The v0.1.1 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. If a terminal still runs a TUI started before an `opencode upgrade`, exit and relaunch it so the TUI executes the supported version; the plugin now reports that condition explicitly.
+None. The v0.1.2 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. If a terminal still runs a TUI started before an `opencode upgrade`, exit and relaunch it so the TUI executes the supported version; the plugin reports that condition explicitly.
 
 ## Next normal maintenance
 
