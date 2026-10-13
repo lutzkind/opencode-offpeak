@@ -2,19 +2,19 @@
 
 ## Release status
 
-`opencode-offpeak` v0.1.2 is the canonical release:
+`opencode-offpeak` v0.1.3 is the canonical release:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.2`
-- Tag commit: `7eda2aa7e7eb09254b3b5b86659297076fc0f754` (merge of PR #7)
-- Fix commit: `2792d4bd9e9c65c044eccd2ec473d33366677bff`
-- Attached `opencode-offpeak-0.1.2.tgz` SHA-256: `b16da51a183849791347813add2b2002f0bcc1244ff39d4f8a66b32b969c67b3` (matches `npm pack` from the tag commit)
-- The `v0.1.0` and `v0.1.1` tags were not mutated and remain installable.
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.3`
+- Tag commit: `38c8cb250c48c50aecd972eff64840e1f68d0cfa` (merge of PR #8)
+- Fix commit: `a626e09f381b2a354d2fe55b9df43134db83ec14`
+- Attached `opencode-offpeak-0.1.3.tgz` SHA-256: `edfeb739be653ee2aebd6d5e7e456cdc7dc42793e6b6bdce24052548a59e5ff1` (matches `npm pack` from the tag commit)
+- The `v0.1.0`, `v0.1.1`, and `v0.1.2` tags were not mutated and remain installable.
 
-The live environment installs the exact tag: `/root/.config/opencode/opencode.json` contains `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`, `/api/plugin` reports `version 7eda2aa7e7eb09254b3b5b86659297076fc0f754` with server and TUI features active, and the live server loads `src/server.ts` from the tag cache.
+The live environment installs the exact tag: `/root/.config/opencode/opencode.json` contains `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3`, `/api/plugin` reports `version 38c8cb250c48c50aecd972eff64840e1f68d0cfa` with server and TUI features active, and the live server loads `src/server.ts` from the tag cache.
 
 ## 2026-10-13 OpenCode 2.0.27 upgrade and validation
 
@@ -59,6 +59,12 @@ The live environment installs the exact tag: `/root/.config/opencode/opencode.js
 **Automated tests:** 52 pass (lint, typecheck, tests, pack), including the new retry-recovery suite listed in `docs/releases/v0.1.3.md`.
 
 **Isolated end-to-end evidence (real 2.0.27 + local fixture provider withholding headers until the window end):** a queue task and an interactive message started during OFF_PEAK, failed retryably after crossing into PEAK, were vetoed (no further retry events), produced zero provider requests during the entire PEAK window, stayed `WAITING_OFFPEAK`/`Recovery: 1`, and both continued in their same sessions at the boundary with the continuation prompt.
+
+**Live validation (OpenCode 2.0.27 + v0.1.3 on the shared server, 2026-10-13):**
+
+- Normal off-peak DeepSeek operation: `opencode run -m opencode-go/deepseek-v4.1-flash` replied `offpeak v0.1.3 live ok`.
+- Temporary local fixture provider + short test policy (both removed afterwards): an interactive `opencode run` message and a queue task started during OFF_PEAK, failed retryably after crossing into PEAK, were vetoed, produced **zero fixture requests during the entire PEAK window**, stayed `WAITING_OFFPEAK`/recovery, and both continued in their **same sessions** at the boundary — the task `COMPLETED` (`ses_eca59f7a7fferT5ghI5ZhcL5dE`) and the interactive session succeeded (`ses_eca5a0b3affe3ZgfqjjoYfdmiK`, 2 user / 2 assistant messages) with the continuation prompt.
+- The production policy and provider configuration were restored, the test task was removed, the queue is empty, the fixture stopped, and the plugin is ON in `auto` mode.
 
 **Remaining intentional limitations:** the retry hook does not expose the request kind, so auxiliary requests are not distinguished from the agent loop; a session that never settles is not continued automatically; recovery entries are scoped to the plugin location, and two plugin instances for the same location are not coordinated (the same class as the existing shared queue).
 
