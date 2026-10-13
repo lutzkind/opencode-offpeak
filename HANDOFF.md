@@ -1,4 +1,4 @@
-# Handoff — 2026-10-12
+# Handoff — 2026-10-13
 
 ## Release status
 
@@ -15,6 +15,25 @@ opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2
 - The `v0.1.0` and `v0.1.1` tags were not mutated and remain installable.
 
 The live environment installs the exact tag: `/root/.config/opencode/opencode.json` contains `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`, `/api/plugin` reports `version 7eda2aa7e7eb09254b3b5b86659297076fc0f754` with server and TUI features active, and the live server loads `src/server.ts` from the tag cache.
+
+## 2026-10-13 OpenCode 2.0.27 upgrade and validation
+
+**Upstream:** the latest official OpenCode v2 release is **2.0.27** (published 2026-10-12 04:15 UTC; verified through the official update channel `https://opencode.ai/update/api/latest/cli/opencode`, the official npm `@opencode/cli@latest`, the official changelog, and the official GitHub tag `v2.0.27`). No 2.1.x release exists. The live installation was on 2.0.26 because the binary was last installed 2026-10-09 (before 2.0.27 was published) and the update policy is the default `notify`, so nothing auto-upgrades; a running background service also keeps executing the binary it started with until it is restarted.
+
+**Compatibility:** the `@opencode/plugin` package diff between 2.0.26 and 2.0.27 has identical file lists; the only changes are internal version bumps and one `effect` import path in `dist/promise/adapter.js`. No public plugin API surface changed.
+
+**Validation (all passed):**
+
+- Isolated run of the real 2.0.27 binary with the exact `#v0.1.2` tag and a local OpenAI-compatible fixture provider: server + TUI entrypoints load; `/offpeak status`, `pricing`, `off`, `on`, `queue`, `list`, `cancel`, `remove`, `retry`, `resume`, and `run-now` all work; interactive peak hold with zero provider traffic until the boundary minute; automatic boundary release in the same session; queue-owned auto-resume; queue-mode resume; UNKNOWN fails closed; UNTRACKED passes through; OFF stays passive; FAILED to retry to COMPLETED; persistence across a TUI restart; one user and one assistant message per request (no duplicates).
+- Repository suite: 45 tests pass with `@opencode/plugin@2.0.27` in `node_modules` and the 2.0.27 host binary for the real TUI smoke test. The `package.json` dependency pin stays at 2.0.26 by design (the minimum supported version) and the package test enforces it.
+- Live CLI upgraded through the official v2-aware path (`opencode upgrade 2.0.27 --method curl`, not the legacy `/install`); the installed binary hash matches the official 2.0.27 artifact byte-for-byte.
+- Live background service restarted at a quiet moment (it hosts other active sessions) and verified on 2.0.27: `/api/info`, the CLI, and a fresh TUI all report 2.0.27; plugin `#v0.1.2` is active with no startup failures.
+- Live boundary test with a short temporary policy: an interactive request was held (`Interactive: N requests waiting for off-peak`) and released at the boundary in the same session (1m48s) with exactly one user and one assistant message; a queue task queued during the window completed at the boundary in one session/prompt; the production policy was restored afterwards.
+- `opencode reload` persistence: a task queued while the plugin was OFF persisted across the reload (`QUEUED`) and completed after `/offpeak on`.
+
+**Decision:** no code or compatibility-metadata change was required. `engines.opencode` already covers 2.0.27 (`>=2.0.26 <2.1.0`), and the API package pin stays at the minimum supported 2.0.26, so no new plugin release was cut; `v0.1.2` remains the installed release.
+
+**Residual state:** the long-running user TUI (PID 1366942, started before the upgrade) still executes 2.0.26 host code until it is restarted; it is inside the supported range and causes no failures. Fresh TUIs run 2.0.27. The separate `tui-package` scratch service from an earlier phase was left untouched. No temporary test policies or test tasks remain; the queue is empty and the plugin is ON in `auto` mode.
 
 ## 2026-10-12 interactive boundary wait (v0.1.2)
 
@@ -107,7 +126,7 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
 - Package: `opencode-offpeak@0.1.2`, MIT
-- Verified CLI: OpenCode v2.0.26
+- Verified CLI: OpenCode v2.0.26 and v2.0.27
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
 - GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.

@@ -4,7 +4,7 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 
 `opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. The request guard runs at OpenCode's outbound model transport boundary; a task that reaches peak pricing pauses before its next provider request and keeps its session and project context. In `auto` mode the same hold applies to normal interactive messages: a supported request sent during peak pricing stays pending at the boundary and proceeds automatically when off-peak pricing returns, so you do not need to resend it.
 
-> **Compatibility:** OpenCode CLI `>=2.0.26 <2.1.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime. Later API versions are not claimed until CI and runtime checks cover them.
+> **Compatibility:** OpenCode CLI `>=2.0.26 <2.1.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 and 2.0.27 (the current official v2 release). The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime. Later API versions are not claimed until CI and runtime checks cover them.
 
 ## Install
 
