@@ -18,6 +18,8 @@ The plugin checks immediately before OpenCode's provider HTTP/WebSocket transpor
 
 In `auto` mode, an interactive message sent during peak pricing is held at that boundary, and the same session continues automatically when off-peak returns; no second message is needed. The release comes from the scheduled pricing transition (or a config change), never from another message, a status command, or a manual wake-up. `queue`/`guard` modes and the OFF state block interactive peak requests immediately, and a plugin shutdown fails a held request closed rather than sending it.
 
+A request that is already in flight and fails with a retryable provider/network error (for example a header timeout) after peak pricing begins is recovered the same way. The plugin stops OpenCode's retry before it can reach the provider, then continues the same session at the next off-peak transition with a short continuation prompt: a queue task returns to `WAITING_OFFPEAK`, and an interactive session is reported under `Recovery` in `/offpeak status`. Non-retryable failures and failures while pricing is allowed keep their normal OpenCode behavior.
+
 ## Lifecycle authority
 
 OpenCode owns session transcripts, session IDs, tools, permissions, model selection, and background server lifecycle. This plugin stores only task metadata and never selects an implicit global “last session.”

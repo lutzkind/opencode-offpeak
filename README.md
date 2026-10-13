@@ -2,17 +2,17 @@
 
 Queue OpenCode agent tasks, block paid model requests during expensive pricing windows, and resume the **same OpenCode session** when off-peak pricing returns.
 
-`opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. The request guard runs at OpenCode's outbound model transport boundary; a task that reaches peak pricing pauses before its next provider request and keeps its session and project context. In `auto` mode the same hold applies to normal interactive messages: a supported request sent during peak pricing stays pending at the boundary and proceeds automatically when off-peak pricing returns, so you do not need to resend it.
+`opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. The request guard runs at OpenCode's outbound model transport boundary; a task that reaches peak pricing pauses before its next provider request and keeps its session and project context. In `auto` mode the same hold applies to normal interactive messages: a supported request sent during peak pricing stays pending at the boundary and proceeds automatically when off-peak pricing returns, so you do not need to resend it. If a request is already in flight and fails with a retryable provider/network error after peak pricing begins, the retry is stopped before it can reach the provider and the same session continues automatically at the next off-peak window.
 
 > **Compatibility:** OpenCode CLI `>=2.0.26 <2.1.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 and 2.0.27 (the current official v2 release). The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime. Later API versions are not claimed until CI and runtime checks cover them.
 
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3
 ```
 
-This installs the released `v0.1.2` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.1.3` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -41,7 +41,7 @@ Select the provider and model first. Queueing captures the current model and wor
 
 - `/offpeak on` persists the enabled setting and resumes queue processing.
 - `/offpeak off` persists the disabled setting and pauses automatic starts/resumes.
-- `/offpeak status` shows the toggle, mode, model policy, price state, request decision, next transition, queue counts, held interactive requests, active session, and any override.
+- `/offpeak status` shows the toggle, mode, model policy, price state, request decision, next transition, queue counts, held interactive requests, sessions waiting for off-peak recovery, active session, and any override.
 - `/offpeak list` shows task IDs, states, stored session IDs, and the last failure.
 - `/offpeak cancel <task-id>` cancels the task and preserves its session record.
 - `/offpeak remove <task-id>` removes a terminal (`COMPLETED`, `FAILED`, or `CANCELLED`) task from the queue. Active tasks must be cancelled first; the OpenCode session is preserved.
@@ -57,6 +57,17 @@ The guard checks the provider and model immediately before OpenCode sends an HTT
 
 In `auto` mode, a normal interactive request for a supported model is held the same way. The request you already sent stays pending — no new session, no duplicate prompt, and no second `continue` — and the same OpenCode session proceeds automatically at the policy's next off-peak transition. `/offpeak status` reports held interactive requests while they wait. The hold lives in the OpenCode background server process and wakes on the scheduled pricing boundary, not on another message or command. If the plugin shuts down or the server restarts while a request is held, the request fails closed as blocked instead of being sent under an uncertain pricing state; resend it after the server is back. Requests that arrive while the plugin is OFF, or in `queue`/`guard` mode, are blocked immediately.
 
+### Timeout and retry recovery
+
+A request can start during off-peak, cross into a peak window, and then fail with a retryable provider or network error such as `Timed out waiting for response headers`. OpenCode normally retries such failures, and a retry attempt is itself a new paid request: during peak pricing it must not reach the provider, and the work must not be lost when OpenCode's retry budget runs out.
+
+`opencode-offpeak` registers OpenCode's supported `retry` hook. When a retryable failure happens while pricing is blocked and the plugin is ON in `auto` mode, the plugin vetoes the retry (`decision = { retry: false }`), so no retry attempt reaches the provider. The work is then marked to continue at the next allowed window:
+
+- A queue-owned task moves to `WAITING_OFFPEAK` (not `FAILED`) and keeps its session ID; at the next off-peak transition the same session continues with the safe continuation prompt.
+- A normal interactive session is recorded with minimal recovery metadata; at the next off-peak transition the same session receives the same safe continuation prompt. `/offpeak status` reports it as `Recovery: N session(s) waiting for off-peak`.
+
+The continuation does not replay the failed provider request and does not create a new session or a duplicate prompt. Non-retryable failures (for example an invalid request) still end as `FAILED`/error, a retryable failure while pricing is already allowed keeps OpenCode's normal retry behavior, and OFF/`queue`/`guard` modes are unchanged. Interactive recovery metadata is persisted in OpenCode plugin storage, so a server reload or restart during peak keeps the pending continuation.
+
 The OpenCode background server must be running for unattended work. It can remain active after the TUI or terminal closes:
 
 ```sh
@@ -70,7 +81,7 @@ After a machine restart, queue metadata remains in OpenCode's local plugin stora
 
 Set `mode` in `~/.config/opencode/offpeak.json`:
 
-- `auto` (default): start queued tasks off-peak, automatically resume a paused same-session task, and hold normal interactive supported-model requests at the pricing boundary until off-peak returns.
+- `auto` (default): start queued tasks off-peak, automatically resume a paused same-session task, hold normal interactive supported-model requests at the pricing boundary until off-peak returns, and stop retryable provider failures during peak so the same session continues at the next off-peak window.
 - `queue`: start queued tasks off-peak; a task paused at peak waits for `/offpeak resume <task-id>` or `/offpeak run-now <task-id>`; interactive peak requests are blocked immediately.
 - `guard`: enforce request pricing for interactive OpenCode sessions, but do not automatically start queued tasks or hold interactive requests for a later window.
 
@@ -114,7 +125,10 @@ See [configuration](docs/configuration.md) and [pricing policies](docs/pricing-p
 - A task cannot execute while the OpenCode server is stopped. It resumes when a server loads the plugin and queue state.
 - OpenCode documents session crash recovery as at-least-once. If a task persisted as `RUNNING` when the server restarted, this plugin does not automatically replay it: it marks the task `FAILED`, preserves its session ID, and requires an explicit `/offpeak retry`. That is the safe choice when the provider may have received a paid request before the crash.
 - A `WAITING_OFFPEAK` task is safe to resume automatically because the guard persisted that state before allowing another provider request. In `auto` mode it continues with the same session ID.
-- An interactive request held in `auto` mode is not persisted: it lives in the running OpenCode server process. A plugin or server shutdown fails it closed as blocked rather than replaying it.
+- A retryable provider failure during peak never retries into the provider. OpenCode's agent-loop request is retried up to three times with jittered backoff (attempts 2–4, denied at attempt 5) for retryable transport failures; the plugin observes every retry decision through the supported `retry` hook.
+- The continuation prompt asks the model to continue from the current project state; the plugin does not replay the exact failed provider request. A transport failure can be ambiguous (the provider may have received the request before the error), which is why the continuation is a state-aware new turn instead of a byte-for-byte replay.
+- An interactive request held at the boundary lives in the running OpenCode server process; a plugin/server shutdown fails it closed as blocked rather than sending it under an uncertain pricing state. A retryable provider failure during peak instead records minimal recovery metadata in OpenCode plugin storage, so the same session continues at the next off-peak window even across a reload.
+- A session that never settles after a retryable failure (no outcome is recorded) is not continued automatically; its recovery record is dropped without sending anything rather than injecting a message into an unclear session.
 - The plugin blocks at the provider request boundary. It does not roll back a request already accepted by a provider or interrupt an already-running local tool operation.
 - The policy protects requests routed through OpenCode's v2 HTTP and experimental WebSocket model hooks. It does not control calls made by other programs.
 - Model/provider API stability is limited to the documented OpenCode v2 range above.

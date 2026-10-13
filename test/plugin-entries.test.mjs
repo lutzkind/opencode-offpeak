@@ -94,6 +94,29 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.ok(hooks.has("http.request"));
     assert.ok(hooks.has("experimental.ws.handshake"));
     assert.ok(hooks.has("experimental.ws.send"));
+    assert.ok(hooks.has("retry"));
+
+    // A retryable provider failure while peak is active is vetoed (it must not retry
+    // into the provider) and recorded for the next off-peak continuation.
+    const retryable = {
+      sessionID: "retry-session",
+      agent: "build",
+      model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+      error: { type: "provider.transport", message: "Timed out waiting for response headers" },
+      attempt: 2,
+      decision: { retry: true, delay: 1000 },
+    };
+    await hooks.get("retry")(retryable);
+    assert.deepEqual(retryable.decision, { retry: false });
+    // A non-retryable failure keeps OpenCode's terminal decision and no recovery.
+    const nonRetryable = {
+      ...retryable,
+      sessionID: "interactive-invalid",
+      error: { type: "provider.invalid-request", message: "fixture invalid request" },
+      decision: { retry: false },
+    };
+    await hooks.get("retry")(nonRetryable);
+    assert.deepEqual(nonRetryable.decision, { retry: false });
 
     // auto + ON + peak: the server entrypoint holds the interactive request at the
     // boundary instead of discarding it.
@@ -130,6 +153,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(status.status.queued, 1);
     assert.equal(status.status.requestsAllowed, false);
     assert.equal(status.status.interactiveWaiting, 1);
+    assert.equal(status.status.recoveryWaiting, 1);
 
     let layer;
     const tuiContext = {

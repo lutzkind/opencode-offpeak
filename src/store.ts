@@ -36,15 +36,38 @@ export interface QueueDocument {
   tasks: OffpeakTask[];
 }
 
+/**
+ * Minimal recovery metadata for an interactive session whose provider request
+ * failed retryably while pricing was blocked. The session itself is untouched;
+ * only the identity needed to continue it at the next off-peak window is kept.
+ */
+export interface RecoveryEntry {
+  sessionID: string;
+  providerID: string;
+  modelID: string;
+  directory: string;
+  heldAt: string;
+}
+
+export interface RecoveryDocument {
+  schemaVersion: 1;
+  entries: RecoveryEntry[];
+}
+
 export interface JsonStorage {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown): Promise<void>;
 }
 
 export const QUEUE_STORAGE_KEY = "opencode-offpeak/queue-v1";
+export const RECOVERY_STORAGE_KEY = "opencode-offpeak/recovery-v1";
 
 export function emptyQueue(): QueueDocument {
   return { schemaVersion: 1, tasks: [] };
+}
+
+export function emptyRecovery(): RecoveryDocument {
+  return { schemaVersion: 1, entries: [] };
 }
 
 export class QueueRepository {
@@ -62,6 +85,24 @@ export class QueueRepository {
 
   async save(queue: QueueDocument): Promise<void> {
     await this.storage.set(QUEUE_STORAGE_KEY, queue as unknown as JsonValue);
+  }
+}
+
+export class RecoveryRepository {
+  constructor(private readonly storage: JsonStorage) {}
+
+  async load(): Promise<RecoveryDocument> {
+    const value = await this.storage.get(RECOVERY_STORAGE_KEY);
+    if (value === undefined) return emptyRecovery();
+    if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.entries)) {
+      throw new Error("Stored offpeak recovery state is invalid; refusing to overwrite it.");
+    }
+    const entries = value.entries.map((entry, index) => validateRecoveryEntry(entry, index));
+    return { schemaVersion: 1, entries };
+  }
+
+  async save(document: RecoveryDocument): Promise<void> {
+    await this.storage.set(RECOVERY_STORAGE_KEY, document as unknown as JsonValue);
   }
 }
 
@@ -165,6 +206,20 @@ function validateTask(value: unknown, index: number): OffpeakTask {
     throw new Error(`Stored queue task ${index} has an invalid session ID.`);
   }
   return value as unknown as OffpeakTask;
+}
+
+function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
+  if (!isRecord(value)) throw new Error(`Stored recovery entry ${index} is not an object.`);
+  if (
+    typeof value.sessionID !== "string" ||
+    typeof value.providerID !== "string" ||
+    typeof value.modelID !== "string" ||
+    typeof value.directory !== "string" ||
+    typeof value.heldAt !== "string"
+  ) {
+    throw new Error(`Stored recovery entry ${index} has invalid fields.`);
+  }
+  return value as unknown as RecoveryEntry;
 }
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };

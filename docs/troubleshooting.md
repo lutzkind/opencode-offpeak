@@ -2,7 +2,7 @@
 
 ## `/offpeak` is not recognized
 
-Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
 
 ## `Keymap.Provider is missing` in the TUI
 
@@ -21,6 +21,10 @@ If you intentionally accept peak pricing for a queued task, turn the plugin ON a
 ## Interactive message waits at peak
 
 In `auto` mode, a supported interactive request sent during a peak window is held at the provider boundary instead of being discarded, and the same session proceeds automatically when off-peak returns; no second message is needed. `/offpeak status` shows it under `Interactive` while it waits. In `queue` or `guard` mode, and while the plugin is OFF, interactive peak requests are blocked immediately. If a held request fails closed because the plugin or server shut down, resend it after the server is back.
+
+## Request timed out during peak and the session continued later
+
+In `auto` mode, a retryable provider/network failure that happens while peak pricing is active does not lose the work. The plugin vetoes OpenCode's retry before it can reach the provider and continues the same session at the next off-peak transition with a short continuation prompt. `/offpeak status` reports `Recovery: N session(s) waiting for off-peak` for interactive sessions, and queue tasks show as `WAITING_OFFPEAK` instead of `FAILED`. If you see an error such as `Timed out waiting for response headers` during peak, no action is needed; the session resumes automatically when pricing allows. Non-retryable errors (for example invalid requests or authentication failures) still require you to fix the cause and retry explicitly.
 
 ## Task is waiting
 
