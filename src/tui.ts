@@ -98,6 +98,7 @@ function summarize(output: OffpeakRpcOutput): string {
     queued?: number;
     waiting?: number;
     interactiveWaiting?: number;
+    recoveryWaiting?: number;
     running?: { id?: string; sessionID?: string; state?: string };
     failed?: number;
     configError?: string;
@@ -120,6 +121,9 @@ function summarize(output: OffpeakRpcOutput): string {
     `Queue: ${status.queued ?? 0} queued, ${status.waiting ?? 0} waiting, ${status.failed ?? 0} failed`,
     status.interactiveWaiting
       ? `Interactive: ${status.interactiveWaiting} request${status.interactiveWaiting === 1 ? "" : "s"} waiting for off-peak`
+      : "",
+    status.recoveryWaiting
+      ? `Recovery: ${status.recoveryWaiting} session${status.recoveryWaiting === 1 ? "" : "s"} waiting for off-peak`
       : "",
     `Running: ${status.running?.id ?? "none"}${status.running?.sessionID ? ` (session ${status.running.sessionID})` : ""}`,
     status.configError ? `Config error: ${status.configError}` : "",

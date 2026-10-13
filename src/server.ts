@@ -3,17 +3,19 @@ import { assertSupportedOpenCode } from "./compat.js";
 import { ConfigRepository } from "./config.js";
 import { OffpeakEngine, type SessionDriver } from "./engine.js";
 import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
-import { QueueRepository } from "./store.js";
+import { QueueRepository, RecoveryRepository } from "./store.js";
 
 export default Plugin.define({
   id: "opencode-offpeak",
   setup: async (context) => {
     assertSupportedOpenCode(context.app, "server");
     const config = new ConfigRepository(context.options);
-    const repository = new QueueRepository({
-      get: (key) => context.storage.get(key),
-      set: (key, value) => context.storage.set(key, value as never),
-    });
+    const storage = {
+      get: (key: string) => context.storage.get(key),
+      set: (key: string, value: unknown) => context.storage.set(key, value as never),
+    };
+    const repository = new QueueRepository(storage);
+    const recoveries = new RecoveryRepository(storage);
     const sessions: SessionDriver = {
       create: async ({ cwd, model, taskID }) => {
         const session = await context.session.create({
@@ -38,6 +40,8 @@ export default Plugin.define({
     };
     const engine = new OffpeakEngine({
       repository,
+      recoveries,
+      location: context.location?.directory ?? "",
       config,
       sessions,
       onError: (error) => console.error("[opencode-offpeak]", error),
@@ -67,6 +71,20 @@ export default Plugin.define({
           transport: "websocket",
         }),
       ),
+      // Peak-aware retry recovery: a retryable provider failure while pricing is
+      // blocked must not retry into the provider or fail the turn terminally.
+      context.session.hook("retry", async (event) => {
+        const outcome = await engine.noteRetryFailure({
+          sessionID: event.sessionID,
+          providerID: event.model.providerID,
+          modelID: event.model.id,
+          errorType: event.error?.type ?? "unknown",
+          willRetry: event.decision?.retry === true,
+        });
+        if (outcome === "hold" && event.decision?.retry === true) {
+          event.decision = { retry: false };
+        }
+      }),
     ]);
     const rpc = await context.rpc.register(OFFPEAK_RPC, {
       control: async (rawInput: unknown): Promise<OffpeakRpcOutput> => {

@@ -9,6 +9,7 @@ import {
   OffpeakEngine,
   PricingBlockedError,
   QueueRepository,
+  RecoveryRepository,
 } from "../dist/index.js";
 
 class MemoryStorage {
@@ -90,7 +91,7 @@ class FakeSessions {
     this.prompts.push({ sessionID, text });
     const worker = Promise.resolve()
       .then(() => this.behavior({ sessionID, text }))
-      .then(() => this.outcomes.set(sessionID, "succeeded"))
+      .then((result) => this.outcomes.set(sessionID, result?.outcome ?? "succeeded"))
       .catch((error) => {
         this.outcomes.set(sessionID, "failed");
         throw error;
@@ -129,6 +130,8 @@ async function harness(now = "2026-10-12T00:30:00Z", options = {}) {
   });
   const engine = new OffpeakEngine({
     repository: new QueueRepository(storage),
+    recoveries: new RecoveryRepository(storage),
+    location: options.location ?? "test-location",
     config,
     sessions,
     clock,
@@ -1042,6 +1045,294 @@ test("queue-owned auto tasks still resume at the scheduled boundary without exte
     assert.equal(providerRequests, 1);
     assert.equal(h.sessions.createdTasks.length, 1);
     assert.equal(stored.sessionID, h.sessions.createdTasks[0].id);
+  } finally {
+    await h.close();
+  }
+});
+
+const CONTINUATION =
+  "Continue the task in this session from the current project state. Avoid repeating work that is already complete.";
+
+test("a retryable provider failure during peak moves a queued task to WAITING_OFFPEAK and continues the same session at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T00:30:00Z");
+  const h = await harness("2026-10-12T00:30:00Z", { clock });
+  const prompts = [];
+  h.sessions.behavior = async ({ sessionID, text }) => {
+    prompts.push(text);
+    if (text.startsWith("Continue the task")) return undefined;
+    // The request started off-peak and crosses into the peak window before failing.
+    clock.set("2026-10-12T01:30:00Z");
+    const outcome = await h.engine.noteRetryFailure({
+      sessionID,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.transport",
+      willRetry: true,
+    });
+    assert.equal(outcome, "hold");
+    return { outcome: "failed" };
+  };
+  try {
+    const task = await h.engine.queue({
+      prompt: "recover after timeout",
+      cwd: "/project",
+      model: selectedModel,
+    });
+    await until(
+      async () =>
+        (await h.engine.list()).find((item) => item.id === task.id)?.state === "WAITING_OFFPEAK",
+    );
+    const waiting = (await h.engine.list()).find((item) => item.id === task.id);
+    assert.equal(waiting.state, "WAITING_OFFPEAK");
+    assert.equal(waiting.lastError, undefined);
+    assert.ok(waiting.sessionID);
+    assert.equal((await h.engine.status(selectedModel)).failed, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(
+      async () =>
+        (await h.engine.list()).find((item) => item.id === task.id)?.state === "COMPLETED",
+    );
+    const stored = (await h.engine.list()).find((item) => item.id === task.id);
+    assert.equal(stored.sessionID, waiting.sessionID);
+    assert.equal(h.sessions.createdTasks.length, 1);
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[0], "recover after timeout");
+    assert.ok(prompts[1].startsWith(CONTINUATION));
+    assert.ok(prompts[1].includes("recover after timeout"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("non-retryable failures during peak stay FAILED instead of waiting for off-peak", async () => {
+  const clock = new ManualClock("2026-10-12T00:30:00Z");
+  const h = await harness("2026-10-12T00:30:00Z", { clock });
+  h.sessions.behavior = async ({ sessionID }) => {
+    clock.set("2026-10-12T01:30:00Z");
+    const outcome = await h.engine.noteRetryFailure({
+      sessionID,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.invalid-request",
+      willRetry: false,
+    });
+    assert.equal(outcome, "pass");
+    return { outcome: "failed" };
+  };
+  try {
+    const task = await h.engine.queue({
+      prompt: "invalid request",
+      cwd: "/project",
+      model: selectedModel,
+    });
+    await until(
+      async () => (await h.engine.list()).find((item) => item.id === task.id)?.state === "FAILED",
+    );
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a retryable interactive failure during peak registers a recovery and continues the same session once at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "session-interactive-recovery";
+  try {
+    h.sessions.outcomes.set(sessionID, "failed");
+    h.sessions.workers.set(sessionID, Promise.resolve());
+    const outcome = await h.engine.noteRetryFailure({
+      sessionID,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.transport",
+      willRetry: true,
+    });
+    assert.equal(outcome, "hold");
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+    assert.equal(h.sessions.prompts.length, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => h.sessions.prompts.length === 1);
+    assert.equal(h.sessions.prompts[0].sessionID, sessionID);
+    assert.equal(h.sessions.prompts[0].text, CONTINUATION);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    assert.equal(h.sessions.createdTasks.length, 0);
+    await clock.advanceTo("2026-10-13T00:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.prompts.length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("retry recovery stays passive when OFF, in queue or guard mode, for untracked or unknown models, and under an override", async () => {
+  const h = await harness("2026-10-12T01:30:00Z");
+  const input = {
+    sessionID: "session-pass",
+    providerID: selectedModel.providerID,
+    modelID: selectedModel.modelID,
+    errorType: "provider.transport",
+    willRetry: true,
+  };
+  try {
+    await h.engine.setEnabled(false);
+    assert.equal(await h.engine.noteRetryFailure(input), "pass");
+    await h.engine.setEnabled(true);
+    await h.config.write({ ...defaultConfig(), mode: "queue" });
+    assert.equal(await h.engine.noteRetryFailure(input), "pass");
+    await h.config.write({ ...defaultConfig(), mode: "guard" });
+    assert.equal(await h.engine.noteRetryFailure(input), "pass");
+    await h.config.write({ ...defaultConfig(), mode: "auto" });
+    assert.equal(
+      await h.engine.noteRetryFailure({
+        ...input,
+        providerID: "other-provider",
+        modelID: "other-model",
+      }),
+      "pass",
+    );
+    assert.equal(
+      await h.engine.noteRetryFailure({ ...input, modelID: "unpublished-model" }),
+      "pass",
+    );
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+
+    const now = new Date().toISOString();
+    const repository = new QueueRepository(h.storage);
+    const queue = await repository.load();
+    queue.tasks.push({
+      id: "task-override",
+      prompt: "override",
+      cwd: "/project",
+      sessionID: "session-override",
+      model: selectedModel,
+      policyID: "deepseek-opencode-go",
+      state: "RUNNING",
+      createdAt: now,
+      lastTransition: now,
+      retryCount: 0,
+      overrideUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    await repository.save(queue);
+    assert.equal(
+      await h.engine.noteRetryFailure({ ...input, sessionID: "session-override" }),
+      "pass",
+    );
+    assert.equal(
+      (await h.engine.list()).find((item) => item.id === "task-override").state,
+      "RUNNING",
+    );
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("interactive recoveries persist across engine restart and stay scoped to their location", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const storage = new MemoryStorage();
+  const sessions = new FakeSessions();
+  const h = await harness("2026-10-12T01:30:00Z", { clock, storage, sessions });
+  const sessionID = "session-persist";
+  try {
+    sessions.outcomes.set(sessionID, "failed");
+    await h.engine.noteRetryFailure({
+      sessionID,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.transport",
+      willRetry: true,
+    });
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+    await h.engine.dispose();
+
+    const other = new OffpeakEngine({
+      repository: new QueueRepository(storage),
+      recoveries: new RecoveryRepository(storage),
+      location: "other-location",
+      config: h.config,
+      sessions,
+      clock,
+    });
+    await other.start();
+    assert.equal((await other.status(selectedModel)).recoveryWaiting, 0);
+    await other.dispose();
+
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(storage),
+      recoveries: new RecoveryRepository(storage),
+      location: "test-location",
+      config: h.config,
+      sessions,
+      clock,
+    });
+    await restarted.start();
+    assert.equal((await restarted.status(selectedModel)).recoveryWaiting, 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => sessions.prompts.length === 1);
+    assert.equal(sessions.prompts[0].sessionID, sessionID);
+    assert.equal(sessions.prompts[0].text, CONTINUATION);
+    assert.equal((await restarted.status(selectedModel)).recoveryWaiting, 0);
+    await restarted.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a new held interactive request supersedes a pending recovery for the same session", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "session-supersede";
+  try {
+    h.sessions.outcomes.set(sessionID, "failed");
+    await h.engine.noteRetryFailure({
+      sessionID,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.transport",
+      willRetry: true,
+    });
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+    const held = h.engine.guardRequest({ sessionID, ...selectedModel, transport: "http" });
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await held;
+    assert.equal(h.sessions.prompts.length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a recovery is skipped when the session already succeeded or never settles", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const succeeded = "session-succeeded";
+  const unsettled = "session-unsettled";
+  try {
+    h.sessions.outcomes.set(succeeded, "succeeded");
+    await h.engine.noteRetryFailure({
+      sessionID: succeeded,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.transport",
+      willRetry: true,
+    });
+    await h.engine.noteRetryFailure({
+      sessionID: unsettled,
+      providerID: selectedModel.providerID,
+      modelID: selectedModel.modelID,
+      errorType: "provider.transport",
+      willRetry: true,
+    });
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 2);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    assert.equal(h.sessions.prompts.length, 0);
+    // The unsettled session is retried briefly, then dropped without sending.
+    await clock.advanceTo("2026-10-12T04:06:00Z");
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 0);
+    assert.equal(h.sessions.prompts.length, 0);
   } finally {
     await h.close();
   }

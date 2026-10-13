@@ -11,6 +11,7 @@ export { ConfigRepository, defaultConfig, validateConfig } from "./config.js";
 export type {
   EngineStatus,
   GuardInput,
+  RetryFailureInput,
   SessionDriver,
 } from "./engine.js";
 export { OffpeakEngine, PricingBlockedError } from "./engine.js";
@@ -27,5 +28,12 @@ export {
   resolvePolicy,
   validatePolicy,
 } from "./policy.js";
-export type { OffpeakTask, QueueDocument, TaskModel, TaskState } from "./store.js";
-export { QueueRepository } from "./store.js";
+export type {
+  OffpeakTask,
+  QueueDocument,
+  RecoveryDocument,
+  RecoveryEntry,
+  TaskModel,
+  TaskState,
+} from "./store.js";
+export { QueueRepository, RecoveryRepository } from "./store.js";

@@ -35,6 +35,33 @@ The live environment installs the exact tag: `/root/.config/opencode/opencode.js
 
 **Residual state:** the long-running user TUI (PID 1366942, started before the upgrade) still executes 2.0.26 host code until it is restarted; it is inside the supported range and causes no failures. Fresh TUIs run 2.0.27. The separate `tui-package` scratch service from an earlier phase was left untouched. No temporary test policies or test tasks remain; the queue is empty and the plugin is ON in `auto` mode.
 
+## 2026-10-13 peak-aware retry recovery (v0.1.3)
+
+**Root cause:** a request that starts during OFF_PEAK can cross into PEAK and fail with a retryable transport error (`Timed out waiting for response headers`). Two mechanisms then lose the work: (a) OpenCode retries the request up to three times, and each retry is a new paid request that would either reach the provider or be held by the guard during PEAK and time out while held, because the header-timeout clock starts at attempt start; (b) when the retry budget is exhausted, the turn fails terminally and the plugin has no pending pre-transport request left to release at the next boundary.
+
+**OpenCode 2.0.27 retry lifecycle (measured with the real binary and a local withholding fixture, not assumed):**
+
+- Header timeout → `error.type = provider.transport`, default decision `{ retry: true, delay }`; retry hook calls at attempts 2, 3, 4, then `{ retry: false }` at attempt 5 (three retries, four physical attempts).
+- `provider.internal` (500/503) and `provider.rate-limit` (429) are retryable; `provider.invalid-request` (400) is terminal at attempt 2 (`{ retry: false }`).
+- Every retry attempt re-enters `context` → `model.request` → `http.request`, so the guard sees every physical attempt.
+- The header-timeout clock starts at attempt start, before the hook chain completes; a guard hold longer than the provider's header timeout times out while held. This is why very long peak holds could previously fail.
+- The retry hook runs after classification and before any retry is scheduled; `event.decision` is mutable; the hook receives `{sessionID, agent, model, error, attempt, decision}` (no request kind).
+
+**Implementation (v0.1.3):**
+
+- `src/server.ts` registers `context.session.hook("retry", ...)`; `src/engine.ts` adds `noteRetryFailure()`: when the plugin is ON, mode is `auto`, the failure is retryable (`willRetry` or a retryable error type), and the model's policy is blocked, the engine returns `hold` and the hook sets `decision = { retry: false }`.
+- Queue task: `RUNNING` → `WAITING_OFFPEAK` (persisted task state, session ID kept); the existing pump resumes it at the next allowed window with the existing safe continuation prompt.
+- Interactive session: minimal recovery metadata (`sessionID`, provider/model, location) is persisted in OpenCode plugin storage (`opencode-offpeak/recovery-v1`); the engine delivers the same continuation once, at the next allowed window, only when the session has settled with a failed/interrupted outcome. New session requests supersede a pending recovery; sessions that never settle are dropped without sending.
+- No new runtime, scheduler, database, daemon, or polling loop: delivery is driven by the existing pump, signal, and boundary timer; `/offpeak status` shows `recoveryWaiting` as `Recovery: N session(s) waiting for off-peak`.
+
+**Safety:** no retry reaches the provider while pricing is blocked; the continuation never replays the failed provider request, never creates a session, and never duplicates the user prompt; non-retryable failures stay `FAILED`; failures while pricing is allowed keep normal retry behavior; OFF/`queue`/`guard` modes and `run-now` overrides are unchanged; UNKNOWN fails closed; UNTRACKED passes through; ambiguous `RUNNING`-after-crash still requires an explicit retry.
+
+**Automated tests:** 52 pass (lint, typecheck, tests, pack), including the new retry-recovery suite listed in `docs/releases/v0.1.3.md`.
+
+**Isolated end-to-end evidence (real 2.0.27 + local fixture provider withholding headers until the window end):** a queue task and an interactive message started during OFF_PEAK, failed retryably after crossing into PEAK, were vetoed (no further retry events), produced zero provider requests during the entire PEAK window, stayed `WAITING_OFFPEAK`/`Recovery: 1`, and both continued in their same sessions at the boundary with the continuation prompt.
+
+**Remaining intentional limitations:** the retry hook does not expose the request kind, so auxiliary requests are not distinguished from the agent loop; a session that never settles is not continued automatically; recovery entries are scoped to the plugin location, and two plugin instances for the same location are not coordinated (the same class as the existing shared queue).
+
 ## 2026-10-12 interactive boundary wait (v0.1.2)
 
 **Defect:** a normal interactive OpenCode request for a supported model was thrown away at peak pricing. Queue-owned `auto` tasks already waited for the next boundary, but `guardRequest()` had no interactive equivalent, so a user message sent during peak failed with `PricingBlockedError` and nothing happened when off-peak returned.
@@ -128,7 +155,7 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 - Package: `opencode-offpeak@0.1.2`, MIT
 - Verified CLI: OpenCode v2.0.26 and v2.0.27
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
-- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.2`
+- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
 
 ## Architecture

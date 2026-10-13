@@ -7,6 +7,8 @@ import {
   Mutex,
   type OffpeakTask,
   type QueueRepository,
+  type RecoveryEntry,
+  type RecoveryRepository,
   type TaskModel,
   type TaskState,
 } from "./store.js";
@@ -49,6 +51,8 @@ export interface EngineStatus {
   waiting: number;
   /** Interactive requests currently held at the pricing boundary (auto mode). */
   interactiveWaiting: number;
+  /** Interactive sessions waiting for an off-peak recovery continuation. */
+  recoveryWaiting: number;
   failed: number;
   tasks: OffpeakTask[];
   configPath: string;
@@ -60,6 +64,35 @@ export interface GuardInput {
   providerID: string;
   modelID: string;
   transport: "http" | "websocket";
+}
+
+/**
+ * Provider error types OpenCode may retry. Used to recognise a retryable
+ * failure sequence even when OpenCode has already exhausted its retry budget
+ * and reports a terminal decision.
+ */
+const RETRYABLE_ERROR_TYPES = new Set([
+  "provider.transport",
+  "provider.internal",
+  "provider.rate-limit",
+]);
+
+/** Safe continuation prompt used when a peak-blocked session resumes at the next allowed window. */
+const RECOVERY_CONTINUATION =
+  "Continue the task in this session from the current project state. Avoid repeating work that is already complete.";
+
+/** How long to wait before re-checking a session that has not settled yet. */
+const RECOVERY_SETTLE_DELAY_MS = 2_000;
+/** Give up (without sending anything) if a session never settles. */
+const RECOVERY_SETTLE_CAP_MS = 5 * 60_000;
+
+export interface RetryFailureInput {
+  sessionID: string;
+  providerID: string;
+  modelID: string;
+  errorType: string;
+  /** Whether OpenCode currently intends to retry this failure. */
+  willRetry: boolean;
 }
 
 export class PricingBlockedError extends Error {
@@ -75,6 +108,10 @@ export interface EngineOptions {
   repository: QueueRepository;
   config: ConfigRepository;
   sessions: SessionDriver;
+  /** Optional persisted recovery metadata for interactive sessions. */
+  recoveries?: RecoveryRepository;
+  /** Plugin instance location; recovery entries are scoped to it. */
+  location?: string;
   clock?: EngineClock;
   id?: () => string;
   onError?: (error: unknown) => void;
@@ -91,8 +128,13 @@ export class OffpeakEngine {
   readonly #signal: AsyncSignal;
   readonly #runners = new Set<string>();
   readonly #interactiveWaiters = new Set<number>();
+  readonly #recoveriesRepo: RecoveryRepository | undefined;
+  readonly #location: string;
+  readonly #recoveries = new Map<string, RecoveryEntry>();
+  readonly #recoveryChecks = new Map<string, number>();
   #nextInteractiveWaiter = 0;
   #timer: NodeJS.Timeout | undefined;
+  #recoveryTimer: NodeJS.Timeout | undefined;
   #watcher: FSWatcher | undefined;
   #disposed = false;
   #pumping: Promise<void> | undefined;
@@ -102,6 +144,8 @@ export class OffpeakEngine {
     this.#repo = options.repository;
     this.#config = options.config;
     this.#sessions = options.sessions;
+    this.#recoveriesRepo = options.recoveries;
+    this.#location = options.location ?? "";
     this.#clock = options.clock ?? systemClock;
     this.#signal = new AsyncSignal(this.#clock);
     this.#id = options.id ?? (() => crypto.randomUUID());
@@ -109,6 +153,11 @@ export class OffpeakEngine {
   }
 
   async start(): Promise<void> {
+    try {
+      await this.#loadRecoveries();
+    } catch (error) {
+      this.#onError(error);
+    }
     try {
       await this.#reconcileAfterLoad();
     } catch (error) {
@@ -131,6 +180,7 @@ export class OffpeakEngine {
     this.#disposed = true;
     this.#watcher?.close();
     if (this.#timer) this.#clock.clearTimeout(this.#timer);
+    if (this.#recoveryTimer) this.#clock.clearTimeout(this.#recoveryTimer);
     this.#signal.notify();
   }
 
@@ -318,6 +368,7 @@ export class OffpeakEngine {
         : {}),
       waiting: tasks.filter((task) => task.state === "WAITING_OFFPEAK").length,
       interactiveWaiting: this.#interactiveWaiters.size,
+      recoveryWaiting: this.#recoveries.size,
       failed: tasks.filter((task) => task.state === "FAILED").length,
       tasks,
       configPath: settings.path,
@@ -326,6 +377,8 @@ export class OffpeakEngine {
   }
 
   async guardRequest(input: GuardInput): Promise<void> {
+    // Any fresh request for this session supersedes a pending recovery continuation.
+    await this.#removeRecovery(input.sessionID);
     const task = await this.#taskForSession(input.sessionID);
     const first = await this.#config.read();
     if (!first.config)
@@ -431,6 +484,172 @@ export class OffpeakEngine {
     return waiter;
   }
 
+  /**
+   * Called from OpenCode's `retry` hook before a retry is scheduled. When a
+   * retryable provider/network failure happens while pricing is blocked in auto
+   * mode, the retry is stopped and the work is marked to continue at the next
+   * allowed window instead of failing the turn. Returns "hold" when the caller
+   * must veto the retry (`decision = { retry: false }`).
+   */
+  async noteRetryFailure(input: RetryFailureInput): Promise<"pass" | "hold"> {
+    if (this.#disposed) return "pass";
+    const settings = await this.#config.read();
+    if (!settings.config) return "pass";
+    if (!settings.config.enabled || settings.config.mode !== "auto") return "pass";
+    if (!input.willRetry && !RETRYABLE_ERROR_TYPES.has(input.errorType)) return "pass";
+    const decision = evaluatePricing(
+      settings.config.policies,
+      input.providerID,
+      input.modelID,
+      this.#clock.now(),
+    );
+    if (decision.state !== "PEAK") return "pass";
+    const task = await this.#taskForSession(input.sessionID);
+    if (task) {
+      if (this.#hasOverride(task, this.#clock.now())) return "pass";
+      if (task.state !== "RUNNING" && task.state !== "WAITING_OFFPEAK") return "pass";
+      if (task.state === "RUNNING") {
+        await this.#updateTask(task.id, (current) => {
+          current.state = "WAITING_OFFPEAK";
+          delete current.lastError;
+        });
+      }
+      this.#signal.notify();
+      this.#requestPump();
+      return "hold";
+    }
+    await this.#registerRecovery(input.sessionID, input.providerID, input.modelID);
+    this.#signal.notify();
+    this.#requestPump();
+    return "hold";
+  }
+
+  async #loadRecoveries(): Promise<void> {
+    const repo = this.#recoveriesRepo;
+    if (!repo) return;
+    const document = await repo.load();
+    for (const entry of document.entries) {
+      if (entry.directory !== this.#location) continue;
+      this.#recoveries.set(entry.sessionID, entry);
+    }
+  }
+
+  async #registerRecovery(sessionID: string, providerID: string, modelID: string): Promise<void> {
+    if (this.#recoveries.has(sessionID)) return;
+    this.#recoveries.set(sessionID, {
+      sessionID,
+      providerID,
+      modelID,
+      directory: this.#location,
+      heldAt: new Date(this.#clock.now()).toISOString(),
+    });
+    await this.#persistRecoveries();
+  }
+
+  async #removeRecovery(sessionID: string): Promise<void> {
+    this.#recoveryChecks.delete(sessionID);
+    if (!this.#recoveries.delete(sessionID)) return;
+    await this.#persistRecoveries();
+  }
+
+  async #persistRecoveries(): Promise<void> {
+    const repo = this.#recoveriesRepo;
+    if (!repo) return;
+    await this.#lock.run(async () => {
+      const document = await repo.load();
+      const others = document.entries.filter((entry) => entry.directory !== this.#location);
+      await repo.save({
+        schemaVersion: 1,
+        entries: [...others, ...this.#recoveries.values()],
+      });
+    });
+  }
+
+  /**
+   * Sends recovery continuations for sessions whose allowed window has arrived.
+   * Called from the pump, so the existing signal and boundary timer drive it;
+   * there is no polling loop.
+   */
+  async #flushRecoveries(): Promise<void> {
+    if (this.#disposed) return;
+    if (this.#recoveries.size === 0) {
+      this.#scheduleRecovery(undefined);
+      return;
+    }
+    const settings = await this.#config.read();
+    if (!settings.config) return;
+    let next: number | undefined;
+    for (const entry of [...this.#recoveries.values()]) {
+      if (entry.directory !== this.#location) continue;
+      const decision = evaluatePricing(
+        settings.config.policies,
+        entry.providerID,
+        entry.modelID,
+        this.#clock.now(),
+      );
+      if (settings.config.enabled && decision.allowed) {
+        const retryAt = await this.#deliverRecovery(entry);
+        if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
+        continue;
+      }
+      if (settings.config.enabled && decision.nextTransition !== undefined) {
+        next =
+          next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
+      }
+    }
+    this.#scheduleRecovery(next);
+  }
+
+  /** Returns a timestamp to retry at when the session has not settled yet. */
+  async #deliverRecovery(entry: RecoveryEntry): Promise<number | undefined> {
+    let outcome: string | undefined;
+    try {
+      outcome = (await this.#sessions.get(entry.sessionID)).outcome;
+    } catch (error) {
+      this.#onError(error);
+      await this.#removeRecovery(entry.sessionID);
+      return undefined;
+    }
+    if (outcome === "succeeded") {
+      await this.#removeRecovery(entry.sessionID);
+      return undefined;
+    }
+    if (outcome === undefined) {
+      const firstCheck = this.#recoveryChecks.get(entry.sessionID) ?? this.#clock.now();
+      this.#recoveryChecks.set(entry.sessionID, firstCheck);
+      if (this.#clock.now() - firstCheck < RECOVERY_SETTLE_CAP_MS) {
+        return this.#clock.now() + RECOVERY_SETTLE_DELAY_MS;
+      }
+      await this.#removeRecovery(entry.sessionID);
+      this.#onError(
+        new Error(`Offpeak recovery for ${entry.sessionID} skipped: the session did not settle.`),
+      );
+      return undefined;
+    }
+    // Remove before sending so the continuation is delivered at most once.
+    await this.#removeRecovery(entry.sessionID);
+    try {
+      await this.#sessions.prompt(entry.sessionID, RECOVERY_CONTINUATION);
+    } catch (error) {
+      this.#onError(error);
+    }
+    return undefined;
+  }
+
+  #scheduleRecovery(at?: number): void {
+    if (this.#recoveryTimer) {
+      this.#clock.clearTimeout(this.#recoveryTimer);
+      this.#recoveryTimer = undefined;
+    }
+    if (at === undefined || this.#disposed) return;
+    const delay = Math.max(1, at - this.#clock.now());
+    this.#recoveryTimer = this.#clock.setTimeout(() => {
+      this.#recoveryTimer = undefined;
+      void this.#flushRecoveries().catch((error) => this.#onError(error));
+    }, delay);
+    this.#recoveryTimer.unref?.();
+  }
+
   #hasOverride(task: OffpeakTask | undefined, nowMs: number): boolean {
     return Boolean(task?.overrideUntil && Date.parse(task.overrideUntil) > nowMs);
   }
@@ -496,6 +715,7 @@ export class OffpeakEngine {
       this.#clock.clearTimeout(this.#timer);
       this.#timer = undefined;
     }
+    await this.#flushRecoveries();
     const settings = await this.#config.read();
     if (!settings.config?.enabled || this.#disposed) return;
     if (this.#runners.size) return;

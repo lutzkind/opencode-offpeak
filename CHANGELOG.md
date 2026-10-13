@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 - 2026-10-13
+
+- Retryable provider/network failures that happen after peak pricing begins no longer lose the work. The plugin registers OpenCode v2's supported `retry` hook and vetoes retries while pricing is blocked (`decision = { retry: false }`), so no retry attempt reaches the provider during peak.
+- A queue-owned `auto` task that fails retryably during peak moves to `WAITING_OFFPEAK` (not `FAILED`), keeps its session ID, and continues the same session at the next off-peak transition with the safe continuation prompt.
+- A normal interactive session that fails retryably during peak is recorded with minimal recovery metadata in OpenCode plugin storage and continues the same session the same way. `/offpeak status` reports it as `Recovery: N session(s) waiting for off-peak`.
+- Non-retryable failures still end as `FAILED`/error; retryable failures while pricing is allowed keep OpenCode's normal retry behavior; OFF, `queue`, and `guard` modes are unchanged. The continuation never replays the failed provider request, never creates a new session, and never duplicates the user prompt.
+- Added deterministic regression coverage for the retry veto, the task transition to `WAITING_OFFPEAK`, the interactive recovery and its single delivery, location-scoped persistence across restart, supersede-on-new-request, non-retryable failures, OFF/queue/guard passivity, UNTRACKED/UNKNOWN pass-through, and the override case.
+
 ## 0.1.2 - 2026-10-12
 
 - Normal interactive OpenCode requests now wait at the pricing boundary in `auto` mode instead of being discarded. The same request and session proceed automatically at the policy's next off-peak transition, with no second message, no duplicate prompt, no new session, and zero provider traffic while pricing is blocked.
