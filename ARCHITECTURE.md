@@ -17,8 +17,10 @@ flowchart LR
   RPC --> Engine[Queue and toggle engine]
   Engine --> Storage[OpenCode plugin storage]
   Engine --> Sessions[OpenCode session API]
+  Sessions --> Defer[Pre-model hook: model.request]
   Sessions --> Guard[HTTP and WebSocket request hooks]
-  Guard --> Policy[Pricing policy evaluator]
+  Defer --> Policy[Pricing policy evaluator]
+  Guard --> Policy
   Policy -->|allowed| Provider[Configured model provider]
   Policy -->|peak, OFF, or unknown| Wait[Block or wait before send]
 ```
@@ -51,24 +53,29 @@ OFF does not delete state. It stops automatic starts and resumes. If a queued ta
 
 ## Request guard and policy evaluation
 
-The server plugin attaches through `context.session.hook()` to OpenCode v2's `http.request`, `experimental.ws.handshake`, and `experimental.ws.send` hooks. These run before the provider transport sends the request/frame. A queued `auto` task transitions to `WAITING_OFFPEAK` and holds that same session at the request boundary until the plugin is enabled and the pricing policy allows it (or its explicit override is still valid).
+The server plugin registers two lifecycle points:
 
-In `auto` mode, a normal interactive request for a supported model is held at the same boundary instead of being discarded. It creates no task and no session, is tracked only in server memory (shown by `/offpeak status`), and is released exactly once when the plugin is enabled and the policy allows. Wake-ups come from the shared config-change signal plus one timer scheduled for the policy's `nextTransition`; there is no polling loop. If the plugin shuts down while a request is held, the request fails closed as blocked rather than being sent under an uncertain pricing state. Requests in `queue`/`guard` mode, and requests that arrive while the plugin is OFF, are blocked immediately; OFF does not release a request that is already held.
+- `model.request` — runs while OpenCode prepares every model request (primary, compaction, title, generate), before the provider attempt and its response-header timeout exist. In `auto` mode this is where a peak-priced request is deferred: nothing is sent, no attempt timer runs, and the same session continues the same turn at the next allowed window.
+- `http.request`, `experimental.ws.handshake`, and `experimental.ws.send` — run immediately before the provider transport sends the request/frame. These remain the final hard barrier: a blocked request never crosses them, and OFF/`queue`/`guard` modes block interactive requests here exactly as before.
 
-### Peak-aware retry recovery
+A queued `auto` task transitions to `WAITING_OFFPEAK` and waits at whichever point it reaches first (normally `model.request`); its existing override still applies. In `auto` mode, a normal interactive request for a supported model is deferred the same way. It creates no task and no session, is tracked only in server memory (shown by `/offpeak status`), and is released exactly once when the plugin is enabled and the policy allows. Wake-ups come from the shared config-change signal plus one timer scheduled for the policy's `nextTransition`; there is no polling loop. If the plugin shuts down while a request is held, the request fails closed as blocked rather than being sent under an uncertain pricing state. Requests in `queue`/`guard` mode, and requests that arrive while the plugin is OFF, are blocked immediately by the transport guard; OFF does not release a request that is already held.
 
-OpenCode retries retryable transport failures on its own (for the agent loop: attempts 2–4 with jittered backoff, denied at attempt 5). Each retry attempt is a new paid request, and every attempt re-enters the `http.request`/`ws` guard hooks, so a retry during peak would either be held (and time out while held, because the header-timeout clock starts at attempt start) or exhaust the retry budget and fail the turn.
+### Peak-aware retry recovery and the inactivity safety net
+
+OpenCode retries retryable transport failures on its own (for the agent loop: jittered exponential backoff; header-timeout failures are bounded to three retries). Each retry attempt is a new paid request, and every attempt re-enters the whole hook chain, so a retry during peak would either be held or exhaust the retry budget and fail the turn.
 
 The server plugin therefore also registers OpenCode's supported `retry` hook. The hook runs after OpenCode classifies a failure and before any retry is scheduled. When the plugin is ON in `auto` mode, the failure is retryable (`decision.retry === true`, or a retryable `provider.transport`/`provider.internal`/`provider.rate-limit` type after a retry sequence), and the policy blocks the model, the plugin sets `decision = { retry: false }` and records the recovery:
 
 - A queue-owned task in `RUNNING` moves to `WAITING_OFFPEAK` (not `FAILED`) and keeps its session ID. The existing pump resumes it at the next allowed window with the safe continuation prompt.
 - A normal interactive session is recorded in a small persisted recovery document scoped to the plugin location; at the next allowed window the engine sends the same safe continuation prompt into the same session.
 
+OpenCode's location-activity sweep interrupts sessions whose location has had no durable events for 60 minutes (`session.execution.interrupted`, reason `inactivity`). The plugin subscribes to OpenCode's supported event stream and, for `inactivity` interrupts of sessions it is currently deferring, releases the hold and records the same persisted recovery so the session continues automatically at the next allowed window. `user` and `shutdown` interrupts are ignored by that path.
+
 Non-retryable failures (`provider.invalid-request`, `provider.auth`, `provider.quota`, `provider.content-filter`, …) are left untouched and still end as `FAILED`/error. Failures while pricing is allowed keep OpenCode's normal retry behavior. OFF, `queue`, and `guard` modes are unchanged. The continuation is a new state-aware turn; the failed provider request is never replayed byte-for-byte. A recovery whose session never settles is dropped without sending anything.
 
 Policy matching uses provider IDs and exact/glob model IDs. A configured provider with an unknown model is `UNKNOWN` and blocked. Invalid timezone or schedule data is blocked. Providers without an installed policy are `UNTRACKED`; they are not covered by this plugin until a policy is added. Queue tasks must match a valid policy.
 
-The built-in `deepseek-opencode-go` policy is defined once in `src/policy.ts`, in UTC. Time evaluation uses `Intl.DateTimeFormat` and the policy's IANA timezone, including weekday changes and DST. The user's display timezone does not change pricing boundaries.
+The built-in `deepseek-opencode-go` policy is defined once in `src/policy.ts`, in UTC, with the Chinese statutory holiday calendar in `src/holidays.ts`. Time evaluation uses `Intl.DateTimeFormat` and the policy's IANA timezone, including weekday changes and DST; holiday dates are evaluated on the calendar's own timezone (`Asia/Shanghai`) so the host-local timezone never matters. The user's display timezone does not change pricing boundaries. Full-day off-peak exception dates override every weekday peak window, and `nextTransition` skips holiday peak windows.
 
 ## Queue execution and sessions
 
@@ -80,7 +87,7 @@ Completion uses OpenCode's session outcome (`succeeded`) after the session wait 
 
 OpenCode's v2 recovery is at-least-once, not exactly-once. If the plugin finds a task in `RUNNING` after plugin/server startup, it waits for its stored session. If OpenCode reports success, the task completes. Otherwise the outcome may be ambiguous, so the plugin marks it `FAILED` and does not send a duplicate prompt automatically. The user can inspect and explicitly retry the same session.
 
-A `WAITING_OFFPEAK` record is written before the guarded request is allowed. That state is safe for automatic same-session resume in `auto` mode. Interactive holds are intentionally not persisted: they belong to a live provider request, so a server restart cannot release them and shutdown fails them closed instead. Retry recoveries for interactive sessions are persisted (minimal metadata: session ID, provider/model, location) because their provider request is already finished; a reload or restart during peak keeps the pending continuation, which is delivered only when the session has settled with a failed/interrupted outcome and pricing allows. A running OpenCode server is required for automatic timers; the plugin does not install or operate a separate daemon. The supported OpenCode background service can remain running when the TUI terminal closes. Machine-restart startup is delegated to the host OS service manager if desired.
+A `WAITING_OFFPEAK` record is written before the guarded request is allowed. That state is safe for automatic same-session resume in `auto` mode. A hold for a live request (interactive or queue-owned) is intentionally not persisted as a request: it belongs to a running OpenCode session, so a plugin/server shutdown fails it closed instead of replaying it; the OpenCode server's own execution-claim recovery can resume sessions interrupted by a crash, and the plugin enforces pricing when they come back. Retry recoveries and inactivity-released holds are persisted (minimal metadata: session ID, provider/model, location) because their provider request is already finished or the session was deliberately interrupted; a reload or restart during peak keeps the pending continuation, which is delivered only when the session has settled with a failed/interrupted outcome and pricing allows. A running OpenCode server is required for automatic timers; the plugin does not install or operate a separate daemon. The supported OpenCode background service can remain running when the TUI terminal closes. Machine-restart startup is delegated to the host OS service manager if desired.
 
 ## Override
 

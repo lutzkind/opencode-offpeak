@@ -23,7 +23,24 @@ The policy includes a source URL and verification date to make schedule provenan
 
 ## Built-in policy
 
-`deepseek-opencode-go` matches provider ID `opencode-go` and the DeepSeek model IDs listed in the [README](../README.md). Its canonical schedule is defined only in `src/policy.ts`. It follows the current [OpenCode Go pricing page](https://opencode.ai/docs/go/); it does not assume the separate direct DeepSeek API holiday schedule applies to OpenCode Go.
+`deepseek-opencode-go` matches provider ID `opencode-go` and the DeepSeek model IDs listed in the [README](../README.md). Its canonical schedule is defined only in `src/policy.ts`, with the holiday calendar in `src/holidays.ts`.
+
+The rules are: peak Monday–Friday 01:00–04:00 and 06:00–10:00 UTC; off-peak all other hours, weekends, and Chinese statutory public holidays in full; weekend make-up working days stay off-peak because weekends are always off-peak.
+
+Holiday support uses explicit full-day OFF_PEAK exception calendars on the policy:
+
+```json
+{
+  "year": 2026,
+  "timeZone": "Asia/Shanghai",
+  "dates": ["2026-10-01", "2026-10-02"],
+  "source": "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html",
+  "verifiedAt": "2026-10-14",
+  "description": "Chinese statutory public holidays; State Council notice"
+}
+```
+
+A listed date overrides every weekday peak window for the whole calendar day in the calendar's own time zone. The built-in 2026 calendar comes from the official State Council notice; `nextTransition` skips holiday peak windows; a year without a calendar keeps the deterministic weekly schedule, and no future dates are guessed. The State Council publishes the next year's arrangement each November, so the calendar needs one data update per year. The rule follows the DeepSeek pricing documentation referenced by the OpenCode Go pricing page; upstream [anomalyco/opencode#53071](https://github.com/anomalyco/opencode/issues/53071) tracks an open report about National Day billing and is the cue for the annual re-check.
 
 An unknown model under provider `opencode-go` returns `UNKNOWN` and fails closed. Add a verified model/policy entry before relying on newly added provider models.
 

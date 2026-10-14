@@ -1,3 +1,5 @@
+import { CHINA_PUBLIC_HOLIDAYS, type HolidayCalendar } from "./holidays.js";
+
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface WeeklyWindow {
@@ -13,6 +15,12 @@ export interface PricingPolicy {
   models: string[];
   timeZone: string;
   blocked: WeeklyWindow[];
+  /**
+   * Full-day OFF_PEAK exception calendars, for example statutory public
+   * holidays. A date listed in a calendar overrides every weekly PEAK window
+   * for that whole calendar day in the calendar's time zone.
+   */
+  holidays?: HolidayCalendar[];
   multiplier?: number;
   source: string;
   verifiedAt?: string;
@@ -26,6 +34,14 @@ export interface PolicyDecision {
   reason?: string;
 }
 
+// DeepSeek's official pricing documentation states the peak windows and the
+// holiday rule: "Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday
+// through Friday, excluding Chinese public holidays. All other hours are
+// off-peak, including weekends and Chinese public holidays in full."
+// (https://api-docs.deepseek.com/quick_start/pricing). The OpenCode Go pricing
+// page documents the same windows for this provider
+// (https://opencode.ai/docs/go/). Holiday dates come from the State Council
+// calendar in src/holidays.ts.
 export const DEEPSEEK_OPENCODE_GO: PricingPolicy = {
   id: "deepseek-opencode-go",
   providers: ["opencode-go"],
@@ -40,14 +56,19 @@ export const DEEPSEEK_OPENCODE_GO: PricingPolicy = {
     { days: [1, 2, 3, 4, 5], start: "01:00", end: "04:00" },
     { days: [1, 2, 3, 4, 5], start: "06:00", end: "10:00" },
   ],
+  holidays: CHINA_PUBLIC_HOLIDAYS,
   multiplier: 2,
   source: "https://opencode.ai/docs/go/",
-  verifiedAt: "2026-10-09",
+  verifiedAt: "2026-10-14",
 };
 
 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MINUTE_MS = 60_000;
-const MAX_LOOKAHEAD_MINUTES = 8 * 24 * 60;
+// A transition is normally less than a week away; the longest Chinese holiday
+// run (the Spring Festival) can push the next weekly PEAK window just past a
+// week, so the scan looks two weeks ahead before failing closed.
+const MAX_LOOKAHEAD_DAYS = 14;
+const MAX_LOOKAHEAD_MINUTES = MAX_LOOKAHEAD_DAYS * 24 * 60;
 
 export function validateTimeZone(timeZone: string): void {
   try {
@@ -78,11 +99,53 @@ export function validatePolicy(policy: PricingPolicy): void {
     const end = minuteOfDay(window.end);
     if (start === end) throw new Error(`Policy ${policy.id} contains a zero-length window.`);
   }
+  if (policy.holidays !== undefined) {
+    if (!Array.isArray(policy.holidays)) {
+      throw new Error(`Policy ${policy.id} holiday calendars must be an array.`);
+    }
+    for (const calendar of policy.holidays) validateHolidayCalendar(policy.id, calendar);
+  }
   if (
     policy.multiplier !== undefined &&
     (!Number.isFinite(policy.multiplier) || policy.multiplier < 1)
   ) {
     throw new Error(`Policy ${policy.id} has an invalid price multiplier.`);
+  }
+}
+
+function validateHolidayCalendar(policyID: string, calendar: HolidayCalendar): void {
+  const label = `Policy ${policyID} holiday calendar`;
+  if (!Number.isInteger(calendar.year)) throw new Error(`${label} year must be an integer.`);
+  if (typeof calendar.timeZone !== "string" || !calendar.timeZone.trim()) {
+    throw new Error(`${label} for ${calendar.year} requires an IANA time zone.`);
+  }
+  validateTimeZone(calendar.timeZone);
+  if (typeof calendar.source !== "string" || !calendar.source.trim()) {
+    throw new Error(`${label} for ${calendar.year} requires a source URL.`);
+  }
+  if (!Array.isArray(calendar.dates)) {
+    throw new Error(`${label} for ${calendar.year} dates must be an array.`);
+  }
+  for (const date of calendar.dates) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    if (!match) throw new Error(`${label} date ${date} must be formatted as YYYY-MM-DD.`);
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    if (
+      probe.getUTCFullYear() !== year ||
+      probe.getUTCMonth() !== month - 1 ||
+      probe.getUTCDate() !== day
+    ) {
+      throw new Error(`${label} date ${date} is not a real calendar date.`);
+    }
+    if (year !== calendar.year) {
+      throw new Error(`${label} date ${date} does not belong to calendar year ${calendar.year}.`);
+    }
+  }
+  if (new Set(calendar.dates).size !== calendar.dates.length) {
+    throw new Error(`${label} for ${calendar.year} contains duplicate dates.`);
   }
 }
 
@@ -121,7 +184,45 @@ function localParts(epochMs: number, format: Intl.DateTimeFormat) {
   };
 }
 
+const holidayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function holidayFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = holidayFormatters.get(timeZone);
+  if (cached) return cached;
+  validateTimeZone(timeZone);
+  const format = new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  holidayFormatters.set(timeZone, format);
+  return format;
+}
+
+function calendarDate(epochMs: number, format: Intl.DateTimeFormat): string {
+  const parts = Object.fromEntries(
+    format.formatToParts(epochMs).map(({ type, value }) => [type, value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+/**
+ * Full-day OFF_PEAK exceptions (for example Chinese statutory public
+ * holidays) override every weekly PEAK window for the whole calendar day in
+ * the calendar's own time zone, so the host-local time zone never matters.
+ */
+function isFullDayOffPeak(policy: PricingPolicy, epochMs: number): boolean {
+  for (const calendar of policy.holidays ?? []) {
+    if (calendar.dates.includes(calendarDate(epochMs, holidayFormatter(calendar.timeZone)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function isBlockedAt(policy: PricingPolicy, epochMs: number, format: Intl.DateTimeFormat): boolean {
+  if (isFullDayOffPeak(policy, epochMs)) return false;
   const local = localParts(epochMs, format);
   return policy.blocked.some((window) => {
     const start = minuteOfDay(window.start);
@@ -144,7 +245,9 @@ function nextTransition(policy: PricingPolicy, nowMs: number, currentBlocked: bo
     const candidate = first + minute * MINUTE_MS;
     if (isBlockedAt(policy, candidate, format) !== currentBlocked) return candidate;
   }
-  throw new Error(`No pricing transition found in the next eight days for ${policy.id}.`);
+  throw new Error(
+    `No pricing transition found in the next ${MAX_LOOKAHEAD_DAYS} days for ${policy.id}.`,
+  );
 }
 
 function matches(pattern: string, modelID: string): boolean {

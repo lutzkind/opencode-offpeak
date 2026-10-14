@@ -37,9 +37,14 @@ export interface QueueDocument {
 }
 
 /**
- * Minimal recovery metadata for an interactive session whose provider request
- * failed retryably while pricing was blocked. The session itself is untouched;
- * only the identity needed to continue it at the next off-peak window is kept.
+ * Minimal recovery metadata for a session whose provider request must continue
+ * at the next allowed window. The session itself is untouched; only the
+ * identity needed to continue it is kept.
+ *
+ * `origin` distinguishes a request that failed retryably during a peak crossing
+ * ("retry-failure") from a primary interactive request that was deferred before
+ * its provider attempt ("deferred"). Both continue automatically; a user
+ * interrupt clears a deferral but not a retry-failure.
  */
 export interface RecoveryEntry {
   sessionID: string;
@@ -47,6 +52,7 @@ export interface RecoveryEntry {
   modelID: string;
   directory: string;
   heldAt: string;
+  origin?: "retry-failure" | "deferred";
 }
 
 export interface RecoveryDocument {
@@ -218,6 +224,13 @@ function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
     typeof value.heldAt !== "string"
   ) {
     throw new Error(`Stored recovery entry ${index} has invalid fields.`);
+  }
+  if (
+    value.origin !== undefined &&
+    value.origin !== "retry-failure" &&
+    value.origin !== "deferred"
+  ) {
+    throw new Error(`Stored recovery entry ${index} has an invalid origin.`);
   }
   return value as unknown as RecoveryEntry;
 }

@@ -13,13 +13,13 @@ The setting file is `$OPENCODE_CONFIG_DIR/offpeak.json` when `OPENCODE_CONFIG_DI
 }
 ```
 
-If `policies` is omitted, the built-in DeepSeek/OpenCode Go policy is used. If you provide `policies`, treat the array as the full active policy set and include the built-in entry too if you still want DeepSeek Go protection. An empty array is invalid. Do not configure overlapping policies for the same provider/model.
+If `policies` is omitted, the built-in DeepSeek/OpenCode Go policy is used. If you provide `policies`, treat the array as the full active policy set and include the built-in entry too if you still want DeepSeek Go protection. An empty array is invalid. Do not configure overlapping policies for the same provider/model. A stored policy that is otherwise identical to a built-in policy (same id, providers, models, time zone, multiplier, and weekly windows) adopts the built-in holiday calendar automatically, so yearly holiday updates apply without editing the file; any customized difference — including an explicit `holidays` list — is preserved exactly.
 
 ## Fields
 
 - `schemaVersion`: must be `1`.
 - `enabled`: boolean, default `true`. `/offpeak on|off` updates this same value.
-- `mode`: `auto` (default), `queue`, or `guard`. In `auto`, normal interactive peak requests are held at the provider boundary and released when off-peak returns; `queue` and `guard` block interactive peak requests immediately.
+- `mode`: `auto` (default), `queue`, or `guard`. In `auto`, normal interactive peak requests are deferred at OpenCode's pre-model hook and released when off-peak returns; `queue` and `guard` block interactive peak requests immediately at the transport guard.
 - `displayTimeZone`: valid IANA timezone for status output; defaults to the system timezone.
 - `policies`: complete list of pricing policy definitions. See [pricing policies](pricing-policies.md).
 
