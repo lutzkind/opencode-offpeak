@@ -1,20 +1,67 @@
-# Handoff — 2026-10-13
+# Handoff — 2026-10-14
 
 ## Release status
 
-`opencode-offpeak` v0.1.3 is the canonical release:
+`opencode-offpeak` v0.1.4 is the canonical release:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.3`
-- Tag commit: `38c8cb250c48c50aecd972eff64840e1f68d0cfa` (merge of PR #8)
-- Fix commit: `a626e09f381b2a354d2fe55b9df43134db83ec14`
-- Attached `opencode-offpeak-0.1.3.tgz` SHA-256: `edfeb739be653ee2aebd6d5e7e456cdc7dc42793e6b6bdce24052548a59e5ff1` (matches `npm pack` from the tag commit)
-- The `v0.1.0`, `v0.1.1`, and `v0.1.2` tags were not mutated and remain installable.
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.4`
+- Tag commit: `4244f177afe0adfc0017d8dcc695a05274be7d27` (annotated tag object `2f2efede8c74a93193046ddcee89b13b2b30b125`; merge of PR #9 `60f13ec` plus the release-note correction `4244f17`)
+- Implementation commit: `c693fcc` (`fix(guard): defer peak requests before the provider attempt and add holiday-aware pricing`)
+- Attached `opencode-offpeak-0.1.4.tgz` SHA-256: `c7fc0d2883e15c047cdf11a5c9a2d5c254182d423044879edf11195a0a674c92` (reproduced byte-for-byte from a clean `v0.1.4` tag archive + `npm ci` + `npm run compile` + `npm pack`)
+- CI: PR #9 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38553957087`)
+- The `v0.1.0`, `v0.1.1`, `v0.1.2`, and `v0.1.3` tags were not mutated and remain installable.
 
-The live environment installs the exact tag: `/root/.config/opencode/opencode.json` contains `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3`, `/api/plugin` reports `version 38c8cb250c48c50aecd972eff64840e1f68d0cfa` with server and TUI features active, and the live server loads `src/server.ts` from the tag cache.
+## 2026-10-14 v0.1.4 — pre-model peak deferral (the remaining header timeout)
+
+**Live state before the fix (verified, not assumed):** OpenCode CLI and the background service ran **2.0.27**; `/root/.config/opencode/opencode.json` pinned exactly `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3`; `/api/plugin` reported `opencode-offpeak` at `38c8cb250c48c50aecd972eff64840e1f68d0cfa` with server+TUI active; the server loaded `src/server.ts` from the v0.1.3 tag cache `git-opencode-offpeak-fabcc95a158b`. The single TUI process (PID 4053968) started 2026-10-14 07:49, after the v0.1.3 install, so the loaded server and TUI code were v0.1.3. Live `/offpeak status`: ON, mode `auto`, OFF_PEAK, queue/recovery/failed all empty.
+
+**The reported error was real and live.** `/root/.local/share/opencode/log/opencode.log` contains the exact sequence: this session's task prompt was submitted at `2026-10-14T09:30:29Z` (PEAK 06:00–10:00 UTC) and the server logged `Failed to drain Session — AI.Error.Transport: Timed out waiting for response headers` at `09:35:29Z` — **exactly 5 minutes later**. The v0.1.3 retry hook vetoed the retry and the persisted recovery delivered the same-session continuation at the `10:00:00Z` boundary (DB message seq 11). Earlier identical failures were logged at 06:05, 06:10, 07:54, 07:55, 08:04 and 09:35 UTC on 2026-10-14 — all inside PEAK windows.
+
+**Root cause (OpenCode 2.0.27 source, verified in `packages/ai` / `packages/core`):** the provider transport wraps `runtime.http.execute(...)` in `Effect.timeoutOrElse(request.http.headerTimeout ?? 300_000ms)` (`packages/ai/src/route/transport/http.ts`), and the plugin's `http.request` hook is invoked *inside* that wrapped call (`packages/core/src/session/model-request.ts` builds `options.http` middleware that triggers `http.request` and then calls the real handler). The response-header-timeout clock therefore starts at attempt start, before the hook chain completes; the v0.1.2–v0.1.3 hold inside `http.request` could not outlast it. `model.request`, by contrast, is triggered in `SessionModelRequest.prepare()` — after the `context`/`title` hooks and **before** `steps.attempt` starts the transport attempt. The default header timeout is `DEFAULT_HTTP_TIMEOUT_MS = 300_000` (`packages/ai/dist/schema/options.js`), which matches the observed 5-minute gap exactly.
+
+**Deterministic reproduction (real 2.0.27 binary + local fixture provider, no paid traffic):** a probe plugin holding `http.request kind=primary` for 10s with a 5s provider `headerTimeout` reproduced the failure — the timeout fired 5s in, the hook kept running (a stale waiter; JS promises are not effect-cancelled), OpenCode retried 4 times and the turn ended with `Error: Timed out waiting for response headers`, exit code 1, and the fixture received only the title request. The same hold applied to `model.request kind=primary` produced **no timeout**: the hold ran to completion, the provider request was sent only after release, and the run exited 0 with one reply. With the actual v0.1.3 plugin and a short simulated PEAK window, the same harness failed at +5.1s (`Failed to drain Session` at 11:03:29.7Z for a submission at 11:03:24.6Z) and the session continued only through the retry-recovery continuation at the boundary.
+
+**Fix (v0.1.4):**
+
+- The pre-model `model.request` hook defers a peak-priced request in `auto` mode before any provider attempt (or its header-timeout clock) exists. Nothing reaches the provider while pricing is blocked; the same session continues the same turn when the boundary arrives. No timeout to outlast, no retry used as the waiting mechanism, no synthetic continuation, no duplicate prompt, no new session.
+- The transport guard (`http.request`, `experimental.ws.handshake`, `experimental.ws.send`) is unchanged and remains the final hard barrier; `queue`/`guard`/OFF behavior for interactive requests is exactly as before, and UNKNOWN still fails closed.
+- A held **primary** interactive request persists a deferral (`RecoveryRepository`, origin `deferred`, minimal metadata) while it waits and removes it again on normal release, so a plugin reload or server restart during PEAK still delivers exactly one same-session continuation once the allowed window arrives (a reload keeps the original hold alive when the plugin instance survives; a restart delivers the continuation as soon as the location is next active and pricing allows). The origin field distinguishes deferrals from v0.1.3 retry failures and is backward compatible with stored entries.
+- **Origin-aware interrupts:** the plugin subscribes to OpenCode's event stream (`session.execution.interrupted`). `inactivity` (OpenCode's 60-minute location-activity sweep) keeps the deferral and aborts the stale hold; `user` clears a deferral and aborts the hold (a cancel never continues); `superseded`/`shutdown` abort the hold and leave the outcome to OpenCode's own execution-claim recovery. No new runtime, daemon, database, scheduler, or polling loop.
+- The **v0.1.3 cross-boundary recovery is preserved**: a request that started OFF_PEAK, was accepted, and failed retryably after crossing into PEAK still has its retry vetoed (`decision = { retry: false }`) and continues in the same session at the next allowed window.
+
+**Chinese public holidays are full-day OFF_PEAK (v0.1.4):**
+
+- Rule source: DeepSeek's official pricing documentation (`https://api-docs.deepseek.com/quick_start/pricing`): "Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, **excluding Chinese public holidays**. All other hours are off-peak, including weekends and **Chinese public holidays in full**." The OpenCode Go pricing page documents the same weekly windows for this provider.
+- The policy model gains optional full-day OFF_PEAK exception calendars (`year`, `dates`, `timeZone`, `source`, `verifiedAt`, `description`). A listed date overrides every weekly PEAK window for the whole calendar day, evaluated in the calendar's own time zone (`Asia/Shanghai`), so the host-local time zone never matters. `nextTransition` skips holiday PEAK windows (the scan now covers 14 days so the 9-day Spring Festival cannot hide the next real transition).
+- The 2026 calendar ships in `src/holidays.ts`, sourced from the official State Council notice 国办发明电〔2025〕7号 (`https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html`, published 2025-11-04): **Jan 1–3, Feb 15–23, Apr 4–6, May 1–5, Jun 19–21, Sep 25–27, Oct 1–7** (33 dates; Jan 1–3 confirmed, etc.). Weekend make-up working days (Jan 4, Feb 14, Feb 28, May 9, Sep 20, Oct 10) remain OFF_PEAK because weekends are always off-peak and are deliberately not modelled as workdays. A year without a calendar keeps the deterministic weekly schedule — no future dates are guessed.
+- **Annual maintenance is required**: the State Council publishes the next year's arrangement each November; add the next calendar to `src/holidays.ts` (one data update; `docs/pricing-policies.md` documents the shape).
+- **Provider caveat (annual re-check):** OpenCode Go's own page omits the holiday clause, and upstream issue `anomalyco/opencode#53071` (open since 2026-10-04, no vendor reply) reports peak-rate billing during the 2026 National Day holiday; the account's October aggregate usage is also consistent with nominal billing. Go exposes no per-request billed cost, so the task's October 1–7 billing comparison is not observable and was explicitly non-blocking. The rule is implemented per the canonical DeepSeek documentation and the later task instruction; re-check the upstream issue and both pricing pages before each yearly calendar update.
+- **Config migration:** a stored `policies` array that is an unmodified copy of the built-in policy (same id, providers, models, time zone, multiplier, weekly windows) adopts the built-in holiday calendar when read in `src/config.ts`. The live `/root/.config/opencode/offpeak.json` persisted such a copy from an earlier toggle, so the live install gained the holidays without editing the file; customized policies and explicit `holidays` lists are preserved exactly.
+
+**Automated tests (71 pass — `npm run lint`, `npm run typecheck`, `npm test`, `npm pack`):** new deterministic coverage for the pre-model deferral released by the scheduled boundary timer with zero provider traffic, auxiliary-kind holds without deferrals, a queue-owned session held at the guard returning to RUNNING at the boundary, deferral persistence across a plugin reload, user/inactivity/shutdown interrupt semantics, normal-release deferral cleanup, stored-policy holiday adoption, and the full 2026 holiday policy (every period off-peak in both peak windows, make-up workdays off-peak, adjacent days normal, `nextTransition` skipping holidays, Asia/Shanghai calendar-time-zone semantics with synthetic policies, unknown years deterministic, validation fail-closed, empty holiday lists). Existing suites cover OFF/`queue`/`guard`/run-now/UNKNOWN/UNTRACKED/non-retryable/restart-recovery semantics unchanged.
+
+**Real OpenCode 2.0.27 fixture validation (v0.1.4 build, local fixture provider, short local policy windows, no paid traffic):** interactive PEAK submission deferred for the whole window with zero fixture requests, released exactly at the boundary minute, one session, one user + one assistant, exit 0; OFF_PEAK→PEAK crossing veto with zero provider traffic during PEAK and one same-session continuation at the boundary; queue task queued during PEAK waited in `WAITING_OFFPEAK`, auto-started exactly at the boundary and completed with one session and one request; `opencode reload` and a full server restart during a deferral both ended with exactly one continuation and no duplicate prompt; the v0.1.3 plugin under the same harness fails at +5.1s as described above.
+
+**Live installation (OpenCode 2.0.27):**
+
+- `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4` now lists exactly `#v0.1.4` in `/root/.config/opencode/opencode.json` (the stale `#v0.1.3` entry was removed with `opencode plugin remove`); cache `git-opencode-offpeak-c5f94a9feee0` contains the v0.1.4 sources including `src/holidays.ts`.
+- The shared background service was reloaded with the supported `opencode reload`. `/api/plugin` reports `opencode-offpeak` at `4244f177afe0adfc0017d8dcc695a05274be7d27` with server+TUI active; `/offpeak status` reports ON, `auto`, OFF_PEAK, empty queue/recovery.
+- Live holiday verification with the released code against the live config file: `2026-10-01T02:00Z` (National Day, Thursday, nominal PEAK window) → **OFF_PEAK**, `2026-10-12T02:00Z` (normal Monday) → **PEAK**, `2026-10-10T02:00Z` (adjusted Saturday workday) → **OFF_PEAK**.
+- Safe live OFF_PEAK smoke: `opencode run -m opencode-go/deepseek-v4.1-flash` replied `offpeak v0.1.4 live ok` at 11:10 UTC (OFF_PEAK) through the live plugin.
+- The TUI process PID 4053968 (started 07:49, before v0.1.4) still executes the v0.1.3 **TUI entrypoint** until it is relaunched; the server-side plugin is v0.1.4 and a fresh TUI loads v0.1.4. Only that TUI needs relaunching for the TUI-side code; no unrelated session was terminated.
+
+**Remaining intentional limitations (v0.1.4):** shutdown/reload fails a live deferral closed rather than guessing (the persisted deferral delivers the continuation instead); after a full server restart the continuation is delivered when the session's location is next active (OpenCode boots location services and plugins lazily) and can therefore lag the boundary; a request that passes `model.request` in OFF_PEAK and reaches the transport guard just after PEAK begins is still held at the transport guard (the final barrier) and could hit the 5-minute header timeout in that sub-millisecond boundary case; a user cancel clears a deferral and never auto-continues; OpenCode Go's holiday billing is not independently verifiable (annual re-check above); the retry hook still does not expose the request kind, so auxiliary retries during PEAK register a recovery entry like v0.1.3 did (a primary deferral for the same session supersedes it).
+
+## Housekeeping and documentation
+
+- Stale current-state wording from previous releases was corrected in this release: package/install references now point at v0.1.4 (`README.md`, `RELEASING.md`, `docs/troubleshooting.md`), the v0.1.2-era "held at the boundary" descriptions were rewritten for the pre-model deferral (`README.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `docs/concepts.md`, `docs/configuration.md`, `docs/queue.md`), and the old "User action required: None. The v0.1.2 GitHub release…" wording is superseded by this section. Historical release sections were left intact.
+- Branch housekeeping: the merged `release/v0.1.1`, `release/v0.1.2`, and `release/v0.1.3` branches were deleted locally and on `origin` (the tags keep the releases); `release/v0.1.4` was deleted after the merge.
+
+## 2026-10-13
 
 ## 2026-10-13 OpenCode 2.0.27 upgrade and validation
 
@@ -158,10 +205,10 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
-- Package: `opencode-offpeak@0.1.2`, MIT
+- Package: `opencode-offpeak@0.1.4`, MIT
 - Verified CLI: OpenCode v2.0.26 and v2.0.27
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
-- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3`
+- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
 
 ## Architecture
@@ -205,9 +252,10 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 - OpenCode compatibility is intentionally limited to the declared v2 range until later versions are tested. Hosts before 2.0.26 fail with the explicit compatibility error; the TUI process must be restarted after `opencode upgrade` to pick up a newer binary.
 - WebSocket request hooks are experimental in OpenCode v2.
-- An interactive request held in `auto` mode lives in the running server process; a plugin/server shutdown fails it closed instead of replaying it.
+- A request deferred in `auto` mode lives in the running server process; a plugin/server shutdown fails it closed instead of replaying it, and the persisted deferral delivers one same-session continuation once the allowed window arrives.
 - In a shared OpenCode server, plugins load once per workspace, so the in-memory `interactiveWaiting` count is visible only from the instance that holds the request. The hold and release behavior is instance-independent and unaffected.
-- A provider request already accepted before a pricing boundary cannot be recalled.
+- A provider request already accepted before a pricing boundary cannot be recalled. A request that passes the pre-model guard just before PEAK begins is still caught by the transport guard, where a hold longer than the 5-minute provider header timeout can time out in that sub-millisecond boundary case.
+- After a full server restart, a persisted deferral continues the session when the location is next active (OpenCode boots locations and plugins lazily), so the continuation can lag the boundary until then.
 - Ambiguous provider outcomes after a crash are not replayed automatically; delivery is not exactly-once.
 - Providers without a configured policy are `UNTRACKED`; this plugin does not guard them until a verified policy is added.
 - Machine-boot startup depends on the user's OS service manager.
@@ -215,7 +263,7 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 ## User action required
 
-None. The v0.1.2 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. If a terminal still runs a TUI started before an `opencode upgrade`, exit and relaunch it so the TUI executes the supported version; the plugin reports that condition explicitly.
+None. The v0.1.4 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. The server-side plugin is already reloaded to v0.1.4; a TUI process started before the reload (for example PID 4053968) keeps its v0.1.3 TUI entrypoint until it is relaunched, and the plugin reports that condition explicitly.
 
 ## Next normal maintenance
 
