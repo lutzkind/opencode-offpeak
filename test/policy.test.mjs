@@ -109,3 +109,154 @@ test("invalid timezone and schedule data fail closed", () => {
     "UNKNOWN",
   );
 });
+
+const dateRange = (start, end) => {
+  const dates = [];
+  for (
+    let day = Date.parse(`${start}T00:00:00Z`);
+    day <= Date.parse(`${end}T00:00:00Z`);
+    day += 86_400_000
+  ) {
+    dates.push(new Date(day).toISOString().slice(0, 10));
+  }
+  return dates;
+};
+
+test("Chinese public holidays override weekday peak windows", () => {
+  // Same hour, same nominal window: normal Monday, weekend days, and a statutory holiday.
+  assert.equal(state("2026-10-12T02:00:00Z").state, "PEAK");
+  assert.equal(state("2026-10-10T02:00:00Z").state, "OFF_PEAK");
+  assert.equal(state("2026-10-11T02:00:00Z").state, "OFF_PEAK");
+  assert.equal(state("2026-10-01T02:00:00Z").state, "OFF_PEAK");
+  assert.equal(state("2026-10-01T08:00:00Z").state, "OFF_PEAK");
+});
+
+test("every official 2026 holiday period is off-peak all day", () => {
+  const periods = [
+    ["2026-01-01", "2026-01-03"],
+    ["2026-02-15", "2026-02-23"],
+    ["2026-04-04", "2026-04-06"],
+    ["2026-05-01", "2026-05-05"],
+    ["2026-06-19", "2026-06-21"],
+    ["2026-09-25", "2026-09-27"],
+    ["2026-10-01", "2026-10-07"],
+  ];
+  for (const [start, end] of periods) {
+    for (const date of dateRange(start, end)) {
+      // Both nominal weekday PEAK windows must be off-peak on every holiday date.
+      assert.equal(state(`${date}T02:00:00Z`).state, "OFF_PEAK", date);
+      assert.equal(state(`${date}T08:00:00Z`).state, "OFF_PEAK", date);
+    }
+  }
+});
+
+test("official weekend make-up workdays stay off-peak", () => {
+  for (const date of [
+    "2026-01-04",
+    "2026-02-14",
+    "2026-02-28",
+    "2026-05-09",
+    "2026-09-20",
+    "2026-10-10",
+  ]) {
+    assert.equal(state(`${date}T02:00:00Z`).state, "OFF_PEAK", date);
+    assert.equal(state(`${date}T08:00:00Z`).state, "OFF_PEAK", date);
+  }
+});
+
+test("the days immediately before and after a holiday keep the normal weekly schedule", () => {
+  assert.equal(state("2026-04-03T02:00:00Z").state, "PEAK");
+  assert.equal(state("2026-04-07T02:00:00Z").state, "PEAK");
+  assert.equal(state("2026-09-24T02:00:00Z").state, "PEAK");
+  assert.equal(state("2026-09-28T02:00:00Z").state, "PEAK");
+  assert.equal(state("2026-09-30T02:00:00Z").state, "PEAK");
+  assert.equal(state("2026-10-08T02:00:00Z").state, "PEAK");
+});
+
+test("nextTransition skips holiday peak windows and points at the next real peak", () => {
+  assert.equal(state("2026-09-30T12:00:00Z").nextTransition, at("2026-10-08T01:00:00Z"));
+  assert.equal(state("2026-10-05T02:00:00Z").nextTransition, at("2026-10-08T01:00:00Z"));
+  assert.equal(state("2026-10-07T23:59:00Z").nextTransition, at("2026-10-08T01:00:00Z"));
+  assert.equal(state("2026-01-01T02:00:00Z").nextTransition, at("2026-01-05T01:00:00Z"));
+  // Inside a holiday peak hour the state is off-peak, and the transition is the
+  // next real peak after the holiday, not a boundary inside it.
+  assert.equal(state("2026-05-04T02:00:00Z").state, "OFF_PEAK");
+  assert.equal(state("2026-05-04T02:00:00Z").nextTransition, at("2026-05-06T01:00:00Z"));
+});
+
+test("holiday dates follow the calendar time zone, not the host or UTC date", () => {
+  const policy = {
+    ...DEEPSEEK_OPENCODE_GO,
+    id: "holiday-time-zone-test",
+    timeZone: "UTC",
+    blocked: [{ days: [0, 1, 2, 3, 4, 5, 6], start: "16:00", end: "17:00" }],
+    holidays: [
+      {
+        year: 2026,
+        timeZone: "Asia/Shanghai",
+        dates: ["2026-10-02"],
+        source: "fixture",
+      },
+    ],
+  };
+  const evaluate = (iso) => evaluatePricing([policy], provider, model, at(iso));
+  // 2026-10-02 starts at 2026-10-01T16:00:00Z in Asia/Shanghai.
+  assert.equal(evaluate("2026-10-01T16:00:00Z").state, "OFF_PEAK");
+  assert.equal(evaluate("2026-10-01T16:30:00Z").state, "OFF_PEAK");
+  // The same UTC hour on the UTC calendar date is not the listed Shanghai date.
+  assert.equal(evaluate("2026-10-02T16:00:00Z").state, "PEAK");
+  assert.equal(evaluate("2026-10-02T16:30:00Z").state, "PEAK");
+  assert.equal(state("2026-10-01T07:00:00Z").state, "OFF_PEAK");
+});
+
+test("years without a holiday calendar keep the deterministic weekly schedule", () => {
+  const holidays = DEEPSEEK_OPENCODE_GO.holidays ?? [];
+  assert.ok(holidays.every((calendar) => calendar.year !== 2027));
+  // A Monday in 2027 inside a nominal peak window is still peak; weekends stay off-peak.
+  assert.equal(state("2027-01-04T02:00:00Z").state, "PEAK");
+  assert.equal(state("2027-01-02T02:00:00Z").state, "OFF_PEAK");
+});
+
+test("the built-in China holiday calendar carries its authority metadata", () => {
+  const calendar = DEEPSEEK_OPENCODE_GO.holidays?.find((item) => item.year === 2026);
+  assert.ok(calendar);
+  assert.equal(calendar.timeZone, "Asia/Shanghai");
+  assert.match(calendar.source, /^https:\/\/www\.gov\.cn\//);
+  assert.equal(typeof calendar.verifiedAt, "string");
+  assert.equal(typeof calendar.description, "string");
+  assert.equal(new Set(calendar.dates).size, calendar.dates.length);
+});
+
+test("invalid holiday calendar data fails closed", () => {
+  const base = {
+    ...DEEPSEEK_OPENCODE_GO,
+    id: "holiday-validation",
+    holidays: [DEEPSEEK_OPENCODE_GO.holidays[0]],
+  };
+  const cases = [
+    { ...base, holidays: [{ ...base.holidays[0], dates: ["2026-13-01"] }] },
+    { ...base, holidays: [{ ...base.holidays[0], dates: ["2026-02-30"] }] },
+    { ...base, holidays: [{ ...base.holidays[0], dates: ["2027-01-01"] }] },
+    { ...base, holidays: [{ ...base.holidays[0], dates: ["2026-01-01", "2026-01-01"] }] },
+    { ...base, holidays: [{ ...base.holidays[0], source: "" }] },
+    { ...base, holidays: [{ ...base.holidays[0], timeZone: "Mars/Olympus_Mons" }] },
+    { ...base, holidays: [{ ...base.holidays[0], year: "2026" }] },
+  ];
+  for (const policy of cases) {
+    const decision = evaluatePricing([policy], provider, model, at("2026-10-12T02:00:00Z"));
+    assert.equal(decision.state, "UNKNOWN", JSON.stringify(policy.holidays));
+    assert.equal(decision.allowed, false);
+  }
+});
+
+test("an empty holiday list keeps the weekly schedule untouched", () => {
+  const policy = { ...DEEPSEEK_OPENCODE_GO, id: "no-holidays", holidays: [] };
+  assert.equal(
+    evaluatePricing([policy], provider, model, at("2026-10-01T02:00:00Z")).state,
+    "PEAK",
+  );
+  assert.equal(
+    evaluatePricing([policy], provider, model, at("2026-10-10T02:00:00Z")).state,
+    "OFF_PEAK",
+  );
+});

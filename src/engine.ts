@@ -63,7 +63,13 @@ export interface GuardInput {
   sessionID: string;
   providerID: string;
   modelID: string;
-  transport: "http" | "websocket";
+  transport: "http" | "websocket" | "model";
+  /**
+   * OpenCode session request kind ("primary", "compaction", "title", "generate")
+   * when the guard runs from the pre-model `model.request` hook. Transport
+   * guards do not carry a kind.
+   */
+  kind?: string;
 }
 
 /**
@@ -128,6 +134,12 @@ export class OffpeakEngine {
   readonly #signal: AsyncSignal;
   readonly #runners = new Set<string>();
   readonly #interactiveWaiters = new Set<number>();
+  /**
+   * Per-session monotonic abort epochs. When OpenCode interrupts a session's
+   * execution (user cancel, inactivity sweep, supersede), a hold loop whose
+   * epoch moved on fails closed instead of lingering as a stale waiter.
+   */
+  readonly #holdAborts = new Map<string, number>();
   readonly #recoveriesRepo: RecoveryRepository | undefined;
   readonly #location: string;
   readonly #recoveries = new Map<string, RecoveryEntry>();
@@ -379,6 +391,28 @@ export class OffpeakEngine {
   async guardRequest(input: GuardInput): Promise<void> {
     // Any fresh request for this session supersedes a pending recovery continuation.
     await this.#removeRecovery(input.sessionID);
+    await this.#guardPricing(input, false);
+  }
+
+  /**
+   * Pre-model guard for OpenCode's `model.request` hook. It runs while the
+   * session request is being prepared, before any provider attempt (and before
+   * OpenCode's response-header timeout clock) exists, so holding for OFF_PEAK
+   * here never leaves a provider attempt open.
+   *
+   * A held primary request of an interactive session is persisted as a
+   * deferral: if the plugin reloads or the server restarts while it waits, the
+   * existing recovery flush delivers one same-session continuation once the
+   * allowed window arrives. The release itself removes the deferral, so normal
+   * completion never sends a continuation.
+   */
+  async guardModelRequest(input: GuardInput): Promise<void> {
+    const primary = input.kind === "primary";
+    if (primary) await this.#removeRecovery(input.sessionID);
+    await this.#guardPricing(input, primary);
+  }
+
+  async #guardPricing(input: GuardInput, persistDeferral: boolean): Promise<void> {
     const task = await this.#taskForSession(input.sessionID);
     const first = await this.#config.read();
     if (!first.config)
@@ -398,14 +432,14 @@ export class OffpeakEngine {
 
     if (task && first.config.mode === "auto") {
       await this.#transition(task.id, "WAITING_OFFPEAK");
-      await this.#holdUntilAllowed(input, task);
+      await this.#holdUntilAllowed(input, task, false);
       return;
     }
 
     // A normal interactive request in auto mode is held at the boundary instead of
     // being discarded; the same request and session continue when pricing allows.
     if (!task && first.config.enabled && first.config.mode === "auto") {
-      await this.#holdUntilAllowed(input);
+      await this.#holdUntilAllowed(input, undefined, persistDeferral);
       return;
     }
 
@@ -422,19 +456,40 @@ export class OffpeakEngine {
 
   /**
    * Holds a request at the provider transport boundary until the plugin is enabled
-   * and the pricing policy allows it. Used by queue-owned auto tasks and by normal
-   * interactive auto-mode requests.
+   * and the pricing policy allows it. Used by queue-owned auto tasks, by normal
+   * interactive auto-mode requests, and by the pre-model guard.
    *
    * The hard guarantee: the caller never crosses the transport boundary while
    * pricing is blocked. Wake-ups come from the shared config signal and one timer
    * for the policy's next transition. Queue tasks move through WAITING_OFFPEAK and
    * may use their explicit override; interactive requests are tracked in memory
    * (for status) and fail closed on shutdown instead of guessing the price state.
+   *
+   * `persistDeferral` marks an interactive primary request that is safe to resume
+   * after a plugin reload or server restart: the recovery entry is persisted while
+   * the request waits and removed again when the wait ends normally. A shutdown or
+   * guard error leaves it in place so the continuation can be delivered once the
+   * allowed window arrives.
    */
-  async #holdUntilAllowed(input: GuardInput, task?: OffpeakTask): Promise<void> {
+  async #holdUntilAllowed(
+    input: GuardInput,
+    task?: OffpeakTask,
+    persistDeferral = false,
+  ): Promise<void> {
     const waiter = task ? undefined : this.#registerInteractiveWaiter();
+    const deferred = persistDeferral && !task;
+    if (deferred) {
+      await this.#registerRecovery(input.sessionID, input.providerID, input.modelID, "deferred");
+      this.#requestPump();
+    }
+    const abortEpoch = this.#holdAborts.get(input.sessionID) ?? 0;
     try {
       while (!this.#disposed) {
+        if ((this.#holdAborts.get(input.sessionID) ?? 0) !== abortEpoch) {
+          throw new PricingBlockedError(
+            "Offpeak hold was interrupted in OpenCode; the request was not sent.",
+          );
+        }
         const signalVersion = this.#signal.version();
         const settings = await this.#config.read();
         if (!settings.config)
@@ -459,6 +514,7 @@ export class OffpeakEngine {
         }
         if (settings.config.enabled && decision.allowed) {
           if (task) await this.#transition(task.id, "RUNNING");
+          if (deferred) await this.#removeRecovery(input.sessionID);
           return;
         }
         if (settings.config.enabled && decision.nextTransition === undefined) {
@@ -518,10 +574,40 @@ export class OffpeakEngine {
       this.#requestPump();
       return "hold";
     }
-    await this.#registerRecovery(input.sessionID, input.providerID, input.modelID);
+    await this.#registerRecovery(input.sessionID, input.providerID, input.modelID, "retry-failure");
     this.#signal.notify();
     this.#requestPump();
     return "hold";
+  }
+
+  /**
+   * Called when OpenCode reports that a session's execution was interrupted.
+   *
+   * - "user": the user cancelled. A pending deferral is cleared and the hold is
+   *   aborted so nothing continues automatically.
+   * - "inactivity": OpenCode's location-activity sweep ended the execution. The
+   *   hold is aborted and a deferral (if present) is kept so the same session
+   *   continues once pricing allows.
+   * - "superseded"/"shutdown": the hold is aborted; the session's own claim or
+   *   restart recovery owns what happens next.
+   */
+  async noteExecutionInterrupted(input: { sessionID: string; reason: string }): Promise<void> {
+    if (this.#disposed) return;
+    if (input.reason === "user") {
+      const entry = this.#recoveries.get(input.sessionID);
+      if (entry?.origin === "deferred") await this.#removeRecovery(input.sessionID);
+    }
+    if (
+      input.reason !== "user" &&
+      input.reason !== "inactivity" &&
+      input.reason !== "superseded" &&
+      input.reason !== "shutdown"
+    ) {
+      return;
+    }
+    this.#holdAborts.set(input.sessionID, (this.#holdAborts.get(input.sessionID) ?? 0) + 1);
+    this.#signal.notify();
+    this.#requestPump();
   }
 
   async #loadRecoveries(): Promise<void> {
@@ -534,7 +620,12 @@ export class OffpeakEngine {
     }
   }
 
-  async #registerRecovery(sessionID: string, providerID: string, modelID: string): Promise<void> {
+  async #registerRecovery(
+    sessionID: string,
+    providerID: string,
+    modelID: string,
+    origin: "retry-failure" | "deferred",
+  ): Promise<void> {
     if (this.#recoveries.has(sessionID)) return;
     this.#recoveries.set(sessionID, {
       sessionID,
@@ -542,6 +633,7 @@ export class OffpeakEngine {
       modelID,
       directory: this.#location,
       heldAt: new Date(this.#clock.now()).toISOString(),
+      origin,
     });
     await this.#persistRecoveries();
   }

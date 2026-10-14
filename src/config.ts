@@ -85,8 +85,41 @@ export function validateConfig(value: unknown, fallback: OffpeakConfig): Offpeak
     enabled: value.enabled,
     mode: value.mode,
     displayTimeZone,
-    policies: structuredClone(configuredPolicies),
+    policies: structuredClone(adoptBuiltinHolidays(configuredPolicies, fallback.policies)),
   };
+}
+
+/**
+ * A stored policies array that is an unmodified copy of a built-in policy
+ * adopts the built-in full-day OFF_PEAK calendars (for example the yearly
+ * Chinese holiday list) without touching any customized schedule. A policy
+ * that differs in provider, model, time zone, multiplier, or weekly windows is
+ * preserved exactly as stored, and an explicit holiday list always wins.
+ */
+function adoptBuiltinHolidays(stored: PricingPolicy[], builtin: PricingPolicy[]): PricingPolicy[] {
+  return stored.map((policy) => {
+    const reference = builtin.find((candidate) => candidate.id === policy.id);
+    if (!reference?.holidays?.length || policy.holidays !== undefined) return policy;
+    if (!sameWeeklySchedule(policy, reference)) return policy;
+    return { ...policy, holidays: structuredClone(reference.holidays) };
+  });
+}
+
+function sameWeeklySchedule(left: PricingPolicy, right: PricingPolicy): boolean {
+  const normalize = (policy: PricingPolicy) => ({
+    providers: [...policy.providers].sort(),
+    models: [...policy.models].sort(),
+    timeZone: policy.timeZone,
+    multiplier: policy.multiplier,
+    blocked: policy.blocked
+      .map((window) => ({ ...window, days: [...window.days].sort() }))
+      .sort((leftWindow, rightWindow) =>
+        `${leftWindow.start}-${leftWindow.end}`.localeCompare(
+          `${rightWindow.start}-${rightWindow.end}`,
+        ),
+      ),
+  });
+  return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
 export class ConfigRepository {

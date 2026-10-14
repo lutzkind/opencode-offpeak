@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1335,5 +1335,320 @@ test("a recovery is skipped when the session already succeeded or never settles"
     assert.equal(h.sessions.prompts.length, 0);
   } finally {
     await h.close();
+  }
+});
+
+test("a primary model.request guard defers the interactive request before transport and releases it at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  let releases = 0;
+  let rejections = 0;
+  const pending = h.engine
+    .guardModelRequest({
+      sessionID: "model-request-session",
+      ...selectedModel,
+      kind: "primary",
+      transport: "model",
+    })
+    .then(
+      () => {
+        releases += 1;
+      },
+      () => {
+        rejections += 1;
+      },
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal(releases, 0);
+    assert.equal(rejections, 0);
+    // The primary deferral is persisted so a restart can continue the same session.
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+
+    // Only the scheduled pricing boundary fires; no config edit and no external wake-up.
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => releases === 1);
+    assert.equal(rejections, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(releases, 1);
+    assert.equal(h.sessions.prompts.length, 0);
+    assert.equal(h.sessions.createdTasks.length, 0);
+    await pending;
+
+    // The transport guard still passes after the deferred release.
+    await h.engine.guardRequest({
+      sessionID: "model-request-session",
+      ...selectedModel,
+      transport: "http",
+    });
+  } finally {
+    await h.close();
+  }
+});
+
+test("an auxiliary model.request hold waits without registering a recovery deferral", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  let releases = 0;
+  const pending = h.engine
+    .guardModelRequest({
+      sessionID: "title-session",
+      ...selectedModel,
+      kind: "title",
+      transport: "model",
+    })
+    .then(() => {
+      releases += 1;
+    });
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => releases === 1);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    await pending;
+  } finally {
+    await h.close();
+  }
+});
+
+test("a deferred primary request survives a plugin reload and continues the same session once at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "reload-deferred-session";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    // The plugin reloads: the held request fails closed, the deferral is kept.
+    await h.engine.dispose();
+    assert.equal(await pending, "blocked");
+    const storage = h.storage;
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(storage),
+      recoveries: new RecoveryRepository(storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    // The reloaded turn failed while it was deferred.
+    h.sessions.outcomes.set(sessionID, "failed");
+    h.sessions.workers.set(sessionID, Promise.resolve());
+    await restarted.start();
+    assert.equal((await restarted.status(selectedModel)).recoveryWaiting, 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => h.sessions.prompts.length === 1);
+    assert.equal(h.sessions.prompts[0].sessionID, sessionID);
+    assert.equal(h.sessions.prompts[0].text, CONTINUATION);
+    assert.equal((await restarted.status(selectedModel)).recoveryWaiting, 0);
+    assert.equal(h.sessions.createdTasks.length, 0);
+    await clock.advanceTo("2026-10-13T00:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.prompts.length, 1);
+    await restarted.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a queue-owned session held at the model.request guard waits in WAITING_OFFPEAK and returns to RUNNING at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const now = new Date(clock.now()).toISOString();
+  const repository = new QueueRepository(h.storage);
+  const queue = await repository.load();
+  queue.tasks.push({
+    id: "task-model-request",
+    prompt: "queued work",
+    cwd: "/project",
+    sessionID: "task-session",
+    model: selectedModel,
+    policyID: "deepseek-opencode-go",
+    state: "RUNNING",
+    createdAt: now,
+    lastTransition: now,
+    retryCount: 0,
+  });
+  await repository.save(queue);
+  let releases = 0;
+  const pending = h.engine
+    .guardModelRequest({
+      sessionID: "task-session",
+      ...selectedModel,
+      kind: "primary",
+      transport: "model",
+    })
+    .then(() => {
+      releases += 1;
+    });
+  try {
+    await until(async () => (await h.engine.list())[0].state === "WAITING_OFFPEAK");
+    assert.equal(releases, 0);
+    // The queue task is tracked by its own state; no interactive recovery is added.
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => releases === 1);
+    assert.equal((await h.engine.list())[0].state, "RUNNING");
+    await pending;
+  } finally {
+    await h.close();
+  }
+});
+
+test("a deferral released normally leaves no continuation behind after the next boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "release-clean-session";
+  const pending = h.engine.guardModelRequest({
+    sessionID,
+    ...selectedModel,
+    kind: "primary",
+    transport: "model",
+  });
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await pending;
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 0);
+    // The session completed its turn after the release.
+    h.sessions.outcomes.set(sessionID, "succeeded");
+    await clock.advanceTo("2026-10-13T00:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.prompts.length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a user interrupt aborts a deferred hold and clears the deferral", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "user-interrupt-session";
+  let rejections = 0;
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+    .then(
+      () => "resolved",
+      (error) => {
+        rejections += 1;
+        return error;
+      },
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    h.sessions.outcomes.set(sessionID, "interrupted");
+    await h.engine.noteExecutionInterrupted({ sessionID, reason: "user" });
+    const failure = await pending;
+    assert.equal(rejections, 1);
+    assert.ok(failure instanceof PricingBlockedError);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.prompts.length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("an inactivity interrupt aborts the deferred hold and continues the same session once at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "inactivity-session";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+    .then(
+      () => "resolved",
+      (error) => error,
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    h.sessions.outcomes.set(sessionID, "interrupted");
+    h.sessions.workers.set(sessionID, Promise.resolve());
+    await h.engine.noteExecutionInterrupted({ sessionID, reason: "inactivity" });
+    const failure = await pending;
+    assert.ok(failure instanceof PricingBlockedError);
+    // The deferral survives the interrupt so no manual retry is needed.
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => h.sessions.prompts.length === 1);
+    assert.equal(h.sessions.prompts[0].sessionID, sessionID);
+    assert.equal(h.sessions.prompts[0].text, CONTINUATION);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    // No blind replay of the interrupted provider request, and no new session.
+    assert.equal(h.sessions.createdTasks.length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a shutdown interrupt leaves the deferral in place for restart recovery", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "shutdown-session";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+    .then(
+      () => "resolved",
+      (error) => error,
+    );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    await h.engine.noteExecutionInterrupted({ sessionID, reason: "shutdown" });
+    assert.ok((await pending) instanceof PricingBlockedError);
+    h.sessions.outcomes.set(sessionID, "failed");
+    h.sessions.workers.set(sessionID, Promise.resolve());
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => h.sessions.prompts.length === 1);
+    assert.equal(h.sessions.prompts[0].sessionID, sessionID);
+    assert.equal(h.sessions.prompts[0].text, CONTINUATION);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a stored copy of the built-in policy adopts the built-in holiday calendar", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-policy-adopt-"));
+  const configPath = path.join(root, "offpeak.json");
+  const builtin = defaultConfig().policies[0];
+  const legacy = structuredClone(builtin);
+  delete legacy.holidays;
+  legacy.verifiedAt = "2026-10-09";
+  const customized = {
+    ...structuredClone(legacy),
+    id: "custom-window",
+    blocked: [{ days: [1], start: "22:00", end: "23:00" }],
+  };
+  const explicit = { ...structuredClone(legacy), id: "explicit-holidays", holidays: [] };
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        enabled: true,
+        mode: "auto",
+        displayTimeZone: "UTC",
+        policies: [legacy, customized, explicit],
+      }),
+    );
+    const config = new ConfigRepository({ configPath });
+    const read = await config.read();
+    assert.equal(read.error, undefined);
+    const [adopted, kept, keptExplicit] = read.config.policies;
+    assert.equal(adopted.id, builtin.id);
+    assert.deepEqual(adopted.holidays, builtin.holidays);
+    // A customized window is preserved exactly and gains no holiday data.
+    assert.deepEqual(kept.blocked, customized.blocked);
+    assert.equal(kept.holidays, undefined);
+    // An explicit holiday list (even empty) is never overwritten.
+    assert.deepEqual(keptExplicit.holidays, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

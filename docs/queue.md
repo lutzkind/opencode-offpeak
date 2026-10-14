@@ -14,7 +14,7 @@ Queueing stores the prompt, project working directory, current provider/model, p
 
 - `QUEUED`: waiting for an eligible pricing window or for the plugin to be enabled.
 - `RUNNING`: attached to a session that is actively processing.
-- `WAITING_OFFPEAK`: same task/session is paused at the request boundary or awaiting an allowed window.
+- `WAITING_OFFPEAK`: same task/session is paused at the pre-model or transport guard or awaiting an allowed window.
 - `COMPLETED`: OpenCode reports the stored session outcome as succeeded.
 - `FAILED`: session failure, invalid task policy, or ambiguous crash recovery; inspect `lastError` and explicitly retry.
 - `CANCELLED`: user explicitly cancelled the task. The session ID remains available in task history.

@@ -2,13 +2,13 @@
 
 ## Current public distribution
 
-`v0.1.3` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
+`v0.1.4` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.3
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4
 ```
 
-`v0.1.0`, `v0.1.1`, and `v0.1.2` remain available at their own tags, but `v0.1.3` is the canonical release: it adds peak-aware retry recovery (a retryable provider failure during peak is stopped before it reaches the provider and the same session continues at the next off-peak window) on top of the v0.1.2 interactive boundary hold, the v0.1.1 compatibility enforcement, the documented `Plugin.define(...)` TUI shape, `/offpeak remove`, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
+`v0.1.0`, `v0.1.1`, `v0.1.2`, and `v0.1.3` remain available at their own tags, but `v0.1.4` is the canonical release: it moves peak waiting to OpenCode's pre-model lifecycle hook (`model.request`), so a request submitted during peak no longer holds a provider attempt open or surfaces `Timed out waiting for response headers`, and the same session continues the same turn at the boundary; it implements the Chinese statutory public holidays as full-day OFF_PEAK via explicit holiday exception calendars with the official 2026 State Council calendar; the transport guard remains the final hard barrier, the v0.1.3 retry recovery stays for requests that fail after crossing into peak, and origin-aware interrupt handling keeps deferred sessions recoverable across reloads. This sits on top of the v0.1.2 interactive boundary hold, the v0.1.1 compatibility enforcement, the documented `Plugin.define(...)` TUI shape, `/offpeak remove`, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
 
 ## Optional npm distribution
 

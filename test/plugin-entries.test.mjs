@@ -32,10 +32,46 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
   const toasts = [];
   let rpcDefinition;
   let rpcHandlers;
+  const eventQueue = [];
+  const eventWaiters = [];
+  const pushEvent = (event) => {
+    const waiter = eventWaiters.shift();
+    if (waiter) waiter({ value: event, done: false });
+    else eventQueue.push(event);
+  };
   const serverContext = {
     options: { configPath },
     app: { name: "opencode", version: "2.0.26", channel: "latest" },
     location: { directory: "/fixture-project" },
+    event: {
+      subscribe(requestOptions) {
+        const signal = requestOptions?.signal;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                if (signal?.aborted) {
+                  return Promise.resolve({ value: undefined, done: true });
+                }
+                const queued = eventQueue.shift();
+                if (queued) return Promise.resolve({ value: queued, done: false });
+                return new Promise((resolve) => {
+                  const finish = () => resolve({ value: undefined, done: true });
+                  signal?.addEventListener("abort", finish, { once: true });
+                  eventWaiters.push((result) => {
+                    signal?.removeEventListener("abort", finish);
+                    resolve(result);
+                  });
+                });
+              },
+              return() {
+                return Promise.resolve({ value: undefined, done: true });
+              },
+            };
+          },
+        };
+      },
+    },
     storage: {
       async get(key) {
         return structuredClone(values.get(key));
@@ -91,6 +127,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     );
   try {
     assert.equal(rpcDefinition.id, "opencode-offpeak");
+    assert.ok(hooks.has("model.request"));
     assert.ok(hooks.has("http.request"));
     assert.ok(hooks.has("experimental.ws.handshake"));
     assert.ok(hooks.has("experimental.ws.send"));
@@ -121,6 +158,68 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     // auto + ON + peak: the server entrypoint holds the interactive request at the
     // boundary instead of discarding it.
     await assertStillPending(heldOutcome, 60);
+
+    // A primary pre-model request is deferred before any provider attempt exists and
+    // persists a deferral entry so a reload can continue the same session.
+    const modelHeldOutcome = hooks
+      .get("model.request")({
+        sessionID: "interactive-model-request",
+        kind: "primary",
+        model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+      })
+      .then(
+        () => "resolved",
+        (error) => error,
+      );
+    await assertStillPending(modelHeldOutcome, 60);
+    const deferredStatus = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+    });
+    // One recovery from the retry veto above plus this session's deferral.
+    assert.equal(deferredStatus.status.recoveryWaiting, 2);
+
+    // A user interrupt clears the deferral and aborts the hold without continuing.
+    pushEvent({
+      type: "session.execution.interrupted",
+      data: { sessionID: "interactive-model-request", reason: "user" },
+    });
+    const userAborted = await modelHeldOutcome;
+    assert.ok(userAborted instanceof PricingBlockedError);
+    assert.match(userAborted.message, /interrupted/);
+    const afterUserInterrupt = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+    });
+    assert.equal(afterUserInterrupt.status.recoveryWaiting, 1);
+
+    // An inactivity interrupt aborts the hold but keeps the deferral so the same
+    // session continues at the next allowed window.
+    const inactivityHeld = hooks
+      .get("model.request")({
+        sessionID: "interactive-inactivity",
+        kind: "primary",
+        model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+      })
+      .then(
+        () => "resolved",
+        (error) => error,
+      );
+    await assertStillPending(inactivityHeld, 60);
+    pushEvent({
+      type: "session.execution.interrupted",
+      data: { sessionID: "interactive-inactivity", reason: "inactivity" },
+    });
+    const inactivityAborted = await inactivityHeld;
+    assert.ok(inactivityAborted instanceof PricingBlockedError);
+    const afterInactivity = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+    });
+    assert.equal(afterInactivity.status.recoveryWaiting, 2);
 
     const off = await rpcHandlers.control({ action: "off" });
     assert.match(off.message, /Peak pricing is still blocked/);
@@ -153,7 +252,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(status.status.queued, 1);
     assert.equal(status.status.requestsAllowed, false);
     assert.equal(status.status.interactiveWaiting, 1);
-    assert.equal(status.status.recoveryWaiting, 1);
+    assert.equal(status.status.recoveryWaiting, 2);
 
     let layer;
     const tuiContext = {

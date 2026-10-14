@@ -47,6 +47,20 @@ export default Plugin.define({
       onError: (error) => console.error("[opencode-offpeak]", error),
     });
     const hooks = await Promise.all([
+      // Pre-model pricing guard: runs before any provider attempt (and before
+      // OpenCode's response-header timeout clock) exists, so a request that must
+      // wait for OFF_PEAK holds no provider attempt open. Primary requests of
+      // interactive sessions persist a deferral so a reload or restart can
+      // deliver the same-session continuation.
+      context.session.hook("model.request", (request) =>
+        engine.guardModelRequest({
+          sessionID: request.sessionID,
+          providerID: request.model.providerID,
+          modelID: request.model.id,
+          kind: request.kind,
+          transport: "model",
+        }),
+      ),
       context.session.hook("http.request", (request) =>
         engine.guardRequest({
           sessionID: request.sessionID,
@@ -86,6 +100,26 @@ export default Plugin.define({
         }
       }),
     ]);
+    // Holds fail closed the moment OpenCode interrupts the session (user cancel,
+    // inactivity sweep, supersede). A deferred primary request keeps its
+    // same-session continuation; a user cancel clears it. The subscription lives
+    // with the plugin scope.
+    const eventAbort = new AbortController();
+    const events = (async () => {
+      try {
+        for await (const event of context.event.subscribe({ signal: eventAbort.signal })) {
+          if (eventAbort.signal.aborted) break;
+          if (event.type === "session.execution.interrupted") {
+            await engine.noteExecutionInterrupted({
+              sessionID: event.data.sessionID,
+              reason: event.data.reason,
+            });
+          }
+        }
+      } catch (error) {
+        if (!eventAbort.signal.aborted) console.error("[opencode-offpeak]", error);
+      }
+    })();
     const rpc = await context.rpc.register(OFFPEAK_RPC, {
       control: async (rawInput: unknown): Promise<OffpeakRpcOutput> => {
         const input = rawInput as OffpeakRpcInput;
@@ -158,6 +192,8 @@ export default Plugin.define({
 
     await engine.start();
     return async () => {
+      eventAbort.abort();
+      await events;
       await engine.dispose();
       await Promise.all(hooks.map((registration) => registration.dispose()));
       await rpc.dispose();
