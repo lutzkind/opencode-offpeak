@@ -2,18 +2,59 @@
 
 ## Release status
 
-`opencode-offpeak` v0.1.5 is the canonical release:
+`opencode-offpeak` v0.1.6 is the canonical release:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.5
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.5`
-- Tag commit: `f9069e8918edb3df6ed407b2f1f90182d93036a9` (annotated tag object `e09bf9fabee41b9c7dc2d41341cecbb46d972529`; merge of PR #10 `f9069e8`)
-- Implementation commit: `58a3611` (`fix(titles): restore automatic session titles and persist pending-title recovery`)
-- Attached `opencode-offpeak-0.1.5.tgz` SHA-256: `613777b6ac64ee590c6d03b36b0ad1ea4ea6a06ede9eac01e82e8bb384f99c02` (reproduced byte-for-byte from a clean `v0.1.5` tag archive + `npm ci` + `npm run compile` + `npm pack`)
-- CI: PR #10 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38720054407`)
-- The `v0.1.0` through `v0.1.4` tags were not mutated and remain installable.
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.6`
+- Tag commit: `1fe61d2f5979f6f4df32208df7ed3f1cea8c9ae6` (annotated tag object `199ce646facb4a3f7adb4e3cc6b84e1ac232bfaf`; merge of PR #11 `1fe61d2`)
+- Implementation commit: `887a352` (`feat(providers): direct DeepSeek API policy, verified Zen semantics, held-request feedback`)
+- Attached `opencode-offpeak-0.1.6.tgz` SHA-256: `67704376b1f2aafc7eebbe1b7b9ff0c39f0e89b69b2c8d773fdd25c95467043f` (reproduced byte-for-byte from a clean `v0.1.6` tag archive + `npm ci` + `npm run compile` + `npm pack`; the downloaded release asset hash matches)
+- CI: PR #11 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38749826267`)
+- The `v0.1.0` through `v0.1.5` tags were not mutated and remain installable.
+
+## 2026-10-15 v0.1.6 — direct DeepSeek API, verified Zen semantics, held-request feedback
+
+**Scope:** first-class support for the direct DeepSeek API provider, a correct and documented stance for OpenCode Zen, and immediate non-chat feedback when a prompt is intentionally held for off-peak pricing — with every v0.1.5 safety and recovery guarantee preserved.
+
+**Provider identities were verified live against OpenCode 2.0.27 before any implementation** (`GET /api/provider`, `GET /api/model`, `opencode.ai/docs/go`, `opencode.ai/docs/zen`, `api-docs.deepseek.com/quick_start/pricing`):
+
+| Provider ID | Registry name | Live models (2026-10-15) | Pricing semantics |
+|---|---|---|---|
+| `opencode-go` | OpenCode Go | `deepseek-v4.1-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` + 27 others | DeepSeek models have Off-Peak/Peak tiers; every other documented model has one all-hours price |
+| `deepseek` | DeepSeek (direct API, `https://api.deepseek.com`) | `deepseek-flash` (DeepSeek-V4.1-Flash), `deepseek-v4-pro` (DeepSeek-V4-Pro-0813) | Peak 01:00–04:00 and 06:00–10:00 UTC Mon–Fri excluding Chinese public holidays; off-peak otherwise; legacy aliases `deepseek-v4-flash`/`deepseek-v4-flash-vision-exp` still accepted and billed at the Flash price |
+| `opencode` | OpenCode Zen (`https://opencode.ai/inference/v1`) | 10 models in the live registry (`deepseek-v4.1-flash-free`, `big-pickle`, `cat-jam-free`, …) | One flat all-hours price per model — no peak/off-peak tiers anywhere on the pricing page |
+
+**Implementation:**
+
+- **`deepseek-api` built-in policy (provider `deepseek`)** with the explicit four-ID list (no `deepseek-*` wildcard), reusing the shared `DEEPSEEK_PEAK_WINDOWS` constant and the shared `CHINA_PUBLIC_HOLIDAYS` calendar — no duplicated schedule or holiday logic. Active discovery of the id/date is in `src/policy.ts`.
+- **Newly shipped built-in policies reach existing installs:** a stored `offpeak.json` that contains only unmodified copies of the shipped policies appends missing built-ins at read time; any customization makes the stored set authoritative. Verified against the unchanged live file: it now reads as `deepseek-opencode-go` + `deepseek-api` (both with holidays).
+- **Zen is documented, not simulated.** No policy exists for provider `opencode`, so requests are never delayed and a new Zen model can never be blocked because a DeepSeek policy exists elsewhere. A verified provider fact (`VERIFIED_FLAT_PROVIDERS`, with source and `verifiedAt`) explains it in status output.
+- **`FLAT` pricing state** for vendor-documented all-hours models (Go non-DeepSeek models): allowed, no transition, never held. `/offpeak status` now distinguishes `PEAK`, `OFF_PEAK`, `FLAT`, `UNTRACKED` (with the Zen note) and `UNKNOWN` (blocked with an actionable message: "…is not in the verified off-peak pricing policy for this release. Update opencode-offpeak or add a verified custom policy before using this model.").
+- **Held-request feedback** (server `src/engine.ts`/`src/server.ts`, events declared in `src/rpc.ts`, rendered in `src/tui.ts`): a primary interactive hold emits exactly one `rpc.opencode-offpeak.hold` (session, next transition, display-zone deadline such as `08:00 Asia/Bangkok`) and, on release or on a delivered recovery continuation, at most one `rpc.opencode-offpeak.resume`. The TUI subscribes with the supported `context.data.on(...)` API and renders `context.ui.toast.show(...)`. Notifications never enter the session, transcript, or model context; headless runs have no subscriber and stdout stays untouched; auxiliary `title`/`compaction`/`generate` holds are silent; queue-owned sessions keep their queue/status semantics; a user cancel produces no resumption; announcements are instance-scoped so reloads and restarts cannot duplicate them.
+- **No guarantee was weakened:** the hard no-PEAK-traffic barrier, same-session recovery, at-most-once delivery, fail-closed `UNKNOWN`, OFF/`queue`/`guard`/`run-now` semantics, retry veto, holiday evaluation and pending-title behaviour are all unchanged, and the 99-test suite includes the v0.1.5 regressions.
+
+**Automated tests:** `npm run lint`, `npm run typecheck`, `npm test` — **99 tests pass** (86 in v0.1.5); `npm pack --dry-run` validated. New coverage: direct DeepSeek window boundaries, weekends, holidays, legacy aliases and unknown-model fail-closed text; provider isolation (the Go policy never covers `deepseek` and vice versa); Zen pass-through for current and hypothetical new models plus the verified note; the `FLAT` state and the display-zone formatter; notification semantics (exactly one hold, exactly one release, silence for auxiliary kinds, no resumption after user cancel, continuation notification after an inactivity recovery, no duplicates across reloads, queue-owned silence, off-peak silence); read-time adoption of newly shipped built-in policies and preservation of customized sets.
+
+**Real OpenCode 2.0.27 validation (local fixture provider, zero paid/peak provider traffic):**
+
+| Scenario | Result |
+|---|---|
+| OpenCode Go shape, real TUI (`tmux` + `opencode --standalone`) | hold toast at +0.9s; **zero primary provider traffic during the simulated peak window**; resume toast at the boundary; reply rendered; one session, one user message, automatic title; exactly one primary + one flat title request; `/offpeak status` during the hold showed `Pricing: PEAK`, `Requests: BLOCKED`, `Interactive: 1 request waiting for off-peak`, correct policy ID |
+| Direct DeepSeek, headless with the server event stream captured | exactly one `rpc.opencode-offpeak.hold` and one `rpc.opencode-offpeak.resume` (`kind: release`); both provider requests (title + primary) only at the boundary; clean recovery state; clean stdout; exit 0; automatic title |
+| Zen (`opencode/deepseek-v4.1-flash-free`) in the real TUI | no hold toast; reply inside the simulated peak window (+0.9s); status `Pricing: UNTRACKED`, `Requests: ALLOWED (no policy needed: …)`, `Next transition: none` |
+| Reload during the hold | exactly one hold and one resume (no duplicates); both requests only at the boundary |
+| Full server restart during the hold | exactly one resume with `kind: continuation`; exactly one continuation; no duplicate original prompt; automatic title; clean recovery state |
+
+**Known platform race (pre-existing, not introduced here):** if `opencode reload` tears down the plugin generation while a released automatic-title request is still in flight, OpenCode's own title commit can be dropped and the session stays untitled until the next prompt. Reproduced with the shipped v0.1.5 plugin under the identical harness (1 of 3 runs kept the title, 2 of 3 did not) and with v0.1.6; the pending-title marker watches for the title and is then dropped with a diagnostic, and the plugin deliberately never mutates a session title (see the v0.1.5 section).
+
+**Live installation (OpenCode 2.0.27):** `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6` (the `#v0.1.5` entry was removed with `opencode plugin remove`); `/api/plugin` reports `#v0.1.6` at commit `1fe61d2f5979f6f4df32208df7ed3f1cea8c9ae6` active; the server entrypoint loads from cache `git-opencode-offpeak-7585d22738a7/1792073972071`; `opencode reload` applied. `/offpeak status`: ON, `auto`, OFF_PEAK, queue/waiting/interactive/recovery/titleRecovery/failed all 0, and `pricing` for each provider class reports `deepseek-opencode-go` (Go), `deepseek-api` (direct, adopted without editing the file), `FLAT` for `gpt-6-luna`, and `UNTRACKED` + the Zen note for `opencode`. Live OFF_PEAK smoke at 14:21Z: session `ses_ec00ff034ffe4vmWVAoGEuDcCh` replied `offpeak v0.1.6 live ok` and received the automatic title `Exact reply: offpeak v0.1.6 live ok`; the test session was removed afterwards through the supported session API, leaving `session_v2`, `session_message`, queue and recovery clean.
+
+**Housekeeping:** the merged `release/v0.1.5` and `release/v0.1.6` branches were deleted locally and on `origin`; the local-only `peak-defer` branch (a v0.1.4 development branch whose content is superseded by the released v0.1.4 code, not merged, not on `origin`) was inspected and intentionally left in place rather than discarding unique commits; stale current-state references in the lower sections of this file were corrected to point at v0.1.6.
+
+**Remaining intentional limitations (v0.1.6):** a model that matches neither the peak nor the flat list under a peak-priced provider still fails closed at all hours until a verified policy update ships; the plugin cannot force a title regeneration for an idle session (OpenCode 2.0.27 exposes no plugin-facing regeneration call — see v0.1.5); notifications are TUI-only by design (headless clients have no subscriber); the annual policy review now also re-checks the direct-API model list and the Zen pricing page; a TUI process started before this install keeps its old TUI entrypoint until relaunched (the server-side plugin is v0.1.6 and a fresh TUI loads v0.1.6).
 
 ## 2026-10-15 v0.1.5 — automatic titles restored and pending-title recovery
 
@@ -243,10 +284,10 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
-- Package: `opencode-offpeak@0.1.4`, MIT
+- Package: `opencode-offpeak@0.1.6`, MIT
 - Verified CLI: OpenCode v2.0.26 and v2.0.27
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
-- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4`
+- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
 
 ## Architecture
@@ -255,7 +296,7 @@ One package uses OpenCode v2 request hooks, session APIs, plugin storage, RPC, a
 
 The request guard checks HTTP and experimental WebSocket model requests before transport. It fails closed for invalid configuration, invalid pricing data, and unknown models under a configured provider. `OFF` pauses queue automation and keeps the hard guard active; only the explicit task-scoped 15-minute `/offpeak run-now <task-id>` action can authorize peak inference.
 
-The built-in `deepseek-opencode-go` policy matches the OpenCode Go provider and its listed DeepSeek models. Its single canonical UTC schedule was checked against the official OpenCode Go pricing page on 2026-10-09: weekdays 01:00–04:00 and 06:00–10:00 are peak; weekends and the remaining hours are off-peak. OpenCode Go lists peak token rates at twice the off-peak rates. Provider terms can change; re-verify the source before updating the policy.
+Two built-in policies ship (v0.1.6): `deepseek-opencode-go` (provider `opencode-go`) and `deepseek-api` (provider `deepseek`, the direct DeepSeek API), sharing one verified UTC schedule — weekdays 01:00–04:00 and 06:00–10:00 UTC are peak; weekends, the remaining hours, and Chinese statutory public holidays are off-peak — and one shared Chinese holiday calendar. Vendor-documented flat-priced models evaluate `FLAT` (never held); a model with no verified entry fails closed. OpenCode Zen (provider `opencode`) has no time-based pricing at all and therefore no policy: its requests are never delayed. Each policy carries its own source URL and `verifiedAt` date; provider terms can change, so re-verify the sources before updating a policy (see `docs/pricing-policies.md`).
 
 ## Implemented behavior
 
@@ -301,8 +342,8 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 ## User action required
 
-None. The v0.1.4 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. The server-side plugin is already reloaded to v0.1.4; a TUI process started before the reload (for example PID 4053968) keeps its v0.1.3 TUI entrypoint until it is relaunched, and the plugin reports that condition explicitly.
+None. The v0.1.6 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. The server-side plugin is already reloaded to v0.1.6; a TUI process started before the reload (for example PID 4053968) keeps its older TUI entrypoint until it is relaunched, so relaunch a TUI to see the new `/offpeak status` wording and the hold/resume toasts. Plugin behavior (holding, recovery, notifications on the event stream) is server-side and unaffected by an older TUI process.
 
 ## Next normal maintenance
 
-Before changing the built-in pricing schedule or model list, inspect the current OpenCode Go pricing page and OpenCode v2 plugin documentation, update the single policy definition and verification date, run `npm run check`, build and pack, and verify the supported CLI version range. Continue distributing GitHub-tag releases through OpenCode's supported Git install path. Only use the optional npm OIDC workflow after the package and trusted-publisher relationship have been bootstrapped and the repository opt-in variable is enabled.
+Before changing a built-in pricing schedule or model list, inspect the current OpenCode Go, OpenCode Zen, and DeepSeek API pricing pages plus the OpenCode v2 plugin documentation; update the policy definition(s) and `verifiedAt` dates in `src/policy.ts`, add provider tests, run `npm run check`, build and pack, and verify the supported CLI version range. The Chinese holiday calendar (`src/holidays.ts`) needs one data update per year after the State Council publishes the next arrangement (usually November), and the verified model lists and the Zen flat-pricing fact are re-checked at the same time. Continue distributing GitHub-tag releases through OpenCode's supported Git install path. Only use the optional npm OIDC workflow after the package and trusted-publisher relationship have been bootstrapped and the repository opt-in variable is enabled.
