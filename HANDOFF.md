@@ -1,19 +1,57 @@
-# Handoff — 2026-10-14
+# Handoff — 2026-10-15
 
 ## Release status
 
-`opencode-offpeak` v0.1.4 is the canonical release:
+`opencode-offpeak` v0.1.5 is the canonical release:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.5
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.4`
-- Tag commit: `4244f177afe0adfc0017d8dcc695a05274be7d27` (annotated tag object `2f2efede8c74a93193046ddcee89b13b2b30b125`; merge of PR #9 `60f13ec` plus the release-note correction `4244f17`)
-- Implementation commit: `c693fcc` (`fix(guard): defer peak requests before the provider attempt and add holiday-aware pricing`)
-- Attached `opencode-offpeak-0.1.4.tgz` SHA-256: `c7fc0d2883e15c047cdf11a5c9a2d5c254182d423044879edf11195a0a674c92` (reproduced byte-for-byte from a clean `v0.1.4` tag archive + `npm ci` + `npm run compile` + `npm pack`)
-- CI: PR #9 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38553957087`)
-- The `v0.1.0`, `v0.1.1`, `v0.1.2`, and `v0.1.3` tags were not mutated and remain installable.
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.5`
+- Tag commit: `f9069e8918edb3df6ed407b2f1f90182d93036a9` (annotated tag object `e09bf9fabee41b9c7dc2d41341cecbb46d972529`; merge of PR #10 `f9069e8`)
+- Implementation commit: `58a3611` (`fix(titles): restore automatic session titles and persist pending-title recovery`)
+- Attached `opencode-offpeak-0.1.5.tgz` SHA-256: `613777b6ac64ee590c6d03b36b0ad1ea4ea6a06ede9eac01e82e8bb384f99c02` (reproduced byte-for-byte from a clean `v0.1.5` tag archive + `npm ci` + `npm run compile` + `npm pack`)
+- CI: PR #10 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38720054407`)
+- The `v0.1.0` through `v0.1.4` tags were not mutated and remain installable.
+
+## 2026-10-15 v0.1.5 — automatic titles restored and pending-title recovery
+
+**Reported symptom:** sessions completed successfully but never received their automatic OpenCode-generated title, noticed after work was deferred through a PEAK window.
+
+**Live state before the fix (verified):** OpenCode CLI and background service **2.0.27**; `/root/.config/opencode/opencode.json` pinned exactly `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4`; `/api/plugin` reported version `4244f177afe0adfc0017d8dcc695a05274be7d27` with server+TUI active; `/offpeak status` ON / `auto` / OFF_PEAK with queue, recovery, interactive and failed all 0. The plugin's own KV documents (`opencode-offpeak/queue-v1`, `opencode-offpeak/recovery-v1`) were empty.
+
+**Root cause (reproduced, not assumed):** OpenCode prepares automatic session naming as its own `title` model request that uses the provider's *small* model, not the session model. `SessionContext.selectTitle` resolves `model.small(providerID)` (families `gpt-luna`, `gemini-flash-lite`, `gemini-flash`, `claude-haiku`); for `opencode-go` that is `gpt-6-luna`. The built-in policy listed only the four DeepSeek models, so every title request evaluated `UNKNOWN` for a configured provider and the v0.1.4 `model.request` guard failed it closed — at every hour, not only during PEAK. The first observed loss is exactly when the plugin went live on 2026-10-11: every later real session has a NULL title (checked directly in `session_v2`).
+
+- Fixture reproduction with the live shape (provider `opencode-go`, models `deepseek-v4.1-flash` + `gpt-6-luna`, the stored pre-release policy copy): v0.1.4 blocked the title request (`model.request kind=title model=opencode-go/gpt-6-luna`, exit 0, one provider request total, session untitled); the same config on this release adopted the flat model list from the stored copy and generated the title.
+- Live probe on 2026-10-15 05:39Z (OFF_PEAK, before the fix): `opencode run --standalone` completed with `title probe ok` and the session row was `<NULL>`.
+
+**Title lifecycle (OpenCode 2.0.27 source):** `SessionTitle.generate` runs only (a) when a root session's input is promoted and the session is untitled, or (b) through the HTTP handler `PATCH /api/session/:id {"title": ""}`. `isExactRootFallback` treats a missing title or the exact `New session - <created ISO>` string as untitled; the rename commit is guarded by a sequence compare-and-set and by `current.title !== session.title`, so a concurrent rename (or a manual rename) wins. OpenCode does not retry an interrupted title request on its own.
+
+**Fix (v0.1.5):**
+
+- `flatModels` in the policy schema: explicit, vendor-documented patterns for models with a single all-hours price. The Go pricing table lists Off-Peak/Peak tiers only for the DeepSeek models, so the built-in policy declares the documented flat models (GPT 6/5.6 Luna, Claude Haiku 5.5, Gemini 4 Argon Contributor, GLM, Kimi, LongCat, MiMo, MiniMax, Muse Spark, Qwen, Hy, Space Bunny, Step 5 Preview Free, Cat Jam Free, Grok). `models` wins on overlap; an unmatched model still fails closed, so an unlisted future model can never silently gain peak traffic. An unmodified stored copy of the built-in policy adopts the flat list at read time — which is how the live install picked it up without editing `offpeak.json`.
+- A held title request persists a semantic `pending-title` recovery entry. Recovery entries are keyed per origin (`legacy`/`deferred`/`retry-failure`/`pending-title`), so a session can carry a primary continuation and a title marker at the same time; v0.1.4 stored only one entry per session, so a held title could shadow a primary deferral (a latent hazard this release removes).
+- Delivery is a check, never a replay or a mutation: a session that already has a title (generated, concurrent, or manually renamed) clears the marker without any request; a session that still needs one is left to OpenCode's own generation, which every interruption path re-triggers through the same input promotion that continues the session. Stale markers are dropped with a diagnostic after the settle cap. `/offpeak status` reports `titleRecoveryWaiting`.
+- The plugin never calls `session.update` for titles. In the 2.0.27 plugin host, `update({ title: "" })` renames the session to an **empty** title (it lacks the HTTP handler's regenerate branch); a fixture run proved this can also discard a legitimately generated rename through OpenCode's own sequence guard (observed empty title in the first restart run before the delivery was corrected). The driver therefore exposes no title-mutating call at all.
+- The transport guard (`http.request`, `experimental.ws.handshake`, `experimental.ws.send`) now receives the request kind and removes only its own recovery class: a released title clears a pending title, a released primary clears a primary continuation, and neither can clear the other.
+
+**Automated tests:** `npm run lint`, `npm run typecheck`, `npm test` — **86 tests pass** (71 before); `npm pack --dry-run` validated. New deterministic coverage: flat models allowed inside DeepSeek peak windows, DeepSeek windows unchanged, overlap precedence, ambiguous and invalid lists failing closed, pending-title persistence across reload, manual-rename and already-titled safety, the exact creation-time fallback still counting as untitled, child and missing sessions, user cancel versus inactivity, at-most-once semantics across repeated reloads, coexistence with a primary deferral, and read-time adoption of the flat list by an unmodified stored policy.
+
+**Real-binary validation (OpenCode 2.0.27 + local fixture provider, no paid traffic):**
+
+| Scenario | Result |
+|---|---|
+| Live-shaped config under v0.1.4 (OFF_PEAK) | title request `opencode-go/gpt-6-luna` blocked, session left untitled, 1 provider request |
+| Live-shaped config under v0.1.5 (stored pre-release policy copy) | flat list adopted, title request allowed, title generated; 1 title + 1 primary request |
+| PEAK window, covered title model, uninterrupted (`peak-both`, `peak-primary`) | zero provider traffic during PEAK; `pending-title` + `deferred` markers persisted together; both released at the boundary; exactly one title + one primary request; recovery clean |
+| PEAK + `opencode reload` | markers persisted; original holds released at the boundary; one title + one primary request; no duplicate prompt; recovery clean |
+| PEAK + full server restart | markers survived in storage; new instance reported `recoveryWaiting: 2`, `titleRecoveryWaiting: 1`; boundary produced exactly one continuation and exactly one native title request; session titled; recovery clean |
+| Uncovered title model during PEAK (`peak-luna-uncovered`) | title request still fails closed; zero provider traffic; only the primary request at the boundary (deliberate `UNKNOWN` invariant) |
+
+**Live installation:** `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.5` (the `#v0.1.4` entry removed with `opencode plugin remove`); `/api/plugin` reports `#v0.1.5` version `f9069e8918edb3df6ed407b2f1f90182d93036a9` active; cache `git-opencode-offpeak-aa46d2693f65/1792060013697` resolves commit `f9069e8`; `opencode reload` applied. `/offpeak status`: ON, `auto`, OFF_PEAK, queue/recovery/interactive/titleRecovery/failed all 0. Live policy read path verified against the unchanged stored `offpeak.json`: the adopted flat list has 15 patterns; `gpt-6-luna`/`gpt-5.6-luna`/`claude-haiku-5-5` are OFF_PEAK at all hours including 2026-10-16T02:00Z while `deepseek-v4.1-flash` is PEAK there and an unlisted model is `UNKNOWN`. Live OFF_PEAK smoke (10:28Z): session `ses_ec0e4b113ffetGhgbGpJRgpp4d` replied `offpeak v0.1.5 live ok` and received the automatic title `Exact reply requested: offpeak v0.1.5 live ok`; the test session was removed afterwards through the supported session API, leaving `session_v2`, `session_message`, queue and recovery clean.
+
+**Remaining intentional limitations (v0.1.5):** a title request for a model that matches neither the peak nor the flat list still fails closed at all hours (the invariant; extend the policy for new models); the plugin cannot force a title regeneration for an idle session that never receives another promotion, because OpenCode 2.0.27 exposes no plugin-facing regeneration call and its plugin-host `session.update` cannot regenerate — in practice every interruption path re-triggers naming through the continuity promotion, and a pending marker that never sees a title is dropped with a diagnostic after the settle cap; the annual policy review must also re-check the flat model list against the Go pricing table; a TUI process started before this install keeps its old TUI entrypoint until relaunched (the server-side plugin is v0.1.5 and a fresh TUI loads v0.1.5).
 
 ## 2026-10-14 v0.1.4 — pre-model peak deferral (the remaining header timeout)
 
