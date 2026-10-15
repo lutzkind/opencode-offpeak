@@ -1,7 +1,7 @@
 import { Plugin } from "@opencode/plugin";
 import { assertSupportedOpenCode } from "./compat.js";
 import { ConfigRepository } from "./config.js";
-import { OffpeakEngine, type SessionDriver } from "./engine.js";
+import { type EngineNotification, OffpeakEngine, type SessionDriver } from "./engine.js";
 import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
 import { QueueRepository, RecoveryRepository } from "./store.js";
 
@@ -52,12 +52,21 @@ export default Plugin.define({
         await context.session.interrupt({ sessionID });
       },
     };
+    // Hold/resume notifications travel as plugin RPC events on OpenCode's own
+    // event stream; a TUI renders them as toasts, and headless runs simply have
+    // no subscriber.
+    let publishNotification: ((event: EngineNotification) => Promise<void>) | undefined;
     const engine = new OffpeakEngine({
       repository,
       recoveries,
       location: context.location?.directory ?? "",
       config,
       sessions,
+      notify: (event) => {
+        const publish = publishNotification;
+        if (!publish) return;
+        void publish(event).catch((error) => console.error("[opencode-offpeak]", error));
+      },
       onError: (error) => console.error("[opencode-offpeak]", error),
     });
     const hooks = await Promise.all([
@@ -208,7 +217,23 @@ export default Plugin.define({
     });
 
     await engine.start();
+    publishNotification = async (event) => {
+      if (event.type === "hold") {
+        await rpc.events?.emit?.("hold", {
+          sessionID: event.sessionID,
+          timeZone: event.timeZone,
+          ...(event.until !== undefined ? { until: event.until } : {}),
+          ...(event.display !== undefined ? { display: event.display } : {}),
+        });
+        return;
+      }
+      await rpc.events?.emit?.("resume", {
+        sessionID: event.sessionID,
+        kind: event.kind,
+      });
+    };
     return async () => {
+      publishNotification = undefined;
       eventAbort.abort();
       await events;
       await engine.dispose();

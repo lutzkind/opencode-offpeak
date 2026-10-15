@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
-  DEEPSEEK_OPENCODE_GO,
+  BUILTIN_POLICIES,
   type PricingPolicy,
   validatePolicy,
   validateTimeZone,
@@ -50,7 +50,7 @@ export function defaultConfig(options: Record<string, unknown> = {}): OffpeakCon
     enabled,
     mode,
     displayTimeZone,
-    policies: [DEEPSEEK_OPENCODE_GO, ...(extra as PricingPolicy[])],
+    policies: [...structuredClone(BUILTIN_POLICIES), ...(extra as PricingPolicy[])],
   };
 }
 
@@ -96,9 +96,16 @@ export function validateConfig(value: unknown, fallback: OffpeakConfig): Offpeak
  * any customized schedule. A policy that differs in provider, model, time
  * zone, multiplier, or weekly windows is preserved exactly as stored, and an
  * explicit holiday list or flat model list always wins.
+ *
+ * When every stored policy is an unmodified copy of a built-in policy — that
+ * is, the stored file is only a cached copy of the shipped defaults, which is
+ * what a first `/offpeak on|off` persists — newly shipped built-in policies
+ * are appended too, so an existing installation gains a policy for a newly
+ * supported provider without editing the file. As soon as anything is
+ * customized, the stored set is authoritative and nothing is added or removed.
  */
 function adoptBuiltinDefaults(stored: PricingPolicy[], builtin: PricingPolicy[]): PricingPolicy[] {
-  return stored.map((policy) => {
+  const adopted = stored.map((policy) => {
     const reference = builtin.find((candidate) => candidate.id === policy.id);
     if (!reference) return policy;
     if (!sameWeeklySchedule(policy, reference)) return policy;
@@ -112,6 +119,17 @@ function adoptBuiltinDefaults(stored: PricingPolicy[], builtin: PricingPolicy[])
         : {}),
     };
   });
+  const allBuiltinCopies = stored.every((policy) => {
+    const reference = builtin.find((candidate) => candidate.id === policy.id);
+    return reference !== undefined && sameWeeklySchedule(policy, reference);
+  });
+  if (!allBuiltinCopies) return adopted;
+  for (const reference of builtin) {
+    if (!adopted.some((policy) => policy.id === reference.id)) {
+      adopted.push(structuredClone(reference));
+    }
+  }
+  return adopted;
 }
 
 function sameWeeklySchedule(left: PricingPolicy, right: PricingPolicy): boolean {

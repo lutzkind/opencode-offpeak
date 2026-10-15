@@ -1,7 +1,12 @@
 import { type FSWatcher, mkdirSync, watch } from "node:fs";
 import path from "node:path";
 import type { ConfigRepository, OffpeakConfig } from "./config.js";
-import { evaluatePricing, type PolicyDecision } from "./policy.js";
+import {
+  evaluatePricing,
+  flatProviderNote,
+  formatTransitionInTimeZone,
+  type PolicyDecision,
+} from "./policy.js";
 import {
   AsyncSignal,
   Mutex,
@@ -56,6 +61,8 @@ export interface EngineStatus {
   pricingState: PolicyDecision["state"];
   requestsAllowed: boolean;
   nextTransition?: number;
+  /** Verified explanation for providers with no time-based pricing (for example OpenCode Zen). */
+  providerNote?: string;
   displayTimeZone: string;
   queued: number;
   running?: { id: string; sessionID?: string; state: TaskState };
@@ -137,6 +144,30 @@ export interface RetryFailureInput {
   willRetry: boolean;
 }
 
+/**
+ * User-facing notifications for an intentionally held primary interactive
+ * request. They are emitted as plugin RPC events and rendered by the TUI as
+ * non-chat toasts: they never enter the session, the model context, or
+ * headless stdout.
+ *
+ * - `hold` fires once when a request starts waiting for off-peak.
+ * - `resume` fires once when the same request is released, or when a persisted
+ *   recovery continues the session after a reload or server restart. A user
+ *   cancel delivers neither.
+ */
+export type EngineNotification =
+  | {
+      type: "hold";
+      sessionID: string;
+      /** Next allowed pricing transition in epoch milliseconds, when known. */
+      until?: number;
+      /** Configured display time zone for the deadline. */
+      timeZone: string;
+      /** Preformatted deadline ("17:00 Asia/Bangkok") for the UI. */
+      display?: string;
+    }
+  | { type: "resume"; sessionID: string; kind: "release" | "continuation" };
+
 export class PricingBlockedError extends Error {
   readonly code = "OFFPEAK_PRICING_BLOCKED";
 
@@ -157,6 +188,8 @@ export interface EngineOptions {
   clock?: EngineClock;
   id?: () => string;
   onError?: (error: unknown) => void;
+  /** Delivers user-facing hold/resume notifications. */
+  notify?: (event: EngineNotification) => void;
 }
 
 export class OffpeakEngine {
@@ -166,10 +199,17 @@ export class OffpeakEngine {
   readonly #clock: EngineClock;
   readonly #id: () => string;
   readonly #onError: (error: unknown) => void;
+  readonly #notify: (event: EngineNotification) => void;
   readonly #lock = new Mutex();
   readonly #signal: AsyncSignal;
   readonly #runners = new Set<string>();
   readonly #interactiveWaiters = new Set<number>();
+  /**
+   * Interactive sessions whose current hold was announced to the UI. A resume
+   * notification is emitted only for a hold this instance announced, so a
+   * reload or restart cannot produce a duplicate or a misleading resumption.
+   */
+  readonly #announcedHolds = new Set<string>();
   /**
    * Per-session monotonic abort epochs. When OpenCode interrupts a session's
    * execution (user cancel, inactivity sweep, supersede), a hold loop whose
@@ -204,6 +244,7 @@ export class OffpeakEngine {
     this.#signal = new AsyncSignal(this.#clock);
     this.#id = options.id ?? (() => crypto.randomUUID());
     this.#onError = options.onError ?? (() => undefined);
+    this.#notify = options.notify ?? (() => undefined);
   }
 
   async start(): Promise<void> {
@@ -392,6 +433,7 @@ export class OffpeakEngine {
       (task) => task.overrideUntil && Date.parse(task.overrideUntil) > this.#clock.now(),
     );
     const enabled = settings.config?.enabled ?? false;
+    const providerNote = selected?.providerID ? flatProviderNote(selected.providerID) : undefined;
     return {
       enabled,
       mode: settings.config?.mode ?? "auto",
@@ -409,6 +451,7 @@ export class OffpeakEngine {
           ? false
           : decision.allowed,
       ...(decision.nextTransition !== undefined ? { nextTransition: decision.nextTransition } : {}),
+      ...(providerNote && decision.state === "UNTRACKED" ? { providerNote } : {}),
       displayTimeZone: settings.config?.displayTimeZone ?? "UTC",
       queued: tasks.filter((task) => task.state === "QUEUED").length,
       ...(running
@@ -503,6 +546,11 @@ export class OffpeakEngine {
     // A normal interactive request in auto mode is held at the boundary instead of
     // being discarded; the same request and session continue when pricing allows.
     if (!task && first.config.enabled && first.config.mode === "auto") {
+      // Only the user's own primary request gets visible feedback; auxiliary
+      // title/compaction/generate holds stay silent.
+      if (input.kind === "primary") {
+        this.#announceHold(input.sessionID, decision, first.config.displayTimeZone);
+      }
       await this.#holdUntilAllowed(input, undefined, deferralOrigin);
       return;
     }
@@ -584,6 +632,7 @@ export class OffpeakEngine {
         if (settings.config.enabled && decision.allowed) {
           if (task) await this.#transition(task.id, "RUNNING");
           if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
+          this.#announceResume(input.sessionID);
           return;
         }
         if (settings.config.enabled && decision.nextTransition === undefined) {
@@ -600,7 +649,42 @@ export class OffpeakEngine {
       throw new PricingBlockedError("Offpeak plugin is shutting down; request blocked.");
     } finally {
       if (waiter !== undefined) this.#interactiveWaiters.delete(waiter);
+      this.#announcedHolds.delete(input.sessionID);
     }
+  }
+
+  /**
+   * Announces a new interactive hold exactly once per session. The TUI renders
+   * this as a toast; nothing is written to the session or the model context.
+   */
+  #announceHold(sessionID: string, decision: PolicyDecision, timeZone: string): void {
+    if (this.#announcedHolds.has(sessionID)) return;
+    this.#announcedHolds.add(sessionID);
+    this.#notify({
+      type: "hold",
+      sessionID,
+      timeZone,
+      ...(decision.nextTransition !== undefined
+        ? {
+            until: decision.nextTransition,
+            display: formatTransitionInTimeZone(
+              decision.nextTransition,
+              timeZone,
+              this.#clock.now(),
+            ),
+          }
+        : {}),
+    });
+  }
+
+  /**
+   * Announces the release of a hold that this instance announced. A hold that
+   * was interrupted, cancelled, or transferred to a recovery continuation
+   * produces no release notification here.
+   */
+  #announceResume(sessionID: string): void {
+    if (!this.#announcedHolds.delete(sessionID)) return;
+    this.#notify({ type: "resume", sessionID, kind: "release" });
   }
 
   #registerInteractiveWaiter(): number {
@@ -837,6 +921,9 @@ export class OffpeakEngine {
     await this.#removeRecovery(entry.sessionID, [entry.origin]);
     try {
       await this.#sessions.prompt(entry.sessionID, RECOVERY_CONTINUATION);
+      // The session continues after a reload, restart, or retry veto; tell the
+      // UI once, from the instance that actually delivered the continuation.
+      this.#notify({ type: "resume", sessionID: entry.sessionID, kind: "continuation" });
     } catch (error) {
       this.#onError(error);
     }

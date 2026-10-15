@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEEPSEEK_OPENCODE_GO, evaluatePricing, formatInTimeZone } from "../dist/policy.js";
+import { CHINA_PUBLIC_HOLIDAYS } from "../dist/holidays.js";
+import {
+  BUILTIN_POLICIES,
+  DEEPSEEK_API,
+  DEEPSEEK_OPENCODE_GO,
+  evaluatePricing,
+  flatProviderNote,
+  formatInTimeZone,
+  formatTransitionInTimeZone,
+  VERIFIED_FLAT_PROVIDERS,
+} from "../dist/policy.js";
 
 const model = "deepseek-v4.1-flash";
 const provider = "opencode-go";
@@ -89,7 +99,7 @@ test("unknown models for a configured provider fail closed; unrelated providers 
   assert.equal(unrelated.allowed, true);
 });
 
-test("documented flat models have no peak window and stay allowed during DeepSeek peak hours", () => {
+test("documented flat models are FLAT with no peak window and stay allowed during DeepSeek peak hours", () => {
   // The Go pricing table lists peak/off-peak tiers only for the DeepSeek models.
   for (const modelID of [
     "gpt-6-luna",
@@ -119,14 +129,14 @@ test("documented flat models have no peak window and stay allowed during DeepSee
       modelID,
       at("2026-10-12T02:00:00Z"),
     );
-    assert.equal(decision.state, "OFF_PEAK", modelID);
+    assert.equal(decision.state, "FLAT", modelID);
     assert.equal(decision.allowed, true, modelID);
     assert.equal(decision.policy?.id, "deepseek-opencode-go", modelID);
     assert.equal(decision.nextTransition, undefined, modelID);
     // The same flat model is never blocked at any hour, including peak edges.
     assert.equal(
       evaluatePricing([DEEPSEEK_OPENCODE_GO], provider, modelID, at("2026-10-12T06:00:00Z")).state,
-      "OFF_PEAK",
+      "FLAT",
       modelID,
     );
   }
@@ -160,7 +170,7 @@ test("a model matching both the peak and flat patterns stays peak-priced", () =>
   );
   assert.equal(
     evaluatePricing([policy], provider, "deepseek-other", at("2026-10-12T02:00:00Z")).state,
-    "OFF_PEAK",
+    "FLAT",
   );
 });
 
@@ -364,5 +374,169 @@ test("an empty holiday list keeps the weekly schedule untouched", () => {
   assert.equal(
     evaluatePricing([policy], provider, model, at("2026-10-10T02:00:00Z")).state,
     "OFF_PEAK",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Direct DeepSeek API provider (`deepseek`) — v0.1.6
+// ---------------------------------------------------------------------------
+
+const directAt = (iso, modelID) => evaluatePricing([DEEPSEEK_API], "deepseek", modelID, at(iso));
+
+test("direct DeepSeek API models use the same verified weekly windows and holiday rule", () => {
+  for (const modelID of [
+    "deepseek-flash",
+    "deepseek-v4-pro",
+    // Legacy aliases the provider still accepts and bills at the Flash price.
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+  ]) {
+    assert.equal(directAt("2026-10-12T00:59:59Z", modelID).state, "OFF_PEAK", modelID);
+    assert.equal(directAt("2026-10-12T01:00:00Z", modelID).state, "PEAK", modelID);
+    assert.equal(directAt("2026-10-12T03:59:59Z", modelID).state, "PEAK", modelID);
+    assert.equal(directAt("2026-10-12T04:00:00Z", modelID).state, "OFF_PEAK", modelID);
+    assert.equal(directAt("2026-10-12T05:59:59Z", modelID).state, "OFF_PEAK", modelID);
+    assert.equal(directAt("2026-10-12T06:00:00Z", modelID).state, "PEAK", modelID);
+    assert.equal(directAt("2026-10-12T09:59:59Z", modelID).state, "PEAK", modelID);
+    assert.equal(directAt("2026-10-12T10:00:00Z", modelID).state, "OFF_PEAK", modelID);
+    // Weekends are off-peak even inside the nominal window.
+    assert.equal(directAt("2026-10-10T02:00:00Z", modelID).state, "OFF_PEAK", modelID);
+    // Chinese public holidays are full-day off-peak (2026-10-01, National Day).
+    assert.equal(directAt("2026-10-01T02:00:00Z", modelID).state, "OFF_PEAK", modelID);
+    assert.equal(directAt("2026-10-01T08:00:00Z", modelID).state, "OFF_PEAK", modelID);
+    // The next transition is reported for peak windows.
+    assert.equal(
+      directAt("2026-10-12T02:00:00Z", modelID).nextTransition,
+      at("2026-10-12T04:00:00Z"),
+    );
+  }
+});
+
+test("the direct DeepSeek policy reuses the shared Chinese holiday calendar data", () => {
+  assert.equal(DEEPSEEK_API.holidays, CHINA_PUBLIC_HOLIDAYS);
+  assert.equal(DEEPSEEK_API.timeZone, "UTC");
+  assert.equal(DEEPSEEK_API.source, "https://api-docs.deepseek.com/quick_start/pricing");
+  assert.equal(DEEPSEEK_API.verifiedAt, "2026-10-15");
+  // The shared weekly windows are identical to the Go policy: both providers
+  // document 01:00-04:00 and 06:00-10:00 UTC, Monday through Friday.
+  assert.deepEqual(DEEPSEEK_API.blocked, DEEPSEEK_OPENCODE_GO.blocked);
+  assert.deepEqual(DEEPSEEK_API.holidays, DEEPSEEK_OPENCODE_GO.holidays);
+});
+
+test("an unknown direct DeepSeek model fails closed with an actionable reason", () => {
+  const decision = directAt("2026-10-12T05:00:00Z", "deepseek-future-ultra");
+  assert.equal(decision.state, "UNKNOWN");
+  assert.equal(decision.allowed, false);
+  assert.match(decision.reason, /not in the verified off-peak pricing policy/);
+  assert.match(decision.reason, /Update opencode-offpeak or add a verified custom policy/);
+  // No wildcard: a name that merely starts with deepseek- never inherits the schedule.
+  assert.equal(directAt("2026-10-12T02:00:00Z", "deepseek-anything").allowed, false);
+  // The Go policy never covers the direct provider and vice versa.
+  assert.equal(
+    evaluatePricing(
+      [DEEPSEEK_OPENCODE_GO],
+      "deepseek",
+      "deepseek-flash",
+      at("2026-10-12T05:00:00Z"),
+    ).state,
+    "UNTRACKED",
+  );
+  assert.equal(
+    evaluatePricing(
+      [DEEPSEEK_API],
+      "opencode-go",
+      "deepseek-v4.1-flash",
+      at("2026-10-12T05:00:00Z"),
+    ).state,
+    "UNTRACKED",
+  );
+});
+
+test("both built-in policies ship together and cover their own providers", () => {
+  assert.deepEqual(
+    BUILTIN_POLICIES.map((policy) => policy.id),
+    ["deepseek-opencode-go", "deepseek-api"],
+  );
+  const go = evaluatePricing(
+    BUILTIN_POLICIES,
+    "opencode-go",
+    "deepseek-v4.1-flash",
+    at("2026-10-12T02:00:00Z"),
+  );
+  assert.equal(go.state, "PEAK");
+  assert.equal(go.policy?.id, "deepseek-opencode-go");
+  const direct = evaluatePricing(
+    BUILTIN_POLICIES,
+    "deepseek",
+    "deepseek-flash",
+    at("2026-10-12T02:00:00Z"),
+  );
+  assert.equal(direct.state, "PEAK");
+  assert.equal(direct.policy?.id, "deepseek-api");
+});
+
+// ---------------------------------------------------------------------------
+// OpenCode Zen (`opencode`) — verified flat pricing, no policy by design
+// ---------------------------------------------------------------------------
+
+test("OpenCode Zen has no time-based policy: every model passes through untouched", () => {
+  for (const modelID of [
+    "deepseek-v4.1-flash-free",
+    "big-pickle",
+    "cat-jam-free",
+    "nemotron-3-ultra-free",
+    "a-brand-new-zen-model",
+  ]) {
+    const decision = evaluatePricing(
+      BUILTIN_POLICIES,
+      "opencode",
+      modelID,
+      at("2026-10-12T02:00:00Z"),
+    );
+    assert.equal(decision.state, "UNTRACKED", modelID);
+    assert.equal(decision.allowed, true, modelID);
+    assert.equal(decision.nextTransition, undefined, modelID);
+    assert.equal(decision.policy, undefined, modelID);
+  }
+  assert.match(flatProviderNote("opencode"), /no peak\/off-peak tiers/);
+  assert.match(flatProviderNote("OPENCODE"), /never delayed/);
+  assert.equal(flatProviderNote("openrouter"), undefined);
+  assert.equal(VERIFIED_FLAT_PROVIDERS.opencode.source, "https://opencode.ai/docs/zen/");
+  assert.equal(VERIFIED_FLAT_PROVIDERS.opencode.verifiedAt, "2026-10-15");
+  // The evidence behind that fact: a DeepSeek id used on Zen is still flat, and
+  // the DeepSeek policies above never apply to the `opencode` provider.
+  assert.equal(
+    evaluatePricing(BUILTIN_POLICIES, "opencode", "deepseek-v4-pro", at("2026-10-12T02:00:00Z"))
+      .state,
+    "UNTRACKED",
+  );
+});
+
+test("formatTransitionInTimeZone renders the configured display zone compactly", () => {
+  // Same calendar day in the display zone: clock + zone name only.
+  assert.equal(
+    formatTransitionInTimeZone(at("2026-10-15T16:00:00Z"), "UTC", at("2026-10-15T12:00:00Z")),
+    "16:00 UTC",
+  );
+  assert.equal(
+    formatTransitionInTimeZone(
+      at("2026-10-15T16:00:00Z"),
+      "Asia/Bangkok",
+      at("2026-10-15T12:00:00Z"),
+    ),
+    "23:00 Asia/Bangkok",
+  );
+  // A different calendar day in the display zone adds a local date prefix.
+  assert.equal(
+    formatTransitionInTimeZone(at("2026-10-16T01:00:00Z"), "UTC", at("2026-10-15T12:00:00Z")),
+    "Oct 16, 01:00 UTC",
+  );
+  assert.equal(
+    formatTransitionInTimeZone(
+      at("2026-10-16T01:00:00Z"),
+      "Asia/Bangkok",
+      at("2026-10-15T12:00:00Z"),
+    ),
+    "Oct 16, 08:00 Asia/Bangkok",
   );
 });

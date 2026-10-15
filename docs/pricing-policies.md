@@ -20,13 +20,20 @@
 
 Weekdays are `0` Sunday through `6` Saturday. Windows use local policy time and are start-inclusive/end-exclusive. Windows may cross midnight; their weekday applies to the day on which the window starts. Model patterns support `*` as a wildcard. Do not create ambiguous patterns that match the same provider/model.
 
-`models` are the peak-priced models: they are `PEAK` inside a blocked window and `OFF_PEAK` outside it. `flatModels` are the provider's models with a single all-hours price documented by the provider: they are `OFF_PEAK` at every hour and are never held or blocked. A pattern that matches both lists is treated as peak-priced (`models` wins). A model that matches neither list is `UNKNOWN` and fails closed. Both lists come from the provider's own pricing page; cite it in `source` and record the date in `verifiedAt`.
+`models` are the peak-priced models: they are `PEAK` inside a blocked window and `OFF_PEAK` outside it. `flatModels` are the provider's models with a single all-hours price documented by the provider: they evaluate `FLAT` at every hour (allowed, no transition) and are never held or blocked. A pattern that matches both lists is treated as peak-priced (`models` wins). A model that matches neither list is `UNKNOWN` and fails closed. Both lists come from the provider's own pricing page; cite it in `source` and record the date in `verifiedAt`. Prefer explicit model IDs and family globs over a blanket `*`: a future model with new time-based pricing must fail closed, not inherit an old schedule.
 
 The policy includes a source URL and verification date to make schedule provenance reviewable. `multiplier` is status metadata; the guard does not estimate or aggregate bills.
 
-## Built-in policy
+## Built-in policies
 
-`deepseek-opencode-go` matches provider ID `opencode-go` and the DeepSeek model IDs listed in the [README](../README.md). Its canonical schedule is defined only in `src/policy.ts`, with the holiday calendar in `src/holidays.ts`.
+Two policies ship built in, both with the same verified weekly windows (`DEEPSEEK_PEAK_WINDOWS` in `src/policy.ts`) and the same shared holiday calendar data (`CHINA_PUBLIC_HOLIDAYS` in `src/holidays.ts`):
+
+- `deepseek-opencode-go` — provider ID `opencode-go` (OpenCode Go).
+- `deepseek-api` — provider ID `deepseek` (the direct DeepSeek API).
+
+Their canonical schedules are defined only in `src/policy.ts`. When a stored `offpeak.json` contains only unmodified copies of the shipped policies, a newly shipped built-in policy is appended at read time, so existing installations gain it without editing the file; a customized policy set is authoritative and is never modified.
+
+### OpenCode Go (`opencode-go`)
 
 The rules are: peak Monday–Friday 01:00–04:00 and 06:00–10:00 UTC for the DeepSeek models; off-peak all other hours, weekends, and Chinese statutory public holidays in full; weekend make-up working days stay off-peak because weekends are always off-peak.
 
@@ -48,6 +55,16 @@ Holiday support uses explicit full-day OFF_PEAK exception calendars on the polic
 A listed date overrides every weekday peak window for the whole calendar day in the calendar's own time zone. The built-in 2026 calendar comes from the official State Council notice; `nextTransition` skips holiday peak windows; a year without a calendar keeps the deterministic weekly schedule, and no future dates are guessed. The State Council publishes the next year's arrangement each November, so the calendar needs one data update per year. The rule follows the DeepSeek pricing documentation referenced by the OpenCode Go pricing page; upstream [anomalyco/opencode#53071](https://github.com/anomalyco/opencode/issues/53071) tracks an open report about National Day billing and is the cue for the annual re-check. The annual review also re-checks the `flatModels` list against the Go pricing table: a newly added model that is not listed becomes `UNKNOWN` and fails closed until the policy is updated.
 
 An unknown model under provider `opencode-go` returns `UNKNOWN` and fails closed. Add a verified model/policy entry before relying on newly added provider models.
+
+### Direct DeepSeek API (`deepseek`)
+
+The [DeepSeek pricing documentation](https://api-docs.deepseek.com/quick_start/pricing) lists the two canonical API models `deepseek-flash` (DeepSeek-V4.1-Flash) and `deepseek-v4-pro` (DeepSeek-V4-Pro-0813), each with Off-Peak and Peak token rates ("Off-peak rates are half of the peak rates. Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays. All other hours are off-peak, including weekends and Chinese public holidays in full."). The same page notes that the legacy names `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still accepted, served by DeepSeek-V4.1-Flash and billed at the Flash price, so they share the schedule and are listed explicitly. The policy matches exactly these four IDs — there is no `deepseek-*` wildcard, and a future direct model fails closed until it is verified.
+
+OpenCode exposes provider ID `deepseek` (package `@opencode/ai/providers/deepseek`, base URL `https://api.deepseek.com`) with exactly the two canonical models in its live registry; the legacy aliases are kept for sessions pinned to an older catalog and for API-level use.
+
+### OpenCode Zen (`opencode`) — no policy by design
+
+The [OpenCode Zen pricing page](https://opencode.ai/docs/zen/) lists one all-hours price (input, output, cached read/write) per model. There are no peak/off-peak tiers and no holiday rule, so there is nothing to wait for: the plugin deliberately installs **no** policy for provider `opencode` and never delays or blocks a Zen request. This is the smallest correct representation — "this provider currently has no relevant time-based pricing rule" — and it means a new Zen model is never blocked merely because a DeepSeek policy exists for another provider. The verified fact (name, note, source URL, verification date) lives in `VERIFIED_FLAT_PROVIDERS` in `src/policy.ts` and is surfaced by `/offpeak status` as `Pricing: UNTRACKED` with `Requests: ALLOWED (no policy needed: …)`. If Zen ever introduces time-based tiers, add a policy with the verified IDs then.
 
 ## Evaluation and timezones
 

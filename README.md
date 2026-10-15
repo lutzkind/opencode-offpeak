@@ -9,10 +9,10 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.5
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6
 ```
 
-This installs the released `v0.1.5` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.1.6` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -93,7 +93,21 @@ All queue automation respects the persistent `enabled` setting. The guard itself
 
 ## Pricing policy
 
-The built-in policy ID is `deepseek-opencode-go`. Its canonical rules are:
+### Provider support matrix
+
+| Provider | Time-based protection | Covered current model IDs |
+|---|---|---|
+| OpenCode Go (`opencode-go`) | Yes — peak-deferred | Peak-priced: `deepseek-v4.1-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`. Every other documented Go model is `FLAT` (one all-hours price; never waits). |
+| Direct DeepSeek API (`deepseek`) | Yes — peak-deferred | `deepseek-flash`, `deepseek-v4-pro`, plus the legacy aliases `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp`, which the provider still accepts and bills at the Flash price. |
+| OpenCode Zen (`opencode`) | No waiting required | No policy by design: Zen publishes one all-hours price per model with no peak/off-peak tiers, so requests are never delayed or blocked. |
+
+Sources and verification dates are recorded on each policy (`source`, `verifiedAt`) and in `docs/pricing-policies.md`. The direct-DeepSeek policy ships as the second built-in policy ID, `deepseek-api`; both peak-priced providers share the same rule (peak Monday–Friday 01:00–04:00 and 06:00–10:00 UTC; off-peak everything else, including weekends and Chinese public holidays in full) and the same shared holiday calendar data.
+
+Unknown or newly released model IDs under a peak-priced provider are **not guessed**: they evaluate `UNKNOWN` and fail closed with an actionable message until a verified policy update ships. There is deliberately no `deepseek-*` wildcard. OpenCode Zen has no policy at all, so a new Zen model is never blocked because a DeepSeek policy exists for another provider.
+
+### The built-in policy IDs
+
+`deepseek-opencode-go` (provider `opencode-go`) and `deepseek-api` (provider `deepseek`). Their canonical rules are:
 
 - Peak: Monday–Friday 01:00–04:00 and 06:00–10:00 UTC.
 - Off-peak: all other hours, weekends, and Chinese statutory public holidays in full.
@@ -103,9 +117,13 @@ Holiday dates come from the official State Council calendar kept in `src/holiday
 
 The direct DeepSeek pricing documentation defines the exemption ("…excluding Chinese public holidays. All other hours are off-peak, including weekends and Chinese public holidays in full."), and the OpenCode Go pricing page documents the same weekly windows for this provider. The Go price table lists peak DeepSeek rates at twice their off-peak per-token rates, so equal token use consumes the allowance twice as fast during peak hours. Re-verify both pages annually; upstream [anomalyco/opencode#53071](https://github.com/anomalyco/opencode/issues/53071) tracks an open user report about National Day holiday billing and is the cue for a fresh check.
 
-The built-in model IDs are `deepseek-v4.1-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp` under provider ID `opencode-go`. Every other Go model documented in the pricing table has a single all-hours price and is declared as a flat model: it is never peak-priced, so it is never held or blocked. That list mirrors the provider's own table, because OpenCode names automatic session titles with the provider's small model — for `opencode-go` that is `gpt-6-luna` — and a title must not be blocked as an unknown model. A model that matches neither list under a configured provider fails closed; a provider with no policy is shown as `UNTRACKED`; queued tasks require a matching policy.
+The Go peak model IDs are `deepseek-v4.1-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp` under provider ID `opencode-go`; the direct API peak model IDs are `deepseek-flash`, `deepseek-v4-pro`, and those same two legacy aliases under provider ID `deepseek`. Every other Go model documented in the pricing table has a single all-hours price and is declared as a flat model: it is never peak-priced, so it is never held or blocked. That list mirrors the provider's own table, because OpenCode names automatic session titles with the provider's small model — for `opencode-go` that is `gpt-6-luna` — and a title must not be blocked as an unknown model. A model that matches neither list under a configured provider fails closed; a provider with no policy is shown as `UNTRACKED` (with a verified explanation when the provider's pricing is known to be flat, as for OpenCode Zen); queued tasks require a matching policy. When a provider ships a new model: verify the official model ID, its current pricing, its peak schedule and holiday semantics, add or update the policy in `src/policy.ts`, add tests, and cut a patch release.
 
-Pricing details can change. This release verified the built-in schedule, the flat model list, and the 2026 holiday calendar against the [OpenCode Go pricing page](https://opencode.ai/docs/go/), the [DeepSeek pricing documentation](https://api-docs.deepseek.com/quick_start/pricing), and the [State Council notice](https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html) on 2026-10-15. Review those sources before relying on a later policy update.
+### Held-request feedback
+
+When an interactive primary request is held for peak pricing, the TUI shows a non-chat toast — "Peak pricing active — request held until 08:00 Asia/Bangkok. It will resume automatically in this session." — and another when off-peak returns. The deadline is rendered in the configured `displayTimeZone`. These notifications travel on OpenCode's own event stream (`rpc.opencode-offpeak.hold` / `rpc.opencode-offpeak.resume`); they never enter the session or the model context, they are not repeated, a user cancel produces no false resumption, and auxiliary `title`/`compaction`/`generate` requests stay silent. Headless clients such as `opencode run` have no subscriber and remain silent.
+
+Pricing details can change. This release verified the built-in schedules, the model lists, the Zen flat-pricing fact, and the 2026 holiday calendar against the [OpenCode Go pricing page](https://opencode.ai/docs/go/), the [OpenCode Zen pricing page](https://opencode.ai/docs/zen/), the [DeepSeek pricing documentation](https://api-docs.deepseek.com/quick_start/pricing), and the [State Council notice](https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html) on 2026-10-15. Review those sources before relying on a later policy update.
 
 ## Configuration
 
