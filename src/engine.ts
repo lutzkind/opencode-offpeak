@@ -8,16 +8,27 @@ import {
   type OffpeakTask,
   type QueueRepository,
   type RecoveryEntry,
+  type RecoveryOrigin,
   type RecoveryRepository,
   type TaskModel,
   type TaskState,
 } from "./store.js";
 
+export interface SessionSnapshot {
+  outcome?: "succeeded" | "failed" | "interrupted";
+  /** Session title as stored, when the session still exists. */
+  title?: string;
+  /** Set for child (subagent) sessions; they never receive automatic titles. */
+  parentID?: string;
+  /** Session creation time in epoch milliseconds. */
+  created?: number;
+}
+
 export interface SessionDriver {
   create(input: { cwd: string; model: TaskModel; taskID: string }): Promise<string>;
   prompt(sessionID: string, text: string): Promise<void>;
   wait(sessionID: string): Promise<void>;
-  get(sessionID: string): Promise<{ outcome?: "succeeded" | "failed" | "interrupted" }>;
+  get(sessionID: string): Promise<SessionSnapshot>;
   interrupt(sessionID: string): Promise<void>;
 }
 
@@ -53,6 +64,8 @@ export interface EngineStatus {
   interactiveWaiting: number;
   /** Interactive sessions waiting for an off-peak recovery continuation. */
   recoveryWaiting: number;
+  /** Subset of recoveryWaiting: sessions whose automatic title is still pending. */
+  titleRecoveryWaiting: number;
   failed: number;
   tasks: OffpeakTask[];
   configPath: string;
@@ -87,10 +100,33 @@ const RETRYABLE_ERROR_TYPES = new Set([
 const RECOVERY_CONTINUATION =
   "Continue the task in this session from the current project state. Avoid repeating work that is already complete.";
 
+/**
+ * Mirrors OpenCode's own `SessionTitle.isExactRootFallback` for a root session:
+ * a session needs an automatic title when it has none, or when its stored title
+ * is exactly the creation-time fallback (`New session - <created ISO>`). Any
+ * other title was generated already or set by the user, and must never be
+ * overwritten. Child sessions are excluded because OpenCode never titles them
+ * automatically.
+ */
+export function needsAutoTitle(session: SessionSnapshot): boolean {
+  if (session.parentID) return false;
+  if (session.title === undefined) return true;
+  if (session.created === undefined) return false;
+  return session.title === `New session - ${new Date(session.created).toISOString()}`;
+}
+
 /** How long to wait before re-checking a session that has not settled yet. */
 const RECOVERY_SETTLE_DELAY_MS = 2_000;
 /** Give up (without sending anything) if a session never settles. */
 const RECOVERY_SETTLE_CAP_MS = 5 * 60_000;
+
+/**
+ * Recovery origins that continue the primary turn. `undefined` covers entries
+ * persisted by older plugin versions.
+ */
+const PRIMARY_RECOVERY_ORIGINS = [undefined, "retry-failure", "deferred"] as const;
+/** The semantic "this session still needs its automatic title" marker. */
+const TITLE_RECOVERY_ORIGIN = "pending-title" as const;
 
 export interface RetryFailureInput {
   sessionID: string;
@@ -142,8 +178,14 @@ export class OffpeakEngine {
   readonly #holdAborts = new Map<string, number>();
   readonly #recoveriesRepo: RecoveryRepository | undefined;
   readonly #location: string;
+  /**
+   * Recovery entries keyed by `${origin}:${sessionID}`. A session can hold a
+   * primary continuation and a pending-title marker at the same time; they
+   * are removed and delivered independently.
+   */
   readonly #recoveries = new Map<string, RecoveryEntry>();
   readonly #recoveryChecks = new Map<string, number>();
+  readonly #titleChecks = new Map<string, number>();
   #nextInteractiveWaiter = 0;
   #timer: NodeJS.Timeout | undefined;
   #recoveryTimer: NodeJS.Timeout | undefined;
@@ -381,6 +423,9 @@ export class OffpeakEngine {
       waiting: tasks.filter((task) => task.state === "WAITING_OFFPEAK").length,
       interactiveWaiting: this.#interactiveWaiters.size,
       recoveryWaiting: this.#recoveries.size,
+      titleRecoveryWaiting: [...this.#recoveries.values()].filter(
+        (entry) => entry.origin === TITLE_RECOVERY_ORIGIN,
+      ).length,
       failed: tasks.filter((task) => task.state === "FAILED").length,
       tasks,
       configPath: settings.path,
@@ -389,9 +434,14 @@ export class OffpeakEngine {
   }
 
   async guardRequest(input: GuardInput): Promise<void> {
-    // Any fresh request for this session supersedes a pending recovery continuation.
-    await this.#removeRecovery(input.sessionID);
-    await this.#guardPricing(input, false);
+    // Any fresh request for this session supersedes a pending continuation of
+    // the same class. A title request only supersedes a pending title; it must
+    // not clear a primary deferral that another held request still owns, and a
+    // primary request must not clear a title that is still being held.
+    if (input.kind === "title")
+      await this.#removeRecovery(input.sessionID, [TITLE_RECOVERY_ORIGIN]);
+    else await this.#removeRecovery(input.sessionID, PRIMARY_RECOVERY_ORIGINS);
+    await this.#guardPricing(input, undefined);
   }
 
   /**
@@ -400,19 +450,33 @@ export class OffpeakEngine {
    * OpenCode's response-header timeout clock) exists, so holding for OFF_PEAK
    * here never leaves a provider attempt open.
    *
-   * A held primary request of an interactive session is persisted as a
-   * deferral: if the plugin reloads or the server restarts while it waits, the
-   * existing recovery flush delivers one same-session continuation once the
-   * allowed window arrives. The release itself removes the deferral, so normal
-   * completion never sends a continuation.
+   * A held primary request persists a deferral: if the plugin reloads or the
+   * server restarts while it waits, the existing recovery flush delivers one
+   * same-session continuation once the allowed window arrives. The release
+   * itself removes the deferral, so normal completion never sends a
+   * continuation.
+   *
+   * A held Automatic title request (kind `title`) persists a semantic
+   * `pending-title` marker instead of a continuation: recovery re-runs
+   * OpenCode's own title generation for a session that still needs a title,
+   * and it is cleared without any request when the session was titled (or
+   * manually renamed) while it waited.
    */
   async guardModelRequest(input: GuardInput): Promise<void> {
-    const primary = input.kind === "primary";
-    if (primary) await this.#removeRecovery(input.sessionID);
-    await this.#guardPricing(input, primary);
+    const origin: RecoveryOrigin | undefined =
+      input.kind === "primary"
+        ? "deferred"
+        : input.kind === "title"
+          ? TITLE_RECOVERY_ORIGIN
+          : undefined;
+    if (origin !== undefined) await this.#removeRecovery(input.sessionID, [origin]);
+    await this.#guardPricing(input, origin);
   }
 
-  async #guardPricing(input: GuardInput, persistDeferral: boolean): Promise<void> {
+  async #guardPricing(
+    input: GuardInput,
+    deferralOrigin: RecoveryOrigin | undefined,
+  ): Promise<void> {
     const task = await this.#taskForSession(input.sessionID);
     const first = await this.#config.read();
     if (!first.config)
@@ -432,14 +496,14 @@ export class OffpeakEngine {
 
     if (task && first.config.mode === "auto") {
       await this.#transition(task.id, "WAITING_OFFPEAK");
-      await this.#holdUntilAllowed(input, task, false);
+      await this.#holdUntilAllowed(input, task, undefined);
       return;
     }
 
     // A normal interactive request in auto mode is held at the boundary instead of
     // being discarded; the same request and session continue when pricing allows.
     if (!task && first.config.enabled && first.config.mode === "auto") {
-      await this.#holdUntilAllowed(input, undefined, persistDeferral);
+      await this.#holdUntilAllowed(input, undefined, deferralOrigin);
       return;
     }
 
@@ -465,21 +529,26 @@ export class OffpeakEngine {
    * may use their explicit override; interactive requests are tracked in memory
    * (for status) and fail closed on shutdown instead of guessing the price state.
    *
-   * `persistDeferral` marks an interactive primary request that is safe to resume
-   * after a plugin reload or server restart: the recovery entry is persisted while
-   * the request waits and removed again when the wait ends normally. A shutdown or
-   * guard error leaves it in place so the continuation can be delivered once the
+   * `deferralOrigin` marks an interactive request that is safe to resume after a
+   * plugin reload or server restart: the recovery entry is persisted while the
+   * request waits and removed again when the wait ends normally. A shutdown or
+   * guard error leaves it in place so recovery can be delivered once the
    * allowed window arrives.
    */
   async #holdUntilAllowed(
     input: GuardInput,
     task?: OffpeakTask,
-    persistDeferral = false,
+    deferralOrigin?: RecoveryOrigin,
   ): Promise<void> {
     const waiter = task ? undefined : this.#registerInteractiveWaiter();
-    const deferred = persistDeferral && !task;
+    const deferred = deferralOrigin !== undefined && !task;
     if (deferred) {
-      await this.#registerRecovery(input.sessionID, input.providerID, input.modelID, "deferred");
+      await this.#registerRecovery(
+        input.sessionID,
+        input.providerID,
+        input.modelID,
+        deferralOrigin,
+      );
       this.#requestPump();
     }
     const abortEpoch = this.#holdAborts.get(input.sessionID) ?? 0;
@@ -514,7 +583,7 @@ export class OffpeakEngine {
         }
         if (settings.config.enabled && decision.allowed) {
           if (task) await this.#transition(task.id, "RUNNING");
-          if (deferred) await this.#removeRecovery(input.sessionID);
+          if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
           return;
         }
         if (settings.config.enabled && decision.nextTransition === undefined) {
@@ -594,8 +663,10 @@ export class OffpeakEngine {
   async noteExecutionInterrupted(input: { sessionID: string; reason: string }): Promise<void> {
     if (this.#disposed) return;
     if (input.reason === "user") {
-      const entry = this.#recoveries.get(input.sessionID);
-      if (entry?.origin === "deferred") await this.#removeRecovery(input.sessionID);
+      // The user cancelled the work. Neither the same-session continuation nor
+      // a pending automatic title is delivered for abandoned work; OpenCode
+      // itself also generates no title without new input.
+      await this.#removeRecovery(input.sessionID, ["deferred", TITLE_RECOVERY_ORIGIN]);
     }
     if (
       input.reason !== "user" &&
@@ -616,31 +687,49 @@ export class OffpeakEngine {
     const document = await repo.load();
     for (const entry of document.entries) {
       if (entry.directory !== this.#location) continue;
-      this.#recoveries.set(entry.sessionID, entry);
+      this.#recoveries.set(this.#recoveryKey(entry), entry);
     }
+  }
+
+  #recoveryKey(entry: Pick<RecoveryEntry, "sessionID" | "origin">): string {
+    return `${entry.origin ?? "legacy"}\u0000${entry.sessionID}`;
   }
 
   async #registerRecovery(
     sessionID: string,
     providerID: string,
     modelID: string,
-    origin: "retry-failure" | "deferred",
+    origin: RecoveryOrigin,
   ): Promise<void> {
-    if (this.#recoveries.has(sessionID)) return;
-    this.#recoveries.set(sessionID, {
+    const entry: RecoveryEntry = {
       sessionID,
       providerID,
       modelID,
       directory: this.#location,
       heldAt: new Date(this.#clock.now()).toISOString(),
       origin,
-    });
+    };
+    const key = this.#recoveryKey(entry);
+    if (this.#recoveries.has(key)) return;
+    this.#recoveries.set(key, entry);
     await this.#persistRecoveries();
   }
 
-  async #removeRecovery(sessionID: string): Promise<void> {
+  async #removeRecovery(
+    sessionID: string,
+    origins: ReadonlyArray<RecoveryOrigin | undefined>,
+  ): Promise<void> {
+    let changed = false;
+    for (const origin of origins) {
+      const key =
+        origin === undefined
+          ? `legacy\u0000${sessionID}`
+          : this.#recoveryKey({ sessionID, origin });
+      if (this.#recoveries.delete(key)) changed = true;
+    }
+    if (!changed) return;
     this.#recoveryChecks.delete(sessionID);
-    if (!this.#recoveries.delete(sessionID)) return;
+    this.#titleChecks.delete(sessionID);
     await this.#persistRecoveries();
   }
 
@@ -658,9 +747,14 @@ export class OffpeakEngine {
   }
 
   /**
-   * Sends recovery continuations for sessions whose allowed window has arrived.
-   * Called from the pump, so the existing signal and boundary timer drive it;
-   * there is no polling loop.
+   * Delivers recoveries whose allowed window has arrived. Called from the pump,
+   * so the existing signal and boundary timer drive it; there is no polling
+   * loop.
+   *
+   * Primary continuations are delivered first so a same-session continuation
+   * makes the session busy again before any pending title is considered: the
+   * continuation's input promotion triggers OpenCode's own title generation,
+   * and the title marker is then cleared without sending anything.
    */
   async #flushRecoveries(): Promise<void> {
     if (this.#disposed) return;
@@ -671,8 +765,11 @@ export class OffpeakEngine {
     const settings = await this.#config.read();
     if (!settings.config) return;
     let next: number | undefined;
-    for (const entry of [...this.#recoveries.values()]) {
-      if (entry.directory !== this.#location) continue;
+    const entries = [...this.#recoveries.values()].filter(
+      (entry) => entry.directory === this.#location,
+    );
+    for (const entry of entries) {
+      if (entry.origin === TITLE_RECOVERY_ORIGIN) continue;
       const decision = evaluatePricing(
         settings.config.policies,
         entry.providerID,
@@ -689,42 +786,109 @@ export class OffpeakEngine {
           next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
       }
     }
+    for (const entry of entries) {
+      if (entry.origin !== TITLE_RECOVERY_ORIGIN) continue;
+      const decision = evaluatePricing(
+        settings.config.policies,
+        entry.providerID,
+        entry.modelID,
+        this.#clock.now(),
+      );
+      if (settings.config.enabled && decision.allowed) {
+        const retryAt = await this.#deliverTitleRecovery(entry);
+        if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
+        continue;
+      }
+      if (settings.config.enabled && decision.nextTransition !== undefined) {
+        next =
+          next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
+      }
+    }
     this.#scheduleRecovery(next);
   }
 
   /** Returns a timestamp to retry at when the session has not settled yet. */
   async #deliverRecovery(entry: RecoveryEntry): Promise<number | undefined> {
-    let outcome: string | undefined;
+    let session: SessionSnapshot;
     try {
-      outcome = (await this.#sessions.get(entry.sessionID)).outcome;
+      session = await this.#sessions.get(entry.sessionID);
     } catch (error) {
       this.#onError(error);
-      await this.#removeRecovery(entry.sessionID);
+      await this.#removeRecovery(entry.sessionID, [entry.origin]);
       return undefined;
     }
-    if (outcome === "succeeded") {
-      await this.#removeRecovery(entry.sessionID);
+    if (session.outcome === "succeeded") {
+      await this.#removeRecovery(entry.sessionID, [entry.origin]);
       return undefined;
     }
-    if (outcome === undefined) {
+    if (session.outcome === undefined) {
       const firstCheck = this.#recoveryChecks.get(entry.sessionID) ?? this.#clock.now();
       this.#recoveryChecks.set(entry.sessionID, firstCheck);
       if (this.#clock.now() - firstCheck < RECOVERY_SETTLE_CAP_MS) {
         return this.#clock.now() + RECOVERY_SETTLE_DELAY_MS;
       }
-      await this.#removeRecovery(entry.sessionID);
+      await this.#removeRecovery(entry.sessionID, [entry.origin]);
       this.#onError(
         new Error(`Offpeak recovery for ${entry.sessionID} skipped: the session did not settle.`),
       );
       return undefined;
     }
     // Remove before sending so the continuation is delivered at most once.
-    await this.#removeRecovery(entry.sessionID);
+    await this.#removeRecovery(entry.sessionID, [entry.origin]);
     try {
       await this.#sessions.prompt(entry.sessionID, RECOVERY_CONTINUATION);
     } catch (error) {
       this.#onError(error);
     }
+    return undefined;
+  }
+
+  /**
+   * Delivers a pending-title recovery. This is a semantic watch, not a replay:
+   *
+   * - The session is re-checked for a still-missing automatic title. A title
+   *   the session already has (generated by OpenCode or renamed by the user)
+   *   clears the marker without sending anything, so a title is never
+   *   overwritten and never regenerated twice.
+   * - A session that still needs a title is left to OpenCode's own generation:
+   *   every path that loses a title hold (inactivity, supersede, shutdown,
+   *   reload) also resumes the session — the plugin's same-session
+   *   continuation or OpenCode's restart recovery — and that input promotion
+   *   is OpenCode's native trigger for `SessionTitle.generate`. The marker
+   *   waits for the title to appear and then clears.
+   * - OpenCode 2.0.27 exposes no plugin-facing regeneration call, and the
+   *   plugin host's `session.update({ title: "" })` is not the HTTP API's
+   *   regeneration either — it renames the session to an empty title — so the
+   *   recovery deliberately mutates nothing. If no title appears within the
+   *   settle cap, the marker is dropped with a diagnostic; a later input
+   *   promotion still names the session normally.
+   *
+   * Returns a timestamp to re-check at while the title is still pending.
+   */
+  async #deliverTitleRecovery(entry: RecoveryEntry): Promise<number | undefined> {
+    let session: SessionSnapshot;
+    try {
+      session = await this.#sessions.get(entry.sessionID);
+    } catch (error) {
+      this.#onError(error);
+      await this.#removeRecovery(entry.sessionID, [TITLE_RECOVERY_ORIGIN]);
+      return undefined;
+    }
+    if (!needsAutoTitle(session)) {
+      await this.#removeRecovery(entry.sessionID, [TITLE_RECOVERY_ORIGIN]);
+      return undefined;
+    }
+    const firstCheck = this.#titleChecks.get(entry.sessionID) ?? this.#clock.now();
+    this.#titleChecks.set(entry.sessionID, firstCheck);
+    if (this.#clock.now() - firstCheck < RECOVERY_SETTLE_CAP_MS) {
+      return this.#clock.now() + RECOVERY_SETTLE_DELAY_MS;
+    }
+    await this.#removeRecovery(entry.sessionID, [TITLE_RECOVERY_ORIGIN]);
+    this.#onError(
+      new Error(
+        `Offpeak pending title for ${entry.sessionID} was not generated after the allowed window; a later input promotion still names the session.`,
+      ),
+    );
     return undefined;
   }
 

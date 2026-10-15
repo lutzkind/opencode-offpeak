@@ -9,10 +9,10 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.4
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.5
 ```
 
-This installs the released `v0.1.4` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.1.5` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -103,9 +103,9 @@ Holiday dates come from the official State Council calendar kept in `src/holiday
 
 The direct DeepSeek pricing documentation defines the exemption ("…excluding Chinese public holidays. All other hours are off-peak, including weekends and Chinese public holidays in full."), and the OpenCode Go pricing page documents the same weekly windows for this provider. The Go price table lists peak DeepSeek rates at twice their off-peak per-token rates, so equal token use consumes the allowance twice as fast during peak hours. Re-verify both pages annually; upstream [anomalyco/opencode#53071](https://github.com/anomalyco/opencode/issues/53071) tracks an open user report about National Day holiday billing and is the cue for a fresh check.
 
-The built-in model IDs are `deepseek-v4.1-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp` under provider ID `opencode-go`. An unrecognized model under a configured provider fails closed. A provider with no policy is shown as `UNTRACKED`; queued tasks require a matching policy.
+The built-in model IDs are `deepseek-v4.1-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp` under provider ID `opencode-go`. Every other Go model documented in the pricing table has a single all-hours price and is declared as a flat model: it is never peak-priced, so it is never held or blocked. That list mirrors the provider's own table, because OpenCode names automatic session titles with the provider's small model — for `opencode-go` that is `gpt-6-luna` — and a title must not be blocked as an unknown model. A model that matches neither list under a configured provider fails closed; a provider with no policy is shown as `UNTRACKED`; queued tasks require a matching policy.
 
-Pricing details can change. This release verified the built-in schedule and the 2026 holiday calendar against the [OpenCode Go pricing page](https://opencode.ai/docs/go/), the [DeepSeek pricing documentation](https://api-docs.deepseek.com/quick_start/pricing), and the [State Council notice](https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html) on 2026-10-14. Review those sources before relying on a later policy update.
+Pricing details can change. This release verified the built-in schedule, the flat model list, and the 2026 holiday calendar against the [OpenCode Go pricing page](https://opencode.ai/docs/go/), the [DeepSeek pricing documentation](https://api-docs.deepseek.com/quick_start/pricing), and the [State Council notice](https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html) on 2026-10-15. Review those sources before relying on a later policy update.
 
 ## Configuration
 

@@ -81,6 +81,10 @@ class FakeSessions {
   outcomes = new Map();
   behavior = async () => undefined;
   createdTasks = [];
+  snapshots = new Map();
+  missing = new Set();
+  titles = [];
+  titleBehavior = async () => undefined;
   async create(input) {
     const id = `session-${++this.next}`;
     this.createdTasks.push({ id, taskID: input.taskID, cwd: input.cwd, model: input.model });
@@ -102,8 +106,14 @@ class FakeSessions {
     await this.workers.get(sessionID)?.catch(() => undefined);
   }
   async get(sessionID) {
+    if (this.missing.has(sessionID)) throw new Error(`Session not found: ${sessionID}`);
     const outcome = this.outcomes.get(sessionID);
-    return outcome ? { outcome } : {};
+    const extra = this.snapshots.get(sessionID) ?? {};
+    return { ...(outcome ? { outcome } : {}), ...extra };
+  }
+  async generateTitle(sessionID) {
+    this.titles.push(sessionID);
+    await this.titleBehavior(sessionID);
   }
   async interrupt(sessionID) {
     this.outcomes.set(sessionID, "interrupted");
@@ -1388,7 +1398,7 @@ test("a primary model.request guard defers the interactive request before transp
   }
 });
 
-test("an auxiliary model.request hold waits without registering a recovery deferral", async () => {
+test("an auxiliary model.request hold waits without a primary deferral; a title hold persists a pending-title marker", async () => {
   const clock = new ManualClock("2026-10-12T01:30:00Z");
   const h = await harness("2026-10-12T01:30:00Z", { clock });
   let releases = 0;
@@ -1404,11 +1414,47 @@ test("an auxiliary model.request hold waits without registering a recovery defer
     });
   try {
     await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
-    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    // A held title request persists a semantic pending-title marker; it is not
+    // a primary continuation deferral.
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+    assert.equal((await h.engine.status(selectedModel)).titleRecoveryWaiting, 1);
     await clock.advanceTo("2026-10-12T04:00:00Z");
     await until(async () => releases === 1);
     assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    assert.equal((await h.engine.status(selectedModel)).titleRecoveryWaiting, 0);
     await pending;
+  } finally {
+    await h.close();
+  }
+});
+
+test("compaction and generate model.request holds register no recovery of any kind", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const holds = [
+    h.engine
+      .guardModelRequest({
+        sessionID: "compaction-session",
+        ...selectedModel,
+        kind: "compaction",
+        transport: "model",
+      })
+      .then(() => "released"),
+    h.engine
+      .guardModelRequest({
+        sessionID: "generate-session",
+        ...selectedModel,
+        kind: "generate",
+        transport: "model",
+      })
+      .then(() => "released"),
+  ];
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 2);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    assert.deepEqual(await Promise.all(holds), ["released", "released"]);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
   } finally {
     await h.close();
   }
@@ -1613,19 +1659,330 @@ test("a shutdown interrupt leaves the deferral in place for restart recovery", a
   }
 });
 
-test("a stored copy of the built-in policy adopts the built-in holiday calendar", async () => {
+test("a pending-title marker survives a plugin reload and clears once OpenCode names the session", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "pending-title-reload";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "title", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 1);
+    // The plugin reloads mid-hold: the held request fails closed, the marker stays.
+    await h.engine.dispose();
+    assert.equal(await pending, "blocked");
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    await restarted.start();
+    assert.equal((await restarted.status(selectedModel)).titleRecoveryWaiting, 1);
+    // OpenCode's own promotion names the session once the turn continues.
+    h.sessions.snapshots.set(sessionID, {
+      title: "Recovered title",
+      created: Date.parse("2026-10-12T01:30:00Z"),
+    });
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await restarted.status(selectedModel)).titleRecoveryWaiting === 0);
+    // The recovery itself never mutates the session or sends a title request.
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal(h.sessions.prompts.length, 0);
+    assert.deepEqual(await restarted.list(), []);
+    await clock.advanceTo("2026-10-13T00:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal(h.sessions.snapshots.get(sessionID).title, "Recovered title");
+    await restarted.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a pending-title recovery never overwrites a manual rename and clears its marker", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "pending-title-renamed";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "title", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 1);
+    h.sessions.snapshots.set(sessionID, {
+      title: "My manually chosen title",
+      created: Date.parse("2026-10-12T01:30:00Z"),
+    });
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 0);
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal(h.sessions.snapshots.get(sessionID).title, "My manually chosen title");
+  } finally {
+    await h.close();
+    await pending;
+  }
+});
+
+test("a pending-title recovery clears without a request when the title already exists", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "pending-title-completed";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "title", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 1);
+    h.sessions.snapshots.set(sessionID, {
+      title: "Generated by another process",
+      created: Date.parse("2026-10-12T01:30:00Z"),
+    });
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 0);
+    assert.equal(h.sessions.titles.length, 0);
+  } finally {
+    await h.close();
+    await pending;
+  }
+});
+
+test("a pending title waits for OpenCode's promotion and never mutates the session itself", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "pending-title-fallback";
+  const created = Date.parse("2026-10-12T01:30:00Z");
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "title", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 1);
+    // The exact creation-time fallback still means the session needs a title.
+    h.sessions.snapshots.set(sessionID, {
+      title: `New session - ${new Date(created).toISOString()}`,
+      created,
+    });
+    // An interruption (not a normal release) leaves the marker behind.
+    await h.engine.noteExecutionInterrupted({ sessionID, reason: "inactivity" });
+    assert.equal(await pending, "blocked");
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    // The marker keeps watching (bounded by the settle cap) instead of
+    // renaming anything itself.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal((await h.engine.status(selectedModel)).titleRecoveryWaiting, 1);
+    assert.equal(h.sessions.titles.length, 0);
+    // OpenCode's promotion names it; the marker then clears on the next check.
+    h.sessions.snapshots.set(sessionID, { title: "Promoted title", created });
+    await clock.advanceTo("2026-10-12T04:00:04Z");
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 0);
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal(h.sessions.snapshots.get(sessionID).title, "Promoted title");
+  } finally {
+    await h.close();
+    await pending;
+  }
+});
+
+test("a pending-title recovery is skipped for child sessions and unknown sessions", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const child = "pending-title-child";
+  const missing = "pending-title-missing";
+  const holds = [
+    h.engine
+      .guardModelRequest({ sessionID: child, ...selectedModel, kind: "title", transport: "model" })
+      .catch(() => "blocked"),
+    h.engine
+      .guardModelRequest({
+        sessionID: missing,
+        ...selectedModel,
+        kind: "title",
+        transport: "model",
+      })
+      .catch(() => "blocked"),
+  ];
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 2);
+    // A reload persists both markers; the child is a subagent session, the other
+    // session is gone entirely.
+    h.sessions.snapshots.set(child, { parentID: "parent-session" });
+    h.sessions.missing.add(missing);
+    await h.engine.dispose();
+    assert.deepEqual(await Promise.all(holds), ["blocked", "blocked"]);
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    await restarted.start();
+    assert.equal((await restarted.status(selectedModel)).titleRecoveryWaiting, 2);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await restarted.status(selectedModel)).titleRecoveryWaiting === 0);
+    assert.equal(h.sessions.titles.length, 0);
+    await restarted.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a user cancel clears a pending-title marker; an inactivity interrupt keeps it", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const cancelled = "pending-title-cancelled";
+  const interrupted = "pending-title-interrupted";
+  const holds = [
+    h.engine
+      .guardModelRequest({
+        sessionID: cancelled,
+        ...selectedModel,
+        kind: "title",
+        transport: "model",
+      })
+      .then(
+        () => "resolved",
+        () => "blocked",
+      ),
+    h.engine
+      .guardModelRequest({
+        sessionID: interrupted,
+        ...selectedModel,
+        kind: "title",
+        transport: "model",
+      })
+      .then(
+        () => "resolved",
+        () => "blocked",
+      ),
+  ];
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 2);
+    await h.engine.noteExecutionInterrupted({ sessionID: cancelled, reason: "user" });
+    await h.engine.noteExecutionInterrupted({ sessionID: interrupted, reason: "inactivity" });
+    assert.deepEqual(await Promise.all(holds), ["blocked", "blocked"]);
+    // The cancelled session keeps no marker; the inactivity-interrupted one does.
+    assert.equal((await h.engine.status(selectedModel)).titleRecoveryWaiting, 1);
+    // OpenCode's continuation promotion names the session after the boundary.
+    h.sessions.snapshots.set(interrupted, {
+      title: "After inactivity",
+      created: Date.parse("2026-10-12T01:30:00Z"),
+    });
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 0);
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal(h.sessions.snapshots.get(interrupted).title, "After inactivity");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a delivered primary continuation lets OpenCode name the session; the title marker only verifies", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "pending-title-with-continuation";
+  const created = Date.parse("2026-10-12T01:30:00Z");
+  // Both requests are held: the title marker and the primary deferral coexist.
+  const holds = [
+    h.engine
+      .guardModelRequest({ sessionID, ...selectedModel, kind: "title", transport: "model" })
+      .catch(() => "blocked"),
+    h.engine
+      .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+      .catch(() => "blocked"),
+  ];
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 2);
+    assert.equal((await h.engine.status(selectedModel)).titleRecoveryWaiting, 1);
+    // OpenCode's own promotion of the continuation names the session.
+    h.sessions.outcomes.set(sessionID, "interrupted");
+    h.sessions.workers.set(sessionID, Promise.resolve());
+    h.sessions.behavior = async ({ sessionID: id }) => {
+      h.sessions.snapshots.set(id, { title: "Continuation title", created });
+      return { outcome: "succeeded" };
+    };
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => h.sessions.prompts.length === 1);
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 0);
+    // The continuation carried the title; the marker never generated one itself.
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal(h.sessions.snapshots.get(sessionID).title, "Continuation title");
+    await Promise.all(holds);
+  } finally {
+    await h.close();
+  }
+});
+
+test("multiple reloads keep one pending-title marker until OpenCode names the session", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "pending-title-multi-reload";
+  const hold = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "title", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).titleRecoveryWaiting === 1);
+    await h.engine.dispose();
+    await hold;
+    let engine = h.engine;
+    for (let round = 0; round < 3; round += 1) {
+      engine = new OffpeakEngine({
+        repository: new QueueRepository(h.storage),
+        recoveries: new RecoveryRepository(h.storage),
+        location: "test-location",
+        config: h.config,
+        sessions: h.sessions,
+        clock,
+      });
+      await engine.start();
+      assert.equal((await engine.status(selectedModel)).titleRecoveryWaiting, 1);
+      await engine.dispose();
+    }
+    h.sessions.snapshots.set(sessionID, {
+      title: "Native name",
+      created: Date.parse("2026-10-12T01:30:00Z"),
+    });
+    const final = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    await final.start();
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(async () => (await final.status(selectedModel)).titleRecoveryWaiting === 0);
+    await clock.advanceTo("2026-10-13T00:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.titles.length, 0);
+    assert.equal((await final.status(selectedModel)).titleRecoveryWaiting, 0);
+    await final.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a stored copy of the built-in policy adopts the built-in holiday calendar and flat model list", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-policy-adopt-"));
   const configPath = path.join(root, "offpeak.json");
   const builtin = defaultConfig().policies[0];
   const legacy = structuredClone(builtin);
   delete legacy.holidays;
+  delete legacy.flatModels;
   legacy.verifiedAt = "2026-10-09";
   const customized = {
     ...structuredClone(legacy),
     id: "custom-window",
     blocked: [{ days: [1], start: "22:00", end: "23:00" }],
   };
-  const explicit = { ...structuredClone(legacy), id: "explicit-holidays", holidays: [] };
+  const explicit = {
+    ...structuredClone(legacy),
+    id: "explicit-lists",
+    holidays: [],
+    flatModels: ["only-this-model"],
+  };
   try {
     await writeFile(
       configPath,
@@ -1643,11 +2000,42 @@ test("a stored copy of the built-in policy adopts the built-in holiday calendar"
     const [adopted, kept, keptExplicit] = read.config.policies;
     assert.equal(adopted.id, builtin.id);
     assert.deepEqual(adopted.holidays, builtin.holidays);
-    // A customized window is preserved exactly and gains no holiday data.
+    // The live v0.1.4 copy pinned before the flat model list existed adopts it
+    // at read time, which is what restores automatic titles on the live install.
+    assert.deepEqual(adopted.flatModels, builtin.flatModels);
+    // A customized window is preserved exactly and gains no built-in data.
     assert.deepEqual(kept.blocked, customized.blocked);
     assert.equal(kept.holidays, undefined);
-    // An explicit holiday list (even empty) is never overwritten.
+    assert.equal(kept.flatModels, undefined);
+    // Explicit lists are never replaced by the built-in ones.
     assert.deepEqual(keptExplicit.holidays, []);
+    assert.deepEqual(keptExplicit.flatModels, ["only-this-model"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit holiday and flat lists on the built-in policy id are preserved on read", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-policy-explicit-"));
+  const configPath = path.join(root, "offpeak.json");
+  const builtin = defaultConfig().policies[0];
+  const explicit = { ...structuredClone(builtin), holidays: [], flatModels: ["only-this-model"] };
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        enabled: true,
+        mode: "auto",
+        displayTimeZone: "UTC",
+        policies: [explicit],
+      }),
+    );
+    const config = new ConfigRepository({ configPath });
+    const read = await config.read();
+    assert.equal(read.error, undefined);
+    assert.deepEqual(read.config.policies[0].holidays, []);
+    assert.deepEqual(read.config.policies[0].flatModels, ["only-this-model"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

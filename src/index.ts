@@ -13,8 +13,9 @@ export type {
   GuardInput,
   RetryFailureInput,
   SessionDriver,
+  SessionSnapshot,
 } from "./engine.js";
-export { OffpeakEngine, PricingBlockedError } from "./engine.js";
+export { needsAutoTitle, OffpeakEngine, PricingBlockedError } from "./engine.js";
 export type {
   PolicyDecision,
   PricingPolicy,
@@ -33,6 +34,7 @@ export type {
   QueueDocument,
   RecoveryDocument,
   RecoveryEntry,
+  RecoveryOrigin,
   TaskModel,
   TaskState,
 } from "./store.js";
