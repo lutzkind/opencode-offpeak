@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   ConfigRepository,
   defaultConfig,
+  evaluatePricing,
   OffpeakEngine,
   PricingBlockedError,
   QueueRepository,
@@ -138,6 +139,7 @@ async function harness(now = "2026-10-12T00:30:00Z", options = {}) {
     configPath: path.join(root, "offpeak.json"),
     ...(options.options ?? {}),
   });
+  const notifications = options.notifications ?? [];
   const engine = new OffpeakEngine({
     repository: new QueueRepository(storage),
     recoveries: new RecoveryRepository(storage),
@@ -146,6 +148,7 @@ async function harness(now = "2026-10-12T00:30:00Z", options = {}) {
     sessions,
     clock,
     id: options.id ?? (() => `task-${Math.random().toString(16).slice(2, 8)}`),
+    notify: options.notify ?? ((event) => notifications.push(event)),
   });
   await engine.start();
   return {
@@ -155,6 +158,7 @@ async function harness(now = "2026-10-12T00:30:00Z", options = {}) {
     sessions,
     config,
     engine,
+    notifications,
     async close() {
       await engine.dispose();
       await rm(root, { recursive: true, force: true });
@@ -2038,5 +2042,378 @@ test("explicit holiday and flat lists on the built-in policy id are preserved on
     assert.deepEqual(read.config.policies[0].flatModels, ["only-this-model"]);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a held primary interactive request announces exactly one hold and one release", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", {
+    clock,
+    options: { displayTimeZone: "UTC" },
+  });
+  const sessionID = "notify-release";
+  const hold = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+    .then(
+      () => "resolved",
+      (error) => error,
+    );
+  try {
+    await until(() => h.notifications.length === 1);
+    assert.deepEqual(h.notifications[0], {
+      type: "hold",
+      sessionID,
+      until: Date.parse("2026-10-12T04:00:00Z"),
+      timeZone: "UTC",
+      display: "04:00 UTC",
+    });
+    // status still reports the held request while the notification is out
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    assert.equal(await hold, "resolved");
+    await until(() => h.notifications.length === 2);
+    assert.deepEqual(h.notifications[1], { type: "resume", sessionID, kind: "release" });
+    // No duplicate release notification at the next window.
+    await clock.advanceTo("2026-10-12T07:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.notifications.length, 2);
+  } finally {
+    await h.close();
+  }
+});
+
+test("auxiliary title, compaction, and generate holds never announce a notification", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const holds = ["notify-title", "notify-compaction", "notify-generate"].map((sessionID, index) =>
+    h.engine
+      .guardModelRequest({
+        sessionID,
+        ...selectedModel,
+        kind: ["title", "compaction", "generate"][index],
+        transport: "model",
+      })
+      .then(
+        () => "resolved",
+        (error) => error,
+      ),
+  );
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    assert.deepEqual(h.notifications, []);
+    // A title hold is released immediately (it has no peak window for this model
+    // and never waits); the others stay held until the boundary.
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await Promise.all(holds);
+    assert.deepEqual(h.notifications, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a user cancel produces no release notification; an inactivity recovery announces a continuation", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", {
+    clock,
+    options: { displayTimeZone: "UTC" },
+  });
+  const cancelled = "notify-cancelled";
+  const interrupted = "notify-interrupted";
+  const holds = [cancelled, interrupted].map((sessionID) =>
+    h.engine
+      .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+      .then(
+        () => "resolved",
+        () => "blocked",
+      ),
+  );
+  try {
+    await until(() => h.notifications.length === 2);
+    assert.deepEqual(
+      h.notifications.map((event) => event.type),
+      ["hold", "hold"],
+    );
+    await h.engine.noteExecutionInterrupted({ sessionID: cancelled, reason: "user" });
+    await h.engine.noteExecutionInterrupted({ sessionID: interrupted, reason: "inactivity" });
+    assert.deepEqual(await Promise.all(holds), ["blocked", "blocked"]);
+    // The cancel never produces a resumption.
+    assert.equal(h.notifications.length, 2);
+    // The inactivity interrupt left a deferral: the boundary continuation
+    // announces exactly one continuation for that session.
+    h.sessions.outcomes.set(interrupted, "interrupted");
+    h.sessions.behavior = async () => ({ outcome: "succeeded" });
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(() => h.sessions.prompts.length === 1);
+    await until(() => h.notifications.length === 3);
+    assert.deepEqual(h.notifications[2], {
+      type: "resume",
+      sessionID: interrupted,
+      kind: "continuation",
+    });
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("an off-peak interactive request and a queue-owned hold announce no notification", async () => {
+  // 2026-10-12 is a normal Monday: 01:30 UTC is inside the 01:00-04:00 peak
+  // window, 05:00 UTC is between the two windows.
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock, options: { mode: "auto" } });
+  try {
+    // A queue-owned session keeps its existing queue/status semantics only.
+    await h.storage.set("opencode-offpeak/queue-v1", {
+      schemaVersion: 1,
+      tasks: [
+        {
+          id: "queue-notify-task",
+          prompt: "queued task",
+          cwd: "/project",
+          sessionID: "queue-notify-session",
+          model: selectedModel,
+          policyID: "deepseek-opencode-go",
+          state: "WAITING_OFFPEAK",
+          createdAt: "2026-10-12T00:00:00.000Z",
+          lastTransition: "2026-10-12T00:00:00.000Z",
+          retryCount: 0,
+        },
+      ],
+    });
+    const hold = h.engine
+      .guardModelRequest({
+        sessionID: "queue-notify-session",
+        ...selectedModel,
+        kind: "primary",
+        transport: "model",
+      })
+      .then(
+        () => "resolved",
+        () => "blocked",
+      );
+    // Let the guard read its pricing decision while the clock is still inside peak.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await h.engine.status(selectedModel)).waiting, 1);
+    assert.deepEqual(h.notifications, []);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    assert.equal(await hold, "resolved");
+    assert.deepEqual(h.notifications, []);
+
+    // Off-peak: an interactive request passes immediately with no hold and no notification.
+    clock.set("2026-10-12T05:00:00Z");
+    await h.engine.guardModelRequest({
+      sessionID: "notify-offpeak",
+      ...selectedModel,
+      kind: "primary",
+      transport: "model",
+    });
+    assert.deepEqual(h.notifications, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("an existing install storing only built-in copies gains newly shipped built-in policies", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-policy-direct-"));
+  const configPath = path.join(root, "offpeak.json");
+  const builtin = defaultConfig().policies[0];
+  const storedGoCopy = structuredClone(builtin);
+  delete storedGoCopy.holidays;
+  delete storedGoCopy.flatModels;
+  storedGoCopy.verifiedAt = "2026-10-09";
+  const custom = {
+    ...structuredClone(storedGoCopy),
+    id: "my-own-policy",
+    providers: ["my-provider"],
+    models: ["my-model"],
+  };
+  try {
+    // Live shape: the file holds one unmodified copy of the shipped Go policy.
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        enabled: true,
+        mode: "auto",
+        displayTimeZone: "Asia/Bangkok",
+        policies: [storedGoCopy],
+      }),
+    );
+    const read = await new ConfigRepository({ configPath }).read();
+    assert.equal(read.error, undefined);
+    assert.deepEqual(
+      read.config.policies.map((policy) => policy.id),
+      ["deepseek-opencode-go", "deepseek-api"],
+    );
+    const [adoptedGo, adoptedDirect] = read.config.policies;
+    assert.deepEqual(adoptedGo.holidays, builtin.holidays);
+    assert.deepEqual(adoptedDirect.holidays, builtin.holidays);
+    assert.equal(adoptedDirect.source, "https://api-docs.deepseek.com/quick_start/pricing");
+    assert.deepEqual(adoptedDirect.models, [
+      "deepseek-flash",
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp",
+    ]);
+    // Direct DeepSeek requests are now peak-guarded without editing the file.
+    const direct = evaluatePricing(
+      read.config.policies,
+      "deepseek",
+      "deepseek-flash",
+      Date.parse("2026-10-12T02:00:00Z"),
+    );
+    assert.equal(direct.state, "PEAK");
+    assert.equal(direct.policy?.id, "deepseek-api");
+
+    // A customized policy set stays exactly as written: nothing is added.
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        enabled: true,
+        mode: "auto",
+        displayTimeZone: "Asia/Bangkok",
+        policies: [storedGoCopy, custom],
+      }),
+    );
+    const customized = await new ConfigRepository({ configPath }).read();
+    assert.equal(customized.error, undefined);
+    assert.deepEqual(
+      customized.config.policies.map((policy) => policy.id),
+      ["deepseek-opencode-go", "my-own-policy"],
+    );
+
+    // A modified copy of a built-in policy is not a cached default either.
+    const modified = {
+      ...structuredClone(builtin),
+      blocked: [{ days: [1], start: "22:00", end: "23:00" }],
+    };
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        enabled: true,
+        mode: "auto",
+        displayTimeZone: "Asia/Bangkok",
+        policies: [modified],
+      }),
+    );
+    const kept = await new ConfigRepository({ configPath }).read();
+    assert.equal(kept.error, undefined);
+    assert.deepEqual(
+      kept.config.policies.map((policy) => policy.id),
+      ["deepseek-opencode-go"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("status distinguishes flat models, untracked flat providers, and unknown models", async () => {
+  const h = await harness("2026-10-12T02:00:00Z", { options: { displayTimeZone: "Asia/Bangkok" } });
+  try {
+    // A documented flat Go model: allowed, no wait, no transition to report.
+    const flat = await h.engine.status({ providerID: "opencode-go", modelID: "gpt-6-luna" });
+    assert.equal(flat.pricingState, "FLAT");
+    assert.equal(flat.requestsAllowed, true);
+    assert.equal(flat.nextTransition, undefined);
+    assert.equal(flat.policyID, "deepseek-opencode-go");
+
+    // The direct DeepSeek policy is active with its own id and boundaries.
+    const direct = await h.engine.status({ providerID: "deepseek", modelID: "deepseek-flash" });
+    assert.equal(direct.pricingState, "PEAK");
+    assert.equal(direct.requestsAllowed, false);
+    assert.equal(direct.policyID, "deepseek-api");
+    assert.equal(direct.nextTransition, Date.parse("2026-10-12T04:00:00Z"));
+    const directOff = await h.engine.status({ providerID: "deepseek", modelID: "deepseek-v4-pro" });
+    assert.equal(directOff.pricingState, "PEAK");
+    const directAlias = await h.engine.status({
+      providerID: "deepseek",
+      modelID: "deepseek-v4-flash-vision-exp",
+    });
+    assert.equal(directAlias.pricingState, "PEAK");
+
+    // OpenCode Zen: no policy by design, but the status explains why.
+    const zen = await h.engine.status({
+      providerID: "opencode",
+      modelID: "deepseek-v4.1-flash-free",
+    });
+    assert.equal(zen.pricingState, "UNTRACKED");
+    assert.equal(zen.requestsAllowed, true);
+    assert.match(zen.providerNote, /no peak\/off-peak tiers/);
+    const zenNew = await h.engine.status({ providerID: "opencode", modelID: "future-zen-model" });
+    assert.equal(zenNew.pricingState, "UNTRACKED");
+    assert.equal(zenNew.requestsAllowed, true);
+    assert.match(zenNew.providerNote, /never delayed/);
+
+    // An unknown model under a configured provider fails closed with guidance.
+    const unknown = await h.engine.status({ providerID: "deepseek", modelID: "deepseek-future" });
+    assert.equal(unknown.pricingState, "UNKNOWN");
+    assert.equal(unknown.requestsAllowed, false);
+    await assert.rejects(
+      h.engine.guardModelRequest({
+        sessionID: "direct-unknown",
+        providerID: "deepseek",
+        modelID: "deepseek-future",
+        kind: "primary",
+        transport: "model",
+      }),
+      (error) => {
+        assert.ok(error instanceof PricingBlockedError);
+        assert.match(error.message, /verified off-peak pricing policy/);
+        assert.match(error.message, /Update opencode-offpeak or add a verified custom policy/);
+        return true;
+      },
+    );
+    // No hold, no recovery, and no notification for an unknown model.
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    assert.deepEqual(h.notifications, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("direct DeepSeek peak requests are held with one notification and released in the same session", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", {
+    clock,
+    options: { displayTimeZone: "UTC" },
+  });
+  const sessionID = "direct-peak-session";
+  const hold = h.engine
+    .guardModelRequest({
+      sessionID,
+      providerID: "deepseek",
+      modelID: "deepseek-flash",
+      kind: "primary",
+      transport: "model",
+    })
+    .then(
+      () => "resolved",
+      (error) => error,
+    );
+  try {
+    await until(() => h.notifications.length === 1);
+    assert.deepEqual(h.notifications[0], {
+      type: "hold",
+      sessionID,
+      until: Date.parse("2026-10-12T04:00:00Z"),
+      timeZone: "UTC",
+      display: "04:00 UTC",
+    });
+    const status = await h.engine.status({ providerID: "deepseek", modelID: "deepseek-flash" });
+    assert.equal(status.interactiveWaiting, 1);
+    assert.equal(status.recoveryWaiting, 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    assert.equal(await hold, "resolved");
+    await until(() => h.notifications.length === 2);
+    assert.deepEqual(h.notifications[1], { type: "resume", sessionID, kind: "release" });
+    assert.equal(
+      (await h.engine.status({ providerID: "deepseek", modelID: "deepseek-flash" }))
+        .recoveryWaiting,
+      0,
+    );
+  } finally {
+    await h.close();
   }
 });

@@ -5,8 +5,10 @@ const object = {
   additionalProperties: true,
 } as const;
 
+export const OFFPEAK_RPC_ID = "opencode-offpeak" as const;
+
 export const OFFPEAK_RPC = {
-  id: "opencode-offpeak",
+  id: OFFPEAK_RPC_ID,
   methods: {
     control: {
       input: {
@@ -25,8 +27,60 @@ export const OFFPEAK_RPC = {
       output: object,
     },
   },
-  events: {},
+  /**
+   * Server-to-TUI notifications. They are published on OpenCode's event stream
+   * as `rpc.opencode-offpeak.<name>` and rendered by the TUI entrypoint as
+   * non-chat toasts; they never touch the session, the model context, or
+   * headless output.
+   */
+  events: {
+    hold: {
+      schema: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          until: { type: "number" },
+          timeZone: { type: "string" },
+          display: { type: "string" },
+        },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+    },
+    resume: {
+      schema: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          kind: { type: "string" },
+        },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+    },
+  },
 } as const satisfies Rpc.PortableDefinition;
+
+export type OffpeakEventName = keyof typeof OFFPEAK_RPC.events;
+
+/** Full event-stream type string, for example `rpc.opencode-offpeak.hold`. */
+export function offpeakEventType<Name extends OffpeakEventName>(
+  name: Name,
+): `rpc.${typeof OFFPEAK_RPC_ID}.${Name}` {
+  return `rpc.${OFFPEAK_RPC_ID}.${name}`;
+}
+
+export interface OffpeakHoldEvent {
+  sessionID: string;
+  until?: number;
+  timeZone?: string;
+  display?: string;
+}
+
+export interface OffpeakResumeEvent {
+  sessionID: string;
+  kind?: "release" | "continuation";
+}
 
 export interface OffpeakRpcInput {
   action: string;

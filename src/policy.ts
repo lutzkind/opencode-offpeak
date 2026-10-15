@@ -21,8 +21,8 @@ export interface PricingPolicy {
   blocked: WeeklyWindow[];
   /**
    * Patterns for models of the same provider with no peak pricing at all: a
-   * single all-hours rate documented by the provider. They are OFF_PEAK at
-   * every hour and are allowed without waiting. A model that matches both
+   * single all-hours rate documented by the provider. They evaluate as `FLAT`
+   * at every hour and are allowed without waiting. A model that matches both
    * `models` and `flatModels` is treated as peak-priced (`models` wins).
    *
    * These are vendor facts, not an assumption: they mirror the provider's own
@@ -42,7 +42,16 @@ export interface PricingPolicy {
 }
 
 export interface PolicyDecision {
-  state: "OFF_PEAK" | "PEAK" | "UNTRACKED" | "UNKNOWN";
+  /**
+   * - `PEAK`: inside a verified peak window; requests wait (auto) or block.
+   * - `OFF_PEAK`: outside every peak window; requests are allowed now.
+   * - `FLAT`: the model has a single vendor-documented all-hours price and no
+   *   peak window at all; requests are allowed and never wait.
+   * - `UNTRACKED`: no policy covers this provider; the plugin does not guard it.
+   * - `UNKNOWN`: the provider is configured but this model has no verified
+   *   pricing policy; requests fail closed.
+   */
+  state: "OFF_PEAK" | "PEAK" | "FLAT" | "UNTRACKED" | "UNKNOWN";
   allowed: boolean;
   policy?: PricingPolicy;
   nextTransition?: number;
@@ -54,10 +63,15 @@ export interface PolicyDecision {
 // through Friday, excluding Chinese public holidays. All other hours are
 // off-peak, including weekends and Chinese public holidays in full."
 // (https://api-docs.deepseek.com/quick_start/pricing). The OpenCode Go pricing
-// page documents the same windows for this provider
-// (https://opencode.ai/docs/go/). Holiday dates come from the State Council
-// calendar in src/holidays.ts.
-//
+// page documents the same windows for the Go gateway
+// (https://opencode.ai/docs/go/), and DeepSeek's direct API uses the same
+// schedule. Holiday dates come from the State Council calendar in
+// src/holidays.ts and are shared by both policies.
+const DEEPSEEK_PEAK_WINDOWS: WeeklyWindow[] = [
+  { days: [1, 2, 3, 4, 5], start: "01:00", end: "04:00" },
+  { days: [1, 2, 3, 4, 5], start: "06:00", end: "10:00" },
+];
+
 // The Go pricing table lists Off-Peak/Peak tiers only for the DeepSeek models.
 // Every other model in the Go catalog has one all-hours price per token, so
 // `flatModels` mirrors that table exactly (model IDs from the documented Go
@@ -93,15 +107,75 @@ export const DEEPSEEK_OPENCODE_GO: PricingPolicy = {
     "cat-jam-free",
   ],
   timeZone: "UTC",
-  blocked: [
-    { days: [1, 2, 3, 4, 5], start: "01:00", end: "04:00" },
-    { days: [1, 2, 3, 4, 5], start: "06:00", end: "10:00" },
-  ],
+  blocked: DEEPSEEK_PEAK_WINDOWS,
   holidays: CHINA_PUBLIC_HOLIDAYS,
   multiplier: 2,
   source: "https://opencode.ai/docs/go/",
   verifiedAt: "2026-10-15",
 };
+
+// The direct DeepSeek API (OpenCode provider id `deepseek`,
+// https://api.deepseek.com) publishes the same weekly windows and holiday rule
+// as the Go gateway: "Off-peak rates are half of the peak rates. Peak hours are
+// 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding
+// Chinese public holidays. All other hours are off-peak, including weekends and
+// Chinese public holidays in full."
+//
+// The canonical API model names are `deepseek-flash` and `deepseek-v4-pro`.
+// DeepSeek's pricing page also documents the legacy aliases
+// `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` as still accepted and
+// forwarded to DeepSeek-V4.1-Flash, billed at the Flash price, so they share
+// the same schedule. Every other name fails closed until it is verified: no
+// `deepseek-*` wildcard is used, because future direct models may not share
+// this schedule.
+export const DEEPSEEK_API: PricingPolicy = {
+  id: "deepseek-api",
+  providers: ["deepseek"],
+  models: [
+    "deepseek-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+  ],
+  timeZone: "UTC",
+  blocked: DEEPSEEK_PEAK_WINDOWS,
+  holidays: CHINA_PUBLIC_HOLIDAYS,
+  multiplier: 2,
+  source: "https://api-docs.deepseek.com/quick_start/pricing",
+  verifiedAt: "2026-10-15",
+};
+
+/** Every built-in policy shipped by this release, in documentation order. */
+export const BUILTIN_POLICIES: PricingPolicy[] = [DEEPSEEK_OPENCODE_GO, DEEPSEEK_API];
+
+/**
+ * Providers whose official pricing pages have been verified to contain no
+ * peak/off-peak tiers at all: every model has one all-hours price. The plugin
+ * deliberately installs no policy for them — there is no window to wait for —
+ * so their requests are never delayed or blocked (`UNTRACKED`), and a new
+ * model of such a provider can never be blocked just because a DeepSeek policy
+ * exists elsewhere. This data is documentation for status output; it never
+ * changes enforcement.
+ */
+export interface FlatProviderFact {
+  name: string;
+  note: string;
+  source: string;
+  verifiedAt: string;
+}
+
+export const VERIFIED_FLAT_PROVIDERS: Record<string, FlatProviderFact> = {
+  opencode: {
+    name: "OpenCode Zen",
+    note: "Zen publishes one all-hours price per model with no peak/off-peak tiers, so there is no off-peak window to wait for and requests are never delayed.",
+    source: "https://opencode.ai/docs/zen/",
+    verifiedAt: "2026-10-15",
+  },
+};
+
+export function flatProviderNote(providerID: string): string | undefined {
+  return VERIFIED_FLAT_PROVIDERS[providerID.toLowerCase()]?.note;
+}
 
 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MINUTE_MS = 60_000;
@@ -327,7 +401,7 @@ export function resolvePolicy(
     }
     if (flatPolicies.length) return flatPolicies[0];
     throw new Error(
-      `Provider ${providerID} is configured, but model ${modelID} has no pricing policy.`,
+      `Provider ${providerID} is configured, but model ${modelID} is not in the verified off-peak pricing policy for this release. Update opencode-offpeak or add a verified custom policy before using this model.`,
     );
   }
   return modelPolicies[0];
@@ -347,7 +421,7 @@ export function evaluatePricing(
     validatePolicy(policy);
     if (!policy.models.some((model) => matches(model, modelID))) {
       return {
-        state: "OFF_PEAK",
+        state: "FLAT",
         allowed: true,
         policy,
         reason: `${providerID}/${modelID} has flat all-hours pricing and no peak window.`,
@@ -381,4 +455,37 @@ export function formatInTimeZone(epochMs: number, timeZone: string): string {
     minute: "2-digit",
     timeZoneName: "short",
   }).format(epochMs);
+}
+
+/**
+ * Compact hold deadline such as `17:00 Asia/Bangkok`, with a local date prefix
+ * (`Oct 19, 01:00 Asia/Bangkok`) when the deadline falls on a different
+ * calendar day in that time zone than `nowMs` does.
+ */
+export function formatTransitionInTimeZone(
+  epochMs: number,
+  timeZone: string,
+  nowMs = Date.now(),
+): string {
+  const time = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(epochMs);
+  const day = (value: number) =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(value);
+  const label = `${time} ${timeZone}`;
+  if (day(epochMs) === day(nowMs)) return label;
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+  }).format(epochMs);
+  return `${date}, ${label}`;
 }

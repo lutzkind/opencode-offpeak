@@ -30,6 +30,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
   const hooks = new Map();
   const sessionStore = new Map();
   const toasts = [];
+  const emittedEvents = [];
   let rpcDefinition;
   let rpcHandlers;
   const eventQueue = [];
@@ -109,7 +110,14 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       async register(definition, handlers) {
         rpcDefinition = definition;
         rpcHandlers = handlers;
-        return { dispose: async () => undefined };
+        return {
+          dispose: async () => undefined,
+          events: {
+            async emit(name, data) {
+              emittedEvents.push({ name, data });
+            },
+          },
+        };
       },
     },
   };
@@ -118,6 +126,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
   const heldOutcome = hooks
     .get("http.request")({
       sessionID: "interactive-session",
+      kind: "primary",
       model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
       request: new Request("http://fixture.invalid"),
     })
@@ -127,6 +136,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     );
   try {
     assert.equal(rpcDefinition.id, "opencode-offpeak");
+    assert.deepEqual(Object.keys(rpcDefinition.events).sort(), ["hold", "resume"]);
     assert.ok(hooks.has("model.request"));
     assert.ok(hooks.has("http.request"));
     assert.ok(hooks.has("experimental.ws.handshake"));
@@ -156,8 +166,14 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.deepEqual(nonRetryable.decision, { retry: false });
 
     // auto + ON + peak: the server entrypoint holds the interactive request at the
-    // boundary instead of discarding it.
+    // boundary instead of discarding it, and announces it once to the UI.
     await assertStillPending(heldOutcome, 60);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const holdEvents = emittedEvents.filter((event) => event.name === "hold");
+    assert.equal(holdEvents.length, 1);
+    assert.equal(holdEvents[0].data.sessionID, "interactive-session");
+    assert.equal(typeof holdEvents[0].data.display, "string");
+    assert.equal(typeof holdEvents[0].data.until, "number");
 
     // A primary pre-model request is deferred before any provider attempt exists and
     // persists a deferral entry so a reload can continue the same session.
@@ -255,8 +271,15 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(status.status.recoveryWaiting, 2);
 
     let layer;
+    const eventHandlers = new Map();
     const tuiContext = {
       app: { name: "opencode", version: "2.0.26", channel: "latest" },
+      data: {
+        on(type, handler) {
+          eventHandlers.set(type, handler);
+          return () => eventHandlers.delete(type);
+        },
+      },
       keymap: { layer: (factory) => (layer = factory()) },
       client: {
         rpc: (definition) => {
@@ -270,7 +293,32 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
         toast: { show: (options) => toasts.push(options) },
       },
     };
-    tuiPlugin.setup(tuiContext);
+    const disposeTui = tuiPlugin.setup(tuiContext);
+    assert.deepEqual([...eventHandlers.keys()].sort(), [
+      "rpc.opencode-offpeak.hold",
+      "rpc.opencode-offpeak.resume",
+    ]);
+    // The TUI renders the server's notifications as non-chat toasts.
+    eventHandlers.get("rpc.opencode-offpeak.hold")({
+      type: "rpc.opencode-offpeak.hold",
+      data: { sessionID: "interactive-session", display: "04:00 UTC", until: 1, timeZone: "UTC" },
+    });
+    assert.match(toasts.at(-1).message, /request held until 04:00 UTC/);
+    assert.equal(toasts.at(-1).sessionID, "interactive-session");
+    eventHandlers.get("rpc.opencode-offpeak.hold")({ type: "rpc.opencode-offpeak.hold", data: {} });
+    assert.equal(toasts.length, 1);
+    eventHandlers.get("rpc.opencode-offpeak.resume")({
+      type: "rpc.opencode-offpeak.resume",
+      data: { sessionID: "interactive-session", kind: "continuation" },
+    });
+    assert.match(toasts.at(-1).message, /Continuing this session/);
+    eventHandlers.get("rpc.opencode-offpeak.resume")({
+      type: "rpc.opencode-offpeak.resume",
+      data: { sessionID: "interactive-session", kind: "release" },
+    });
+    assert.match(toasts.at(-1).message, /Resuming the held request/);
+    await disposeTui();
+    assert.equal(eventHandlers.size, 0);
     assert.equal(layer.mode, "global");
     const command = layer.commands.find((entry) => entry.slash?.name === "offpeak");
     assert.ok(command);

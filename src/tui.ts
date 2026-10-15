@@ -1,7 +1,13 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { assertSupportedOpenCode } from "./compat.js";
 import { formatInTimeZone } from "./policy.js";
-import { OFFPEAK_RPC, type OffpeakRpcOutput } from "./rpc.js";
+import {
+  OFFPEAK_RPC,
+  type OffpeakHoldEvent,
+  type OffpeakResumeEvent,
+  type OffpeakRpcOutput,
+  offpeakEventType,
+} from "./rpc.js";
 
 export default Plugin.define({
   id: "opencode-offpeak",
@@ -36,6 +42,42 @@ export default Plugin.define({
         },
       ],
     }));
+    // Non-chat hold/resume feedback. These toasts come from the server plugin's
+    // event stream; they never enter the session or the model context, and a
+    // headless run simply has no subscriber.
+    const unsubscribe = [
+      context.data.on(offpeakEventType("hold"), (event) => {
+        const data = event.data as OffpeakHoldEvent;
+        if (typeof data?.sessionID !== "string") return;
+        context.ui.toast.show({
+          title: "OpenCode Offpeak",
+          message:
+            typeof data.display === "string"
+              ? `Peak pricing active — request held until ${data.display}. It will resume automatically in this session.`
+              : "Peak pricing active — the request is held until off-peak returns. It will resume automatically in this session.",
+          variant: "info",
+          duration: 15000,
+          sessionID: data.sessionID,
+        });
+      }),
+      context.data.on(offpeakEventType("resume"), (event) => {
+        const data = event.data as OffpeakResumeEvent;
+        if (typeof data?.sessionID !== "string") return;
+        context.ui.toast.show({
+          title: "OpenCode Offpeak",
+          message:
+            data.kind === "continuation"
+              ? "Off-peak pricing started. Continuing this session from where it stopped."
+              : "Off-peak pricing started. Resuming the held request in this session.",
+          variant: "success",
+          duration: 8000,
+          sessionID: data.sessionID,
+        });
+      }),
+    ];
+    return () => {
+      for (const off of unsubscribe) off();
+    };
   },
 });
 
@@ -94,6 +136,7 @@ function summarize(output: OffpeakRpcOutput): string {
     pricingState?: string;
     requestsAllowed?: boolean;
     nextTransition?: number;
+    providerNote?: string;
     displayTimeZone?: string;
     queued?: number;
     waiting?: number;
@@ -103,10 +146,23 @@ function summarize(output: OffpeakRpcOutput): string {
     failed?: number;
     configError?: string;
   };
+  const pricing = status.pricingState ?? "UNKNOWN";
   const next =
     status.nextTransition && status.displayTimeZone
       ? formatInTimeZone(status.nextTransition, status.displayTimeZone)
-      : "unknown";
+      : pricing === "FLAT" || pricing === "UNTRACKED"
+        ? "none (no peak window)"
+        : "unknown";
+  const requestDetail =
+    pricing === "FLAT"
+      ? " (flat all-hours pricing; never waits)"
+      : pricing === "UNTRACKED"
+        ? status.providerNote
+          ? ` (no policy needed: ${status.providerNote})`
+          : " (untracked provider; no policy installed)"
+        : pricing === "UNKNOWN"
+          ? " (no verified pricing policy for this model)"
+          : "";
   return [
     `Plugin: ${status.enabled ? "ENABLED" : "DISABLED"}`,
     `Mode: ${status.mode ?? "unknown"}`,
@@ -114,9 +170,9 @@ function summarize(output: OffpeakRpcOutput): string {
     `Automatic resume: ${status.automaticResume ?? "PAUSED"}`,
     `Override: ${status.override?.active ? `ON for ${status.override.taskID} until ${status.override.expiresAt}` : "OFF"}`,
     `Provider/model: ${status.providerID ?? "unknown"}/${status.modelID ?? "unknown"}`,
-    `Policy: ${status.policyID ?? "none"}`,
-    `Pricing: ${status.pricingState ?? "UNKNOWN"}`,
-    `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}${status.pricingState === "UNTRACKED" ? " (untracked policy)" : ""}`,
+    `Policy: ${status.policyID ?? (pricing === "UNKNOWN" ? "none (model not in any verified policy)" : "none")}`,
+    `Pricing: ${pricing}`,
+    `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}${requestDetail}`,
     `Next transition: ${next}`,
     `Queue: ${status.queued ?? 0} queued, ${status.waiting ?? 0} waiting, ${status.failed ?? 0} failed`,
     status.interactiveWaiting

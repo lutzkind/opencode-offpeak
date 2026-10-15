@@ -2,13 +2,13 @@
 
 ## Current public distribution
 
-`v0.1.5` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
+`v0.1.6` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.5
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6
 ```
 
-`v0.1.0` through `v0.1.4` remain available at their own tags, but `v0.1.5` is the canonical release: it restores automatic chat titles (OpenCode names sessions with the provider's small model, `opencode-go/gpt-6-luna`, which the built-in policy now declares as a vendor-documented flat-priced model instead of failing it closed as an unknown configured-provider model) and persists a semantic `pending-title` recovery for a title request that is held for peak pricing, so a shared session can carry both a primary continuation and a title marker and the recovery never overwrites or regenerates a title. This sits on top of the v0.1.4 pre-model peak deferral and Chinese holiday policy, the v0.1.3 retry recovery, the v0.1.2 interactive boundary hold, the v0.1.1 compatibility enforcement, the documented `Plugin.define(...)` TUI shape, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
+`v0.1.0` through `v0.1.5` remain available at their own tags, but `v0.1.6` is the canonical release: it adds first-class direct DeepSeek API support (a second built-in policy, `deepseek-api`, covering the verified `deepseek` provider model IDs with the shared peak windows and shared Chinese holiday calendar, with no `deepseek-*` wildcard), documents OpenCode Zen as a verified flat-priced provider that is never delayed (no policy by design), and gives held primary interactive requests immediate non-chat TUI feedback through plugin RPC events on OpenCode's own event stream (hold and resume toasts with the configured display-zone deadline; auxiliary requests stay silent; headless runs stay silent; reloads and restarts cannot duplicate a notification). This sits on top of the v0.1.5 title-recovery work, the v0.1.4 pre-model peak deferral and Chinese holiday policy, the v0.1.3 retry recovery, the v0.1.2 interactive boundary hold, the v0.1.1 compatibility enforcement, the documented `Plugin.define(...)` TUI shape, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
 
 ## Optional npm distribution
 
