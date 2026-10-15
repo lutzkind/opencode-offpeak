@@ -32,8 +32,22 @@ export default Plugin.define({
       wait: async (sessionID) => context.session.wait({ sessionID }),
       get: async (sessionID) => {
         const session = await context.session.get({ sessionID });
-        return session.outcome ? { outcome: session.outcome } : {};
+        // The wire format carries millis; the typed client exposes a DateTime.
+        const created = (session.time as { created?: unknown } | undefined)?.created;
+        const createdMs = typeof created === "number" ? created : Date.parse(String(created));
+        return {
+          ...(session.outcome ? { outcome: session.outcome } : {}),
+          ...(session.title !== undefined ? { title: session.title } : {}),
+          ...(session.parentID ? { parentID: session.parentID } : {}),
+          ...(Number.isFinite(createdMs) ? { created: createdMs } : {}),
+        };
       },
+      // NOTE: OpenCode 2.0.27's plugin host does not expose a title generation
+      // call. `context.session.update({ title: "" })` is NOT the HTTP API's
+      // "regenerate" trigger: the plugin host renames the session to an empty
+      // title instead. The pending-title recovery therefore never mutates the
+      // session; it verifies and clears, and OpenCode's own input promotion
+      // generates the title (see #deliverTitleRecovery).
       interrupt: async (sessionID) => {
         await context.session.interrupt({ sessionID });
       },
@@ -66,6 +80,7 @@ export default Plugin.define({
           sessionID: request.sessionID,
           providerID: request.model.providerID,
           modelID: request.model.id,
+          kind: request.kind,
           transport: "http",
         }),
       ),
@@ -74,6 +89,7 @@ export default Plugin.define({
           sessionID: request.sessionID,
           providerID: request.model.providerID,
           modelID: request.model.id,
+          kind: request.kind,
           transport: "websocket",
         }),
       ),
@@ -82,6 +98,7 @@ export default Plugin.define({
           sessionID: request.sessionID,
           providerID: request.model.providerID,
           modelID: request.model.id,
+          kind: request.kind,
           transport: "websocket",
         }),
       ),

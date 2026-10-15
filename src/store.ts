@@ -41,10 +41,15 @@ export interface QueueDocument {
  * at the next allowed window. The session itself is untouched; only the
  * identity needed to continue it is kept.
  *
- * `origin` distinguishes a request that failed retryably during a peak crossing
- * ("retry-failure") from a primary interactive request that was deferred before
- * its provider attempt ("deferred"). Both continue automatically; a user
- * interrupt clears a deferral but not a retry-failure.
+ * `origin` distinguishes:
+ * - "retry-failure": a request that failed retryably during a peak crossing;
+ * - "deferred": a primary interactive request deferred before its provider
+ *   attempt. Both continue the same session automatically; a user interrupt
+ *   clears a deferral but not a retry-failure.
+ * - "pending-title": the session still needs its automatic OpenCode-generated
+ *   title. Recovery is semantic (OpenCode's own title generation is invoked
+ *   again; no provider request is replayed) and never overwrites a title the
+ *   session already has.
  */
 export interface RecoveryEntry {
   sessionID: string;
@@ -52,8 +57,10 @@ export interface RecoveryEntry {
   modelID: string;
   directory: string;
   heldAt: string;
-  origin?: "retry-failure" | "deferred";
+  origin?: RecoveryOrigin;
 }
+
+export type RecoveryOrigin = "retry-failure" | "deferred" | "pending-title";
 
 export interface RecoveryDocument {
   schemaVersion: 1;
@@ -228,7 +235,8 @@ function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
   if (
     value.origin !== undefined &&
     value.origin !== "retry-failure" &&
-    value.origin !== "deferred"
+    value.origin !== "deferred" &&
+    value.origin !== "pending-title"
   ) {
     throw new Error(`Stored recovery entry ${index} has an invalid origin.`);
   }

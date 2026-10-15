@@ -12,9 +12,24 @@ export interface WeeklyWindow {
 export interface PricingPolicy {
   id: string;
   providers: string[];
+  /**
+   * Patterns for models this policy prices with the weekly `blocked` windows:
+   * they are PEAK inside a window and OFF_PEAK outside it.
+   */
   models: string[];
   timeZone: string;
   blocked: WeeklyWindow[];
+  /**
+   * Patterns for models of the same provider with no peak pricing at all: a
+   * single all-hours rate documented by the provider. They are OFF_PEAK at
+   * every hour and are allowed without waiting. A model that matches both
+   * `models` and `flatModels` is treated as peak-priced (`models` wins).
+   *
+   * These are vendor facts, not an assumption: they mirror the provider's own
+   * pricing page for the exact model IDs it lists at `verifiedAt`. A model
+   * matching neither list stays UNKNOWN and fails closed.
+   */
+  flatModels?: string[];
   /**
    * Full-day OFF_PEAK exception calendars, for example statutory public
    * holidays. A date listed in a calendar overrides every weekly PEAK window
@@ -42,6 +57,15 @@ export interface PolicyDecision {
 // page documents the same windows for this provider
 // (https://opencode.ai/docs/go/). Holiday dates come from the State Council
 // calendar in src/holidays.ts.
+//
+// The Go pricing table lists Off-Peak/Peak tiers only for the DeepSeek models.
+// Every other model in the Go catalog has one all-hours price per token, so
+// `flatModels` mirrors that table exactly (model IDs from the documented Go
+// endpoints list): GPT 6/5.6 Luna, Claude Haiku 5.5, Gemini 4 Argon
+// Contributor, GLM, Kimi, LongCat, MiMo, MiniMax, Muse Spark, Qwen, Hy,
+// Space Bunny, Step 5 Preview Free, Cat Jam Free, Grok. The layouts are
+// deliberately explicit instead of a wildcard so that an unlisted model
+// (including a future model with new peak pricing) still fails closed.
 export const DEEPSEEK_OPENCODE_GO: PricingPolicy = {
   id: "deepseek-opencode-go",
   providers: ["opencode-go"],
@@ -51,6 +75,23 @@ export const DEEPSEEK_OPENCODE_GO: PricingPolicy = {
     "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
   ],
+  flatModels: [
+    "grok-*",
+    "gpt-*",
+    "claude-*",
+    "gemini-*",
+    "glm-*",
+    "kimi-*",
+    "longcat-*",
+    "mimo-*",
+    "minimax-*",
+    "muse-*",
+    "qwen*",
+    "hy*",
+    "space-bunny",
+    "step-*",
+    "cat-jam-free",
+  ],
   timeZone: "UTC",
   blocked: [
     { days: [1, 2, 3, 4, 5], start: "01:00", end: "04:00" },
@@ -59,7 +100,7 @@ export const DEEPSEEK_OPENCODE_GO: PricingPolicy = {
   holidays: CHINA_PUBLIC_HOLIDAYS,
   multiplier: 2,
   source: "https://opencode.ai/docs/go/",
-  verifiedAt: "2026-10-14",
+  verifiedAt: "2026-10-15",
 };
 
 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -85,6 +126,11 @@ export function validatePolicy(policy: PricingPolicy): void {
   }
   if (!policy.models.length || policy.models.some((item) => !item.trim())) {
     throw new Error(`Policy ${policy.id} must match at least one model.`);
+  }
+  if (policy.flatModels !== undefined) {
+    if (!Array.isArray(policy.flatModels) || policy.flatModels.some((item) => !item.trim())) {
+      throw new Error(`Policy ${policy.id} flat model patterns must be non-empty strings.`);
+    }
   }
   validateTimeZone(policy.timeZone);
   if (!policy.blocked.length) throw new Error(`Policy ${policy.id} must define blocked windows.`);
@@ -271,6 +317,15 @@ export function resolvePolicy(
     throw new Error(`More than one pricing policy matches ${providerID}/${modelID}.`);
   }
   if (!modelPolicies.length) {
+    // A flat-priced model has no peak window at all, so it is never blocked;
+    // `models` keeps precedence when a pattern matches both lists.
+    const flatPolicies = providerPolicies.filter((policy) =>
+      (policy.flatModels ?? []).some((model) => matches(model, modelID)),
+    );
+    if (flatPolicies.length > 1) {
+      throw new Error(`More than one flat pricing policy matches ${providerID}/${modelID}.`);
+    }
+    if (flatPolicies.length) return flatPolicies[0];
     throw new Error(
       `Provider ${providerID} is configured, but model ${modelID} has no pricing policy.`,
     );
@@ -290,6 +345,14 @@ export function evaluatePricing(
     if (!policy)
       return { state: "UNTRACKED", allowed: true, reason: "No policy matches this provider." };
     validatePolicy(policy);
+    if (!policy.models.some((model) => matches(model, modelID))) {
+      return {
+        state: "OFF_PEAK",
+        allowed: true,
+        policy,
+        reason: `${providerID}/${modelID} has flat all-hours pricing and no peak window.`,
+      };
+    }
     const format = formatter(policy.timeZone);
     const peak = isBlockedAt(policy, nowMs, format);
     return {

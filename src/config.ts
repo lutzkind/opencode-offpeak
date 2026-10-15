@@ -85,23 +85,32 @@ export function validateConfig(value: unknown, fallback: OffpeakConfig): Offpeak
     enabled: value.enabled,
     mode: value.mode,
     displayTimeZone,
-    policies: structuredClone(adoptBuiltinHolidays(configuredPolicies, fallback.policies)),
+    policies: structuredClone(adoptBuiltinDefaults(configuredPolicies, fallback.policies)),
   };
 }
 
 /**
  * A stored policies array that is an unmodified copy of a built-in policy
- * adopts the built-in full-day OFF_PEAK calendars (for example the yearly
- * Chinese holiday list) without touching any customized schedule. A policy
- * that differs in provider, model, time zone, multiplier, or weekly windows is
- * preserved exactly as stored, and an explicit holiday list always wins.
+ * adopts the built-in vendor data (the yearly full-day OFF_PEAK holiday
+ * calendars, and the documented flat all-hours model list) without touching
+ * any customized schedule. A policy that differs in provider, model, time
+ * zone, multiplier, or weekly windows is preserved exactly as stored, and an
+ * explicit holiday list or flat model list always wins.
  */
-function adoptBuiltinHolidays(stored: PricingPolicy[], builtin: PricingPolicy[]): PricingPolicy[] {
+function adoptBuiltinDefaults(stored: PricingPolicy[], builtin: PricingPolicy[]): PricingPolicy[] {
   return stored.map((policy) => {
     const reference = builtin.find((candidate) => candidate.id === policy.id);
-    if (!reference?.holidays?.length || policy.holidays !== undefined) return policy;
+    if (!reference) return policy;
     if (!sameWeeklySchedule(policy, reference)) return policy;
-    return { ...policy, holidays: structuredClone(reference.holidays) };
+    return {
+      ...policy,
+      ...(policy.holidays === undefined && reference.holidays?.length
+        ? { holidays: structuredClone(reference.holidays) }
+        : {}),
+      ...(policy.flatModels === undefined && reference.flatModels?.length
+        ? { flatModels: structuredClone(reference.flatModels) }
+        : {}),
+    };
   });
 }
 

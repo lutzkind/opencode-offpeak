@@ -89,6 +89,112 @@ test("unknown models for a configured provider fail closed; unrelated providers 
   assert.equal(unrelated.allowed, true);
 });
 
+test("documented flat models have no peak window and stay allowed during DeepSeek peak hours", () => {
+  // The Go pricing table lists peak/off-peak tiers only for the DeepSeek models.
+  for (const modelID of [
+    "gpt-6-luna",
+    "gpt-5.6-luna",
+    "claude-haiku-5-5",
+    "gemini-4-argon-contributor",
+    "glm-5.3-flash",
+    "glm-5.3",
+    "glm-5.2",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "longcat-2.0",
+    "mimo-v2.6-flash",
+    "minimax-m3",
+    "muse-spark-1.3-contributor",
+    "qwen3.8-flash",
+    "hy3",
+    "space-bunny",
+    "step-5-preview-free",
+    "cat-jam-free",
+    "grok-4.7",
+    "longcat-2.5-preview-free",
+  ]) {
+    const decision = evaluatePricing(
+      [DEEPSEEK_OPENCODE_GO],
+      provider,
+      modelID,
+      at("2026-10-12T02:00:00Z"),
+    );
+    assert.equal(decision.state, "OFF_PEAK", modelID);
+    assert.equal(decision.allowed, true, modelID);
+    assert.equal(decision.policy?.id, "deepseek-opencode-go", modelID);
+    assert.equal(decision.nextTransition, undefined, modelID);
+    // The same flat model is never blocked at any hour, including peak edges.
+    assert.equal(
+      evaluatePricing([DEEPSEEK_OPENCODE_GO], provider, modelID, at("2026-10-12T06:00:00Z")).state,
+      "OFF_PEAK",
+      modelID,
+    );
+  }
+});
+
+test("the peak-priced DeepSeek models keep their windows next to the flat model list", () => {
+  for (const modelID of ["deepseek-v4.1-flash", "deepseek-v4-pro"]) {
+    assert.equal(
+      evaluatePricing([DEEPSEEK_OPENCODE_GO], provider, modelID, at("2026-10-12T02:00:00Z")).state,
+      "PEAK",
+      modelID,
+    );
+    assert.equal(
+      evaluatePricing([DEEPSEEK_OPENCODE_GO], provider, modelID, at("2026-10-12T05:00:00Z")).state,
+      "OFF_PEAK",
+      modelID,
+    );
+  }
+});
+
+test("a model matching both the peak and flat patterns stays peak-priced", () => {
+  const policy = {
+    ...DEEPSEEK_OPENCODE_GO,
+    id: "overlap-test",
+    models: ["deepseek-v4.1-flash"],
+    flatModels: ["deepseek-*"],
+  };
+  assert.equal(
+    evaluatePricing([policy], provider, "deepseek-v4.1-flash", at("2026-10-12T02:00:00Z")).state,
+    "PEAK",
+  );
+  assert.equal(
+    evaluatePricing([policy], provider, "deepseek-other", at("2026-10-12T02:00:00Z")).state,
+    "OFF_PEAK",
+  );
+});
+
+test("a model matching neither list on a configured provider still fails closed", () => {
+  const decision = evaluatePricing(
+    [DEEPSEEK_OPENCODE_GO],
+    provider,
+    "future-model-x",
+    at("2026-10-12T05:00:00Z"),
+  );
+  assert.equal(decision.state, "UNKNOWN");
+  assert.equal(decision.allowed, false);
+});
+
+test("ambiguous flat policies and invalid flat patterns fail closed", () => {
+  const ambiguous = [
+    { ...DEEPSEEK_OPENCODE_GO, id: "flat-one", flatModels: ["shared-*"] },
+    { ...DEEPSEEK_OPENCODE_GO, id: "flat-two", flatModels: ["shared-*"] },
+  ];
+  const decision = evaluatePricing(
+    [...ambiguous],
+    provider,
+    "shared-model",
+    at("2026-10-12T05:00:00Z"),
+  );
+  assert.equal(decision.state, "UNKNOWN");
+  assert.equal(decision.allowed, false);
+  const invalid = { ...DEEPSEEK_OPENCODE_GO, id: "bad-flat", flatModels: ["  "] };
+  assert.equal(
+    evaluatePricing([invalid], provider, "gpt-6-luna", at("2026-10-12T05:00:00Z")).state,
+    "UNKNOWN",
+  );
+});
+
 test("invalid timezone and schedule data fail closed", () => {
   const invalid = {
     ...DEEPSEEK_OPENCODE_GO,
