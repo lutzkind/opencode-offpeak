@@ -68,7 +68,9 @@ export default Plugin.define({
           message:
             data.kind === "continuation"
               ? "Off-peak pricing started. Continuing this session from where it stopped."
-              : "Off-peak pricing started. Resuming the held request in this session.",
+              : data.kind === "override"
+                ? "Session off-peak protection is OFF. Releasing the held request in this session now."
+                : "Off-peak pricing started. Resuming the held request in this session.",
           variant: "success",
           duration: 8000,
           sessionID: data.sessionID,
@@ -88,6 +90,7 @@ async function invoke(context: Plugin.Context, rawInput: string): Promise<Offpea
   const argument = space < 0 ? "" : input.slice(space + 1).trim();
   const model = context.ui.model.current();
   const cwd = context.location?.directory;
+  const sessionID = currentSessionID(context);
   const client = context.client.rpc(OFFPEAK_RPC);
 
   if (action === "queue") {
@@ -101,6 +104,24 @@ async function invoke(context: Plugin.Context, rawInput: string): Promise<Offpea
       modelID: model.modelID,
     }) as Promise<OffpeakRpcOutput>;
   }
+  // Session-scoped off-peak protection for the current interactive session.
+  // The session is identified from the supported TUI route, never typed by
+  // hand; the state persists until the user changes it and there is no timer.
+  if (action === "session") {
+    const direction = argument.toLowerCase();
+    if (direction !== "on" && direction !== "off") {
+      throw new Error("Usage: /offpeak session on|off");
+    }
+    if (!sessionID) {
+      throw new Error(
+        "No current OpenCode session is focused. Open the session and run /offpeak session on|off again.",
+      );
+    }
+    return client.control({
+      action: `session-${direction}`,
+      sessionID,
+    }) as Promise<OffpeakRpcOutput>;
+  }
   if (["cancel", "remove", "retry", "resume", "run-now"].includes(action)) {
     if (!argument) throw new Error(`Usage: /offpeak ${action} <task-id>`);
     return client.control({ action, id: argument }) as Promise<OffpeakRpcOutput>;
@@ -109,7 +130,31 @@ async function invoke(context: Plugin.Context, rawInput: string): Promise<Offpea
     action,
     providerID: model?.providerID,
     modelID: model?.modelID,
+    ...(sessionID ? { sessionID } : {}),
   }) as Promise<OffpeakRpcOutput>;
+}
+
+/**
+ * The current interactive session, resolved from OpenCode's supported TUI
+ * command context: the focused route first, then the active session tab. The
+ * user never has to copy a session ID.
+ */
+function currentSessionID(context: Plugin.Context): string | undefined {
+  try {
+    const route = context.ui.router?.current?.();
+    if (route?.type === "session" && typeof route.sessionID === "string") {
+      return route.sessionID;
+    }
+  } catch {
+    // Fall through to the active tab.
+  }
+  try {
+    const active = context.ui.tabs?.list?.().find((tab) => tab.active);
+    if (active && typeof active.sessionID === "string") return active.sessionID;
+  } catch {
+    // No session context is available from this host generation.
+  }
+  return undefined;
 }
 
 function summarize(output: OffpeakRpcOutput): string {
@@ -130,6 +175,7 @@ function summarize(output: OffpeakRpcOutput): string {
     automaticExecution?: string;
     automaticResume?: string;
     override?: { active?: boolean; taskID?: string; expiresAt?: string };
+    sessionProtection?: string;
     providerID?: string;
     modelID?: string;
     policyID?: string;
@@ -148,14 +194,16 @@ function summarize(output: OffpeakRpcOutput): string {
     configError?: string;
   };
   const pricing = status.pricingState ?? "UNKNOWN";
+  const sessionOverride = status.sessionProtection === "OFF" && pricing === "PEAK";
   const next =
     status.nextTransition && status.displayTimeZone
       ? formatInTimeZone(status.nextTransition, status.displayTimeZone)
       : pricing === "FLAT" || pricing === "UNTRACKED"
         ? "none (no peak window)"
         : "unknown";
-  const requestDetail =
-    pricing === "FLAT"
+  const requestDetail = sessionOverride
+    ? " (session override)"
+    : pricing === "FLAT"
       ? " (flat all-hours pricing; never waits)"
       : pricing === "UNTRACKED"
         ? status.providerNote
@@ -173,6 +221,7 @@ function summarize(output: OffpeakRpcOutput): string {
     `Provider/model: ${status.providerID ?? "unknown"}/${status.modelID ?? "unknown"}`,
     `Policy: ${status.policyID ?? (pricing === "UNKNOWN" ? "none (model not in any verified policy)" : "none")}`,
     `Pricing: ${pricing}`,
+    status.sessionProtection ? `Session protection: ${status.sessionProtection}` : "",
     `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}${requestDetail}`,
     `Next transition: ${next}`,
     `Queue: ${status.queued ?? 0} queued, ${status.waiting ?? 0} waiting, ${status.failed ?? 0} failed`,

@@ -237,6 +237,70 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     });
     assert.equal(afterInactivity.status.recoveryWaiting, 2);
 
+    // Session-scoped protection: default ON; the explicit OFF is this one
+    // session's authorization for verified peak-priced inference, and it also
+    // releases that session's still-valid waiting work immediately.
+    const defaultProtection = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+      sessionID: "entrypoint-override",
+    });
+    assert.equal(defaultProtection.status.sessionProtection, "ON");
+    // The fake host now knows the session exists; lazy pruning must keep state
+    // for a session that still exists.
+    sessionStore.set("entrypoint-override", { outcome: undefined, time: { created: Date.now() } });
+    const overrideHeld = hooks
+      .get("http.request")({
+        sessionID: "entrypoint-override",
+        kind: "primary",
+        model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+        request: new Request("http://fixture.invalid"),
+      })
+      .then(
+        () => "released",
+        (error) => error,
+      );
+    await assertStillPending(overrideHeld, 60);
+    const sessionOff = await rpcHandlers.control({
+      action: "session-off",
+      sessionID: "entrypoint-override",
+    });
+    assert.equal(sessionOff.state, "OFF");
+    assert.match(sessionOff.message, /Session off-peak protection disabled/);
+    // The held request wakes immediately, in the same session, at peak rates.
+    assert.equal(await overrideHeld, "released");
+    const overridden = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+      sessionID: "entrypoint-override",
+    });
+    assert.equal(overridden.status.sessionProtection, "OFF");
+    assert.equal(overridden.status.pricingState, "PEAK");
+    assert.equal(overridden.status.requestsAllowed, true);
+    // Without a session ID the command is refused rather than guessing.
+    await assert.rejects(
+      rpcHandlers.control({ action: "session-off" }),
+      /No current OpenCode session/,
+    );
+    // OpenCode's own session-deletion event reaps the override.
+    pushEvent({ type: "session.deleted", data: { sessionID: "entrypoint-override" } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const afterDeletion = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+      sessionID: "entrypoint-override",
+    });
+    assert.equal(afterDeletion.status.sessionProtection, "ON");
+    const sessionOn = await rpcHandlers.control({
+      action: "session-on",
+      sessionID: "entrypoint-override",
+    });
+    assert.equal(sessionOn.state, "ON");
+    assert.match(sessionOn.message, /Session off-peak protection enabled/);
+
     const off = await rpcHandlers.control({ action: "off" });
     assert.match(off.message, /Peak pricing is still blocked/);
     // OFF never releases a held request and is not a price override.
@@ -258,7 +322,9 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       modelID: "deepseek-v4.1-flash",
     });
     assert.match(queued.message, /Queued [a-f0-9-]+/);
-    assert.equal(sessionStore.size, 0);
+    // No task session was created while the plugin is OFF (the pre-registered
+    // verification sessions carry no task input).
+    assert.equal([...sessionStore.values()].filter((session) => session.input).length, 0);
     const status = await rpcHandlers.control({
       action: "status",
       providerID: "opencode-go",
@@ -269,6 +335,8 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(status.status.requestsAllowed, false);
     assert.equal(status.status.interactiveWaiting, 1);
     assert.equal(status.status.recoveryWaiting, 2);
+    // Without a session, no session protection is reported (home screen).
+    assert.equal(status.status.sessionProtection, undefined);
 
     let layer;
     const eventHandlers = new Map();
@@ -290,6 +358,8 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       location: { directory: "/fixture-project" },
       ui: {
         model: { current: () => ({ providerID: "opencode-go", modelID: "deepseek-v4.1-flash" }) },
+        router: { current: () => ({ type: "session", sessionID: "tui-session" }) },
+        tabs: { list: () => [] },
         toast: { show: (options) => toasts.push(options) },
       },
     };
@@ -336,6 +406,33 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     await command.run(`/offpeak remove ${tasks[0].id}`);
     assert.match(toasts.at(-1).message, /Removed/);
     assert.equal((await rpcHandlers.control({ action: "list" })).tasks.length, 1);
+
+    // Session protection from the real TUI command: the focused session is
+    // resolved from the supported route, never typed by hand.
+    sessionStore.set("tui-session", { outcome: undefined, time: { created: Date.now() } });
+    await command.run("/offpeak session off");
+    assert.match(toasts.at(-1).message, /Session off-peak protection disabled/);
+    assert.match(toasts.at(-1).message, /verified peak-priced inference/);
+    const tuiSessionStatus = await rpcHandlers.control({
+      action: "status",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+      sessionID: "tui-session",
+    });
+    assert.equal(tuiSessionStatus.status.sessionProtection, "OFF");
+    await command.run("/offpeak status");
+    assert.match(toasts.at(-1).message, /Session protection: OFF/);
+    await command.run("/offpeak session on");
+    assert.match(toasts.at(-1).message, /Session off-peak protection enabled/);
+    await command.run("/offpeak status");
+    assert.match(toasts.at(-1).message, /Session protection: ON/);
+    await command.run("/offpeak session sometimes");
+    assert.match(toasts.at(-1).message, /Usage: \/offpeak session on\|off/);
+    // Without a focused session the command refuses instead of guessing.
+    tuiContext.ui.router.current = () => ({ type: "home" });
+    await command.run("/offpeak session off");
+    assert.match(toasts.at(-1).message, /No current OpenCode session is focused/);
+    tuiContext.ui.router.current = () => ({ type: "session", sessionID: "tui-session" });
   } finally {
     await dispose?.();
     await rm(root, { recursive: true, force: true });
