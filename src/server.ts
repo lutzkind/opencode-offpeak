@@ -58,6 +58,11 @@ export default Plugin.define({
       interrupt: async (sessionID) => {
         await context.session.interrupt({ sessionID });
       },
+      compact: async (sessionID) => {
+        // Semantic compaction recovery: admit OpenCode's own compaction
+        // again. It is never a replay of the lost request.
+        await context.session.compact({ sessionID });
+      },
     };
     // Hold/resume notifications travel as plugin RPC events on OpenCode's own
     // event stream; a TUI renders them as toasts, and headless runs simply have
@@ -173,7 +178,22 @@ export default Plugin.define({
       try {
         for await (const event of context.event.subscribe({ signal: eventAbort.signal })) {
           if (eventAbort.signal.aborted) break;
+          if (event.type === "session.execution.started") {
+            // Recovery delivery waits while the session is executing:
+            // session.outcome only updates at settlement, so a running turn
+            // still reports its previous outcome.
+            engine.noteExecutionRunning(event.data.sessionID);
+            continue;
+          }
+          if (
+            event.type === "session.execution.succeeded" ||
+            event.type === "session.execution.failed"
+          ) {
+            engine.noteExecutionSettled(event.data.sessionID);
+            continue;
+          }
           if (event.type === "session.execution.interrupted") {
+            engine.noteExecutionSettled(event.data.sessionID);
             await engine.noteExecutionInterrupted({
               sessionID: event.data.sessionID,
               reason: event.data.reason,

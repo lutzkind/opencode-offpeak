@@ -78,6 +78,7 @@ class ManualClock {
 class FakeSessions {
   next = 0;
   prompts = [];
+  compactions = [];
   workers = new Map();
   outcomes = new Map();
   behavior = async () => undefined;
@@ -118,6 +119,9 @@ class FakeSessions {
   }
   async interrupt(sessionID) {
     this.outcomes.set(sessionID, "interrupted");
+  }
+  async compact(sessionID) {
+    this.compactions.push(sessionID);
   }
 }
 
@@ -1432,7 +1436,7 @@ test("an auxiliary model.request hold waits without a primary deferral; a title 
   }
 });
 
-test("compaction and generate model.request holds register no recovery of any kind", async () => {
+test("a compaction model.request hold persists a pending-compaction marker; a generate hold registers nothing", async () => {
   const clock = new ManualClock("2026-10-12T01:30:00Z");
   const h = await harness("2026-10-12T01:30:00Z", { clock });
   const holds = [
@@ -1455,10 +1459,371 @@ test("compaction and generate model.request holds register no recovery of any ki
   ];
   try {
     await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 2);
-    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    // A held compaction persists a semantic pending-compaction marker; a held
+    // generate request has no recovery of its own.
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 1);
+    assert.equal((await h.engine.status(selectedModel)).compactionRecoveryWaiting, 1);
     await clock.advanceTo("2026-10-12T04:00:00Z");
     assert.deepEqual(await Promise.all(holds), ["released", "released"]);
     assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    assert.equal((await h.engine.status(selectedModel)).compactionRecoveryWaiting, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a held compaction that fails closed keeps its marker and admits OpenCode's compaction once at the boundary", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "compaction-recovery-session";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "compaction", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).compactionRecoveryWaiting === 1);
+    // The plugin reloads: the held compaction fails closed, the marker is kept.
+    await h.engine.dispose();
+    assert.equal(await pending, "blocked");
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    // The reloaded turn failed while its compaction was deferred.
+    h.sessions.outcomes.set(sessionID, "failed");
+    await restarted.start();
+    // A settled session is recovered as soon as the instance loads: the
+    // pending compaction is admitted again without waiting for the boundary,
+    // and it holds at the pre-model guard through the window like any other
+    // compaction. Recovery is semantic: no continuation prompt is sent.
+    await until(async () => h.sessions.compactions.length === 1);
+    assert.equal(h.sessions.compactions[0], sessionID);
+    assert.equal(h.sessions.prompts.length, 0);
+    assert.equal((await restarted.status(selectedModel)).compactionRecoveryWaiting, 0);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await clock.advanceTo("2026-10-13T00:00:00Z");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(h.sessions.compactions.length, 1);
+    assert.equal(h.sessions.prompts.length, 0);
+    await restarted.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a live compaction hold with a stale failed outcome releases once without a duplicate admission", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "compaction-race-session";
+  let released = false;
+  const hold = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "compaction", transport: "model" })
+    .then(
+      () => {
+        released = true;
+      },
+      () => {
+        released = true;
+      },
+    );
+  try {
+    // The session's last settled turn failed, but its live hold still owns the
+    // boundary release; recovery must not race it into a second compaction.
+    h.sessions.outcomes.set(sessionID, "failed");
+    await until(async () => (await h.engine.status(selectedModel)).compactionRecoveryWaiting === 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(() => released);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(h.sessions.compactions.length, 0);
+    assert.equal(h.sessions.prompts.length, 0);
+    assert.equal((await h.engine.status(selectedModel)).compactionRecoveryWaiting, 0);
+    await hold;
+  } finally {
+    await h.close();
+  }
+});
+
+test("a live primary hold with a stale failed outcome releases without a duplicate continuation", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "primary-race-session";
+  let released = false;
+  const hold = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+    .then(
+      () => {
+        released = true;
+      },
+      () => {
+        released = true;
+      },
+    );
+  try {
+    h.sessions.outcomes.set(sessionID, "failed");
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    await clock.advanceTo("2026-10-12T04:00:00Z");
+    await until(() => released);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(h.sessions.prompts.length, 0);
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 0);
+    await hold;
+  } finally {
+    await h.close();
+  }
+});
+
+test("a compaction recovery and a primary continuation for one session are admitted together in compact-first order", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "compact-first-session";
+  const order = [];
+  h.sessions.compact = async (id) => {
+    order.push(`compact:${id}`);
+    h.sessions.compactions.push(id);
+    // The recovered compaction completes quickly; the continuation must still
+    // be admitted for the unfinished earlier work instead of being considered
+    // stale.
+    h.sessions.outcomes.set(id, "succeeded");
+  };
+  try {
+    const first = h.engine
+      .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+      .catch(() => "blocked");
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    await h.engine.dispose();
+    assert.equal(await first, "blocked");
+
+    const second = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    await second.start();
+    const held = second
+      .guardModelRequest({ sessionID, ...selectedModel, kind: "compaction", transport: "model" })
+      .catch(() => "blocked");
+    await until(async () => (await second.status(selectedModel)).compactionRecoveryWaiting === 1);
+    await second.dispose();
+    assert.equal(await held, "blocked");
+
+    const third = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    h.sessions.outcomes.set(sessionID, "failed");
+    await third.start();
+    // The settled session's compaction is admitted first, and the primary
+    // continuation is admitted with it — the runner keeps the compaction
+    // ahead, so the earlier unfinished work resumes after the checkpoint.
+    await until(async () => h.sessions.prompts.length === 1);
+    assert.deepEqual(order, [`compact:${sessionID}`]);
+    assert.equal(h.sessions.prompts.length, 1);
+    assert.equal(h.sessions.prompts[0].sessionID, sessionID);
+    assert.equal(h.sessions.prompts[0].text, CONTINUATION);
+    assert.equal((await third.status(selectedModel)).recoveryWaiting, 0);
+    await third.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("a pending compaction waits while the session executes and is admitted once the session is idle", async () => {
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock });
+  const sessionID = "compaction-running-session";
+  const pending = h.engine
+    .guardModelRequest({ sessionID, ...selectedModel, kind: "compaction", transport: "model" })
+    .catch(() => "blocked");
+  try {
+    await until(async () => (await h.engine.status(selectedModel)).compactionRecoveryWaiting === 1);
+    await h.engine.dispose();
+    assert.equal(await pending, "blocked");
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    h.sessions.outcomes.set(sessionID, "failed");
+    // OpenCode reports the session as executing before the instance loads:
+    // the marker waits without being admitted.
+    restarted.noteExecutionRunning(sessionID);
+    await restarted.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(h.sessions.compactions.length, 0);
+    assert.equal((await restarted.status(selectedModel)).compactionRecoveryWaiting, 1);
+    // The turn settled (even successfully): the marker is still admitted as
+    // soon as the settlement wakes the engine — the requested compaction
+    // never ran and is not dropped by another completed turn.
+    h.sessions.outcomes.set(sessionID, "succeeded");
+    restarted.noteExecutionSettled(sessionID);
+    await until(async () => h.sessions.compactions.length === 1);
+    assert.equal(h.sessions.compactions[0], sessionID);
+    assert.equal((await restarted.status(selectedModel)).compactionRecoveryWaiting, 0);
+    await restarted.dispose();
+  } finally {
+    await h.close();
+  }
+});
+
+test("inactivity and superseded interrupts keep a compaction marker; the settled session is then admitted once", async () => {
+  const storage = new MemoryStorage();
+  await storage.set("opencode-offpeak/recovery-v1", {
+    schemaVersion: 1,
+    entries: [
+      {
+        sessionID: "compaction-interrupt-session",
+        providerID: selectedModel.providerID,
+        modelID: selectedModel.modelID,
+        directory: "test-location",
+        heldAt: "2026-10-12T01:30:00.000Z",
+        origin: "pending-compaction",
+      },
+    ],
+  });
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const sessions = new FakeSessions();
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-test-"));
+  const engine = new OffpeakEngine({
+    repository: new QueueRepository(storage),
+    recoveries: new RecoveryRepository(storage),
+    location: "test-location",
+    config: new ConfigRepository({ configPath: path.join(root, "offpeak.json") }),
+    sessions,
+    clock,
+  });
+  const sessionID = "compaction-interrupt-session";
+  try {
+    sessions.outcomes.set(sessionID, "failed");
+    // Block delivery while the interrupt semantics are exercised.
+    engine.noteExecutionRunning(sessionID);
+    await engine.start();
+    assert.equal((await engine.status(selectedModel)).compactionRecoveryWaiting, 1);
+    await engine.noteExecutionInterrupted({ sessionID, reason: "inactivity" });
+    assert.equal((await engine.status(selectedModel)).compactionRecoveryWaiting, 1);
+    await engine.noteExecutionInterrupted({ sessionID, reason: "superseded" });
+    assert.equal((await engine.status(selectedModel)).compactionRecoveryWaiting, 1);
+    // The settled session is admitted exactly once.
+    engine.noteExecutionSettled(sessionID);
+    await until(async () => sessions.compactions.length === 1);
+    assert.equal(sessions.compactions[0], sessionID);
+    assert.equal((await engine.status(selectedModel)).compactionRecoveryWaiting, 0);
+    await engine.dispose();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("primary, title, and compaction recoveries coexist for one session and no guard clears another class", async () => {
+  const storage = new MemoryStorage();
+  const entry = (origin) => ({
+    sessionID: "coexist-session",
+    providerID: selectedModel.providerID,
+    modelID: selectedModel.modelID,
+    directory: "test-location",
+    heldAt: "2026-10-12T01:30:00.000Z",
+    origin,
+  });
+  await storage.set("opencode-offpeak/recovery-v1", {
+    schemaVersion: 1,
+    entries: [entry("deferred"), entry("pending-title"), entry("pending-compaction")],
+  });
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock, storage });
+  try {
+    let status = await h.engine.status(selectedModel);
+    assert.equal(status.recoveryWaiting, 3);
+    assert.equal(status.titleRecoveryWaiting, 1);
+    assert.equal(status.compactionRecoveryWaiting, 1);
+    // A transport guard for a compaction clears only the compaction marker.
+    const compactionGuard = h.engine
+      .guardRequest({
+        sessionID: "coexist-session",
+        ...selectedModel,
+        kind: "compaction",
+        transport: "http",
+      })
+      .catch(() => "blocked");
+    await until(async () => (await h.engine.status(selectedModel)).compactionRecoveryWaiting === 0);
+    status = await h.engine.status(selectedModel);
+    assert.equal(status.recoveryWaiting, 2);
+    assert.equal(status.titleRecoveryWaiting, 1);
+    // A generate request has no recovery class of its own and clears nothing.
+    const generateGuard = h.engine
+      .guardRequest({
+        sessionID: "coexist-session",
+        ...selectedModel,
+        kind: "generate",
+        transport: "http",
+      })
+      .catch(() => "blocked");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 2);
+    // A primary request clears only the primary classes.
+    const primaryGuard = h.engine
+      .guardRequest({
+        sessionID: "coexist-session",
+        ...selectedModel,
+        kind: "primary",
+        transport: "http",
+      })
+      .catch(() => "blocked");
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    status = await h.engine.status(selectedModel);
+    assert.equal(status.titleRecoveryWaiting, 1);
+    // A title request clears only the title marker.
+    const titleGuard = h.engine
+      .guardRequest({
+        sessionID: "coexist-session",
+        ...selectedModel,
+        kind: "title",
+        transport: "http",
+      })
+      .catch(() => "blocked");
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 0);
+    for (const guard of [compactionGuard, generateGuard, primaryGuard, titleGuard]) {
+      guard.catch(() => undefined);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("a user interrupt clears primary, title, and compaction recoveries together", async () => {
+  const storage = new MemoryStorage();
+  const entry = (origin) => ({
+    sessionID: "cancel-session",
+    providerID: selectedModel.providerID,
+    modelID: selectedModel.modelID,
+    directory: "test-location",
+    heldAt: "2026-10-12T01:30:00.000Z",
+    origin,
+  });
+  await storage.set("opencode-offpeak/recovery-v1", {
+    schemaVersion: 1,
+    entries: [entry("deferred"), entry("pending-title"), entry("pending-compaction")],
+  });
+  const clock = new ManualClock("2026-10-12T01:30:00Z");
+  const h = await harness("2026-10-12T01:30:00Z", { clock, storage });
+  try {
+    assert.equal((await h.engine.status(selectedModel)).recoveryWaiting, 3);
+    await h.engine.noteExecutionInterrupted({ sessionID: "cancel-session", reason: "user" });
+    const status = await h.engine.status(selectedModel);
+    assert.equal(status.recoveryWaiting, 0);
+    assert.equal(status.titleRecoveryWaiting, 0);
+    assert.equal(status.compactionRecoveryWaiting, 0);
   } finally {
     await h.close();
   }
@@ -1899,6 +2264,9 @@ test("a delivered primary continuation lets OpenCode name the session; the title
   try {
     await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 2);
     assert.equal((await h.engine.status(selectedModel)).titleRecoveryWaiting, 1);
+    // Both held requests are lost (plugin reload); both markers survive.
+    await h.engine.dispose();
+    assert.deepEqual(await Promise.all(holds), ["blocked", "blocked"]);
     // OpenCode's own promotion of the continuation names the session.
     h.sessions.outcomes.set(sessionID, "interrupted");
     h.sessions.workers.set(sessionID, Promise.resolve());
@@ -1906,13 +2274,22 @@ test("a delivered primary continuation lets OpenCode name the session; the title
       h.sessions.snapshots.set(id, { title: "Continuation title", created });
       return { outcome: "succeeded" };
     };
+    const restarted = new OffpeakEngine({
+      repository: new QueueRepository(h.storage),
+      recoveries: new RecoveryRepository(h.storage),
+      location: "test-location",
+      config: h.config,
+      sessions: h.sessions,
+      clock,
+    });
+    await restarted.start();
     await clock.advanceTo("2026-10-12T04:00:00Z");
     await until(async () => h.sessions.prompts.length === 1);
-    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 0);
+    await until(async () => (await restarted.status(selectedModel)).recoveryWaiting === 0);
     // The continuation carried the title; the marker never generated one itself.
     assert.equal(h.sessions.titles.length, 0);
     assert.equal(h.sessions.snapshots.get(sessionID).title, "Continuation title");
-    await Promise.all(holds);
+    await restarted.dispose();
   } finally {
     await h.close();
   }
@@ -2099,7 +2476,9 @@ test("auxiliary title, compaction, and generate holds never announce a notificat
       ),
   );
   try {
-    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 1);
+    // The title hold persists a pending-title marker; the compaction hold
+    // persists a pending-compaction marker; the generate hold has none.
+    await until(async () => (await h.engine.status(selectedModel)).recoveryWaiting === 2);
     assert.deepEqual(h.notifications, []);
     // A title hold is released immediately (it has no peak window for this model
     // and never waits); the others stay held until the boundary.

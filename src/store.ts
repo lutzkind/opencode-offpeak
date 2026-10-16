@@ -50,6 +50,11 @@ export interface QueueDocument {
  *   title. Recovery is semantic (OpenCode's own title generation is invoked
  *   again; no provider request is replayed) and never overwrites a title the
  *   session already has.
+ * - "pending-compaction": a compaction request deferred before its provider
+ *   attempt. Recovery is semantic — OpenCode's own compaction is requested
+ *   again at the next allowed window, and its runner keeps a pending
+ *   compaction ahead of any queued prompt, so compact-first ordering is
+ *   preserved without replaying the original request.
  */
 export interface RecoveryEntry {
   sessionID: string;
@@ -60,7 +65,7 @@ export interface RecoveryEntry {
   origin?: RecoveryOrigin;
 }
 
-export type RecoveryOrigin = "retry-failure" | "deferred" | "pending-title";
+export type RecoveryOrigin = "retry-failure" | "deferred" | "pending-title" | "pending-compaction";
 
 export interface RecoveryDocument {
   schemaVersion: 1;
@@ -236,7 +241,8 @@ function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
     value.origin !== undefined &&
     value.origin !== "retry-failure" &&
     value.origin !== "deferred" &&
-    value.origin !== "pending-title"
+    value.origin !== "pending-title" &&
+    value.origin !== "pending-compaction"
   ) {
     throw new Error(`Stored recovery entry ${index} has an invalid origin.`);
   }

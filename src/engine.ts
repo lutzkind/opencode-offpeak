@@ -35,6 +35,8 @@ export interface SessionDriver {
   wait(sessionID: string): Promise<void>;
   get(sessionID: string): Promise<SessionSnapshot>;
   interrupt(sessionID: string): Promise<void>;
+  /** Admits OpenCode's own compaction for the session (semantic recovery, never a replay). */
+  compact(sessionID: string): Promise<void>;
 }
 
 export interface EngineClock {
@@ -81,6 +83,8 @@ export interface EngineStatus {
   recoveryWaiting: number;
   /** Subset of recoveryWaiting: sessions whose automatic title is still pending. */
   titleRecoveryWaiting: number;
+  /** Subset of recoveryWaiting: sessions whose held compaction is still pending. */
+  compactionRecoveryWaiting: number;
   failed: number;
   tasks: OffpeakTask[];
   configPath: string;
@@ -94,8 +98,8 @@ export interface GuardInput {
   transport: "http" | "websocket" | "model";
   /**
    * OpenCode session request kind ("primary", "compaction", "title", "generate")
-   * when the guard runs from the pre-model `model.request` hook. Transport
-   * guards do not carry a kind.
+   * when the host provides it. The pre-model `model.request` hook always
+   * carries it; the transport hooks forward the kind in OpenCode 2.0.26+.
    */
   kind?: string;
 }
@@ -142,6 +146,8 @@ const RECOVERY_SETTLE_CAP_MS = 5 * 60_000;
 const PRIMARY_RECOVERY_ORIGINS = [undefined, "retry-failure", "deferred"] as const;
 /** The semantic "this session still needs its automatic title" marker. */
 const TITLE_RECOVERY_ORIGIN = "pending-title" as const;
+/** The semantic "this session still needs its held compaction" marker. */
+const COMPACTION_RECOVERY_ORIGIN = "pending-compaction" as const;
 
 export interface RetryFailureInput {
   sessionID: string;
@@ -288,6 +294,19 @@ export class OffpeakEngine {
   #nextHoldID = 0;
   #cancelledHolds = 0;
   #refusedRequests = 0;
+  /**
+   * Sessions with a live hold in this instance. Recovery delivery waits for
+   * the hold to end: a session whose request is still parked owns its turn,
+   * and admitting a recovery beside a live release could duplicate it.
+   */
+  readonly #activeHolds = new Map<string, number>();
+  /**
+   * Sessions OpenCode reports as executing (between `session.execution.started`
+   * and its terminal event). `session.outcome` only updates at settlement, so
+   * a running turn still reports its previous outcome; recovery waits for the
+   * turn to settle before it evaluates an entry again.
+   */
+  readonly #running = new Set<string>();
   readonly #recoveriesRepo: RecoveryRepository | undefined;
   readonly #location: string;
   /**
@@ -548,6 +567,9 @@ export class OffpeakEngine {
       titleRecoveryWaiting: [...this.#recoveries.values()].filter(
         (entry) => entry.origin === TITLE_RECOVERY_ORIGIN,
       ).length,
+      compactionRecoveryWaiting: [...this.#recoveries.values()].filter(
+        (entry) => entry.origin === COMPACTION_RECOVERY_ORIGIN,
+      ).length,
       failed: tasks.filter((task) => task.state === "FAILED").length,
       tasks,
       configPath: settings.path,
@@ -557,12 +579,17 @@ export class OffpeakEngine {
 
   async guardRequest(input: GuardInput): Promise<void> {
     // Any fresh request for this session supersedes a pending continuation of
-    // the same class. A title request only supersedes a pending title; it must
-    // not clear a primary deferral that another held request still owns, and a
-    // primary request must not clear a title that is still being held.
+    // the same class. A title request only supersedes a pending title; a
+    // compaction request only supersedes a pending compaction; neither may
+    // clear a primary deferral that another held request still owns. A
+    // transport guard without a kind is a legacy host and keeps the original
+    // primary-only behavior.
     if (input.kind === "title")
       await this.#removeRecovery(input.sessionID, [TITLE_RECOVERY_ORIGIN]);
-    else await this.#removeRecovery(input.sessionID, PRIMARY_RECOVERY_ORIGINS);
+    else if (input.kind === "compaction")
+      await this.#removeRecovery(input.sessionID, [COMPACTION_RECOVERY_ORIGIN]);
+    else if (input.kind === "primary" || input.kind === undefined)
+      await this.#removeRecovery(input.sessionID, PRIMARY_RECOVERY_ORIGINS);
     await this.#guardPricing(input, undefined);
   }
 
@@ -583,6 +610,13 @@ export class OffpeakEngine {
    * OpenCode's own title generation for a session that still needs a title,
    * and it is cleared without any request when the session was titled (or
    * manually renamed) while it waited.
+   *
+   * A held compaction request (kind `compaction`, manual or automatic)
+   * persists a semantic `pending-compaction` marker. If the hold is lost
+   * (plugin or server shutdown, inactivity), recovery admits OpenCode's own
+   * compaction again at the next allowed window; the runner keeps a pending
+   * compaction ahead of queued prompts, so a prompt sent behind a
+   * compact-first workflow still runs after the compaction.
    */
   async guardModelRequest(input: GuardInput): Promise<void> {
     const origin: RecoveryOrigin | undefined =
@@ -590,7 +624,9 @@ export class OffpeakEngine {
         ? "deferred"
         : input.kind === "title"
           ? TITLE_RECOVERY_ORIGIN
-          : undefined;
+          : input.kind === "compaction"
+            ? COMPACTION_RECOVERY_ORIGIN
+            : undefined;
     if (origin !== undefined) await this.#removeRecovery(input.sessionID, [origin]);
     await this.#guardPricing(input, origin);
   }
@@ -679,6 +715,7 @@ export class OffpeakEngine {
       this.#requestPump();
     }
     const hold = task === undefined ? this.#beginHold(input) : undefined;
+    this.#trackActiveHold(input.sessionID);
     const abortEpoch = this.#holdAborts.get(input.sessionID) ?? 0;
     try {
       while (!this.#disposed) {
@@ -745,7 +782,36 @@ export class OffpeakEngine {
       if (hold !== undefined) this.#endHold(hold);
       if (waiter !== undefined) this.#interactiveWaiters.delete(waiter);
       this.#announcedHolds.delete(input.sessionID);
+      this.#untrackActiveHold(input.sessionID);
     }
+  }
+
+  #trackActiveHold(sessionID: string): void {
+    this.#activeHolds.set(sessionID, (this.#activeHolds.get(sessionID) ?? 0) + 1);
+  }
+
+  #untrackActiveHold(sessionID: string): void {
+    const count = (this.#activeHolds.get(sessionID) ?? 0) - 1;
+    if (count > 0) this.#activeHolds.set(sessionID, count);
+    else this.#activeHolds.delete(sessionID);
+    // A finished hold can free a recovery entry for this session.
+    this.#requestPump();
+  }
+
+  /**
+   * OpenCode started executing the session. Recovery treats a running session
+   * as unsettled until its terminal event arrives.
+   */
+  noteExecutionRunning(sessionID: string): void {
+    if (this.#disposed) return;
+    this.#running.add(sessionID);
+  }
+
+  /** OpenCode settled the session's execution; recovery may evaluate it again. */
+  noteExecutionSettled(sessionID: string): void {
+    this.#running.delete(sessionID);
+    // The settlement can free a recovery entry for this session.
+    this.#requestPump();
   }
 
   /**
@@ -1000,8 +1066,9 @@ export class OffpeakEngine {
   /**
    * Called when OpenCode reports that a session's execution was interrupted.
    *
-   * - "user": the user cancelled. A pending deferral is cleared and the hold is
-   *   aborted so nothing continues automatically.
+   * - "user": the user cancelled. Pending deferrals (primary, title, and
+   *   compaction) are cleared and the hold is aborted so nothing continues
+   *   automatically.
    * - "inactivity": OpenCode's location-activity sweep ended the execution. The
    *   hold is aborted and a deferral (if present) is kept so the same session
    *   continues once pricing allows.
@@ -1011,10 +1078,15 @@ export class OffpeakEngine {
   async noteExecutionInterrupted(input: { sessionID: string; reason: string }): Promise<void> {
     if (this.#disposed) return;
     if (input.reason === "user") {
-      // The user cancelled the work. Neither the same-session continuation nor
-      // a pending automatic title is delivered for abandoned work; OpenCode
-      // itself also generates no title without new input.
-      await this.#removeRecovery(input.sessionID, ["deferred", TITLE_RECOVERY_ORIGIN]);
+      // The user cancelled the work. Neither the same-session continuation, a
+      // pending automatic title, nor a pending compaction is delivered for
+      // abandoned work; OpenCode itself also generates no title without new
+      // input.
+      await this.#removeRecovery(input.sessionID, [
+        "deferred",
+        TITLE_RECOVERY_ORIGIN,
+        COMPACTION_RECOVERY_ORIGIN,
+      ]);
     }
     if (
       input.reason !== "user" &&
@@ -1099,10 +1171,13 @@ export class OffpeakEngine {
    * so the existing signal and boundary timer drive it; there is no polling
    * loop.
    *
-   * Primary continuations are delivered first so a same-session continuation
-   * makes the session busy again before any pending title is considered: the
-   * continuation's input promotion triggers OpenCode's own title generation,
-   * and the title marker is then cleared without sending anything.
+   * Groups flush in native order: a pending compaction is admitted first, so
+   * OpenCode's runner keeps it ahead of any prompt already queued behind it
+   * (compact-first stays compact-first across the loss). Primary continuations
+   * follow so a same-session continuation makes the session busy again before
+   * any pending title is considered: the continuation's input promotion
+   * triggers OpenCode's own title generation, and the title marker is then
+   * cleared without sending anything.
    */
   async #flushRecoveries(): Promise<void> {
     if (this.#disposed) return;
@@ -1116,16 +1191,62 @@ export class OffpeakEngine {
     const entries = [...this.#recoveries.values()].filter(
       (entry) => entry.directory === this.#location,
     );
-    for (const entry of entries) {
-      if (entry.origin === TITLE_RECOVERY_ORIGIN) continue;
+    const pendingCompactions = entries.filter(
+      (entry) => entry.origin === COMPACTION_RECOVERY_ORIGIN,
+    );
+    const primaryEntries = entries.filter(
+      (entry) =>
+        entry.origin !== COMPACTION_RECOVERY_ORIGIN && entry.origin !== TITLE_RECOVERY_ORIGIN,
+    );
+    const titleEntries = entries.filter((entry) => entry.origin === TITLE_RECOVERY_ORIGIN);
+    // A compaction admitted in this pass and a primary continuation for the
+    // same session belong together: the runner admits the compaction first and
+    // the continuation behind it, so the earlier unfinished work resumes in
+    // native order instead of being considered stale once the compaction
+    // succeeds.
+    const compactionAdmitted = new Set<string>();
+    for (const entry of pendingCompactions) {
       const decision = evaluatePricing(
         settings.config.policies,
         entry.providerID,
         entry.modelID,
         this.#clock.now(),
       );
-      if (settings.config.enabled && decision.allowed) {
-        const retryAt = await this.#deliverRecovery(entry);
+      // A compaction recovery is admitted as soon as the session is settled:
+      // the re-triggered compaction request itself holds at the pre-model
+      // guard through the peak window (zero provider traffic), and OpenCode's
+      // runner keeps a pending compaction ahead of queued prompts, so
+      // compact-first ordering survives without waiting for the boundary. In
+      // queue/guard modes a re-trigger during peak would fail closed, so it
+      // waits for the allowed window.
+      const deliverable =
+        settings.config.enabled && (settings.config.mode === "auto" || decision.allowed);
+      if (deliverable) {
+        const result = await this.#deliverCompactionRecovery(entry);
+        if (result.retryAt !== undefined)
+          next = next === undefined ? result.retryAt : Math.min(next, result.retryAt);
+        if (result.admitted) compactionAdmitted.add(entry.sessionID);
+        continue;
+      }
+      if (settings.config.enabled && decision.nextTransition !== undefined) {
+        next =
+          next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
+      }
+    }
+    for (const entry of primaryEntries) {
+      const decision = evaluatePricing(
+        settings.config.policies,
+        entry.providerID,
+        entry.modelID,
+        this.#clock.now(),
+      );
+      // A continuation that belongs with a compaction admitted in this pass is
+      // delivered with it: the runner keeps the compaction ahead, so the
+      // continuation waits behind the checkpoint while the peak window holds
+      // both.
+      const forced = compactionAdmitted.has(entry.sessionID);
+      if (settings.config.enabled && (forced || decision.allowed)) {
+        const retryAt = await this.#deliverRecovery(entry, { force: forced });
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
         continue;
       }
@@ -1134,8 +1255,7 @@ export class OffpeakEngine {
           next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
       }
     }
-    for (const entry of entries) {
-      if (entry.origin !== TITLE_RECOVERY_ORIGIN) continue;
+    for (const entry of titleEntries) {
       const decision = evaluatePricing(
         settings.config.policies,
         entry.providerID,
@@ -1156,7 +1276,10 @@ export class OffpeakEngine {
   }
 
   /** Returns a timestamp to retry at when the session has not settled yet. */
-  async #deliverRecovery(entry: RecoveryEntry): Promise<number | undefined> {
+  async #deliverRecovery(
+    entry: RecoveryEntry,
+    options?: { force?: boolean },
+  ): Promise<number | undefined> {
     let session: SessionSnapshot;
     try {
       session = await this.#sessions.get(entry.sessionID);
@@ -1165,21 +1288,33 @@ export class OffpeakEngine {
       await this.#removeRecovery(entry.sessionID, [entry.origin]);
       return undefined;
     }
-    if (session.outcome === "succeeded") {
-      await this.#removeRecovery(entry.sessionID, [entry.origin]);
-      return undefined;
-    }
-    if (session.outcome === undefined) {
-      const firstCheck = this.#recoveryChecks.get(entry.sessionID) ?? this.#clock.now();
-      this.#recoveryChecks.set(entry.sessionID, firstCheck);
-      if (this.#clock.now() - firstCheck < RECOVERY_SETTLE_CAP_MS) {
-        return this.#clock.now() + RECOVERY_SETTLE_DELAY_MS;
+    // A forced delivery belongs to a session whose compaction was just
+    // admitted in the same pass: the session is intentionally busy again, so
+    // the pending continuation is not stale.
+    if (!options?.force) {
+      // A running session or a live hold owns its turn: session.outcome only
+      // updates at settlement, so waiting avoids racing a live release into a
+      // duplicate continuation. Ending the hold or settling the execution
+      // wakes the pump again, so this pass can simply skip the entry.
+      if (this.#running.has(entry.sessionID) || this.#activeHolds.has(entry.sessionID)) {
+        return undefined;
       }
-      await this.#removeRecovery(entry.sessionID, [entry.origin]);
-      this.#onError(
-        new Error(`Offpeak recovery for ${entry.sessionID} skipped: the session did not settle.`),
-      );
-      return undefined;
+      if (session.outcome === "succeeded") {
+        await this.#removeRecovery(entry.sessionID, [entry.origin]);
+        return undefined;
+      }
+      if (session.outcome === undefined) {
+        const firstCheck = this.#recoveryChecks.get(entry.sessionID) ?? this.#clock.now();
+        this.#recoveryChecks.set(entry.sessionID, firstCheck);
+        if (this.#clock.now() - firstCheck < RECOVERY_SETTLE_CAP_MS) {
+          return this.#clock.now() + RECOVERY_SETTLE_DELAY_MS;
+        }
+        await this.#removeRecovery(entry.sessionID, [entry.origin]);
+        this.#onError(
+          new Error(`Offpeak recovery for ${entry.sessionID} skipped: the session did not settle.`),
+        );
+        return undefined;
+      }
     }
     // Remove before sending so the continuation is delivered at most once.
     await this.#removeRecovery(entry.sessionID, [entry.origin]);
@@ -1192,6 +1327,64 @@ export class OffpeakEngine {
       this.#onError(error);
     }
     return undefined;
+  }
+
+  /**
+   * Delivers a pending-compaction recovery. This is a semantic watch, not a
+   * replay: OpenCode's own compaction is admitted again for the session, and
+   * its runner keeps a pending compaction ahead of any prompt already queued
+   * behind it, so compact-first ordering survives a lost hold (shutdown,
+   * reload, or the inactivity sweep).
+   *
+   * The entry is removed before admission so the compaction is requested at
+   * most once. A session that already succeeded after the lost hold, or never
+   * settles, is dropped without admission, exactly like a primary
+   * continuation.
+   */
+  async #deliverCompactionRecovery(
+    entry: RecoveryEntry,
+  ): Promise<{ retryAt?: number; admitted: boolean }> {
+    let session: SessionSnapshot;
+    try {
+      session = await this.#sessions.get(entry.sessionID);
+    } catch (error) {
+      this.#onError(error);
+      await this.#removeRecovery(entry.sessionID, [COMPACTION_RECOVERY_ORIGIN]);
+      return { admitted: false };
+    }
+    // A running session or a live hold owns its turn: session.outcome only
+    // updates at settlement, so waiting avoids racing a live release into a
+    // duplicate compaction. Ending the hold or settling the execution wakes
+    // the pump again, so this pass can simply skip the entry.
+    if (this.#running.has(entry.sessionID) || this.#activeHolds.has(entry.sessionID)) {
+      return { admitted: false };
+    }
+    // Unlike a primary continuation, the marker is not dropped when the
+    // session has since succeeded: the user asked for a compaction that never
+    // ran, so it is admitted as soon as the session is settled and idle.
+    if (session.outcome === undefined) {
+      const firstCheck = this.#recoveryChecks.get(entry.sessionID) ?? this.#clock.now();
+      this.#recoveryChecks.set(entry.sessionID, firstCheck);
+      if (this.#clock.now() - firstCheck < RECOVERY_SETTLE_CAP_MS) {
+        return { retryAt: this.#clock.now() + RECOVERY_SETTLE_DELAY_MS, admitted: false };
+      }
+      await this.#removeRecovery(entry.sessionID, [COMPACTION_RECOVERY_ORIGIN]);
+      this.#onError(
+        new Error(
+          `Offpeak compaction recovery for ${entry.sessionID} skipped: the session did not settle.`,
+        ),
+      );
+      return { admitted: false };
+    }
+    // Remove before admitting so the compaction is requested at most once.
+    await this.#removeRecovery(entry.sessionID, [COMPACTION_RECOVERY_ORIGIN]);
+    try {
+      await this.#sessions.compact(entry.sessionID);
+    } catch (error) {
+      this.#onError(error);
+      return { admitted: false };
+    }
+    return { admitted: true };
   }
 
   /**
