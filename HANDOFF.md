@@ -12,6 +12,24 @@
 
 **Coexistence note.** This work was developed in a git worktree (`/root/agent-tmp/opencode/offpeak-hold-cancel`) because another agent was concurrently editing the canonical checkout's `src/store.ts`/`src/engine.ts` for the pending-compaction recovery. Nothing of that in-flight work was touched; the canonical checkout was restored to exactly the concurrent agent's state before this branch was cut.
 
+## 2026-10-16 held-request UI investigation (no code change; v0.1.6 unchanged)
+
+**Reported symptom:** during a peak window, an interactive prompt is correctly held (toast shown, zero provider traffic), but OpenCode's normal "building/working" animation keeps running; later it stops by itself; the persisted hold remains healthy; at off-peak the same session continues.
+
+**Baseline verified live (2026-10-16):** OpenCode CLI and background service **2.0.30** — the host was upgraded from 2.0.27 at 03:49:24Z (`updated OpenCode from=2.0.27 to=2.0.30 method=curl`, service replaced with `reason=version-mismatch previousVersion=2.0.27`; the old 2.0.27 service process still runs and was not touched). Plugin spec `git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6`, live commit `1fe61d2f5979f6f4df32208df7ed3f1cea8c9ae6` active (server+tui). `/offpeak status`: ON / `auto`, queue/recovery/titleRecovery/interactive all 0; Go DeepSeek PEAK policy and Zen flat-priced pass-through correct. Repository `d287f5b` clean; v0.1.6 the latest release; no open PRs/issues; lint, typecheck, **99/99 tests**, and `npm pack --dry-run` all pass.
+
+**Exact cause (source-traced against upstream `anomalyco/opencode` v2.0.27 and v2.0.30 — every relevant file byte-identical between the tags):** OpenCode's TUI shows the animated spinner + `esc interrupt` in the prompt footer exactly while `data.session.status(sessionID) === "running"` (`packages/tui/src/component/prompt/index.tsx`); that status is set only by `session.execution.started` and cleared only by `session.execution.succeeded|failed|interrupted` (`packages/client/src/solid/data.ts`). The plugin's hold runs inside `SessionModelRequest.prepare` (`packages/core/src/session/model-request.ts`), i.e. **after** the drain started, and no settlement event can exist while the hook promise waits — so the animation is OpenCode truthfully reporting an active execution with zero provider traffic. `DataSessionStatus` is exactly `"idle" | "running"`; no waiting/parked session state exists in the client, plugin API, protocol, or TUI.
+
+**Why it eventually stops:** (a) normally the boundary release continues the **same execution** — the animation does not stop, it flows into the real request; (b) OpenCode's 60-minute location-activity sweep interrupts the execution with `reason=inactivity` (`packages/core/src/location-activity.ts`, TTL 60 min, sweep 1 min) — the "stops after some time by itself" path — and the plugin keeps the deferral, delivering the continuation at the next allowed window; (c) a service shutdown/reload ends the execution (live incident below); (d) a user cancel (double Escape) ends it and clears the deferral. All four paths were reproduced with the real TUI against a local fixture provider (zero paid traffic) on 2.0.30 and cross-checked on the real 2.0.27 binary; details and raw evidence in the shared handoff.
+
+**Live incident reconstruction:** session `ses_ebd3c5c20ffeLytWmmLXcXMO0i` ("Greeting", prompt `say hi` at 03:31:20Z inside the 01:00–04:00Z peak window) was held; the 2.0.27→2.0.30 upgrade replaced the service at 03:49:38Z and 4 held sessions failed closed (`PricingBlockedError: Offpeak plugin is shutting down; request blocked.`); the persisted deferrals continued the same sessions at the 04:00:00Z boundary. The observed "animation stops by itself" was the service replacement, followed by the correct same-session continuation.
+
+**Decision — no code change (v0.1.6 remains canonical).** Every supported mechanism was inspected in source before rejection: `session.interrupt` is the only API that ends the `running` state but it terminates the turn with a `reason=user` interrupt (indistinguishable from a user cancel; would clear the deferral) and requires the synthetic `Continue the task…` prompt — a cancel/restart, not a parking state; holding the `prompt` admission hook would keep the session idle but the prompt is not durable before `admission.admit` and its prepare region is interruption-sensitive (`Effect.uninterruptibleMask(restore)`), regressing durable deferral and reload/restart recovery; a TUI `replace` slot takeover of `prompt.footer.status` is public API but suppresses the boundary's default content *and every claim inside it* for **every mounted footer** while registered, including unrelated sessions' location/`esc`/move state and the built-in `/btw` indicator, with no way to re-render the suppressed originals — a broad UI takeover, not a state transition. No fragile workaround was implemented; the hold toast (15 s, by design) and `/offpeak status` (`Interactive: N request(s) waiting for off-peak`) remain the authoritative waiting indicators.
+
+**Documentation updated:** the "Interactive message waits at peak" section of `docs/troubleshooting.md` now states the platform limitation, the transient-toast/persistent-status guidance, and the exact stop paths. No source, test, configuration, or release change; v0.1.6 tag and artifacts untouched.
+
+**Remaining limitation (platform, not plugin):** OpenCode 2.0.26–2.0.30 has no supported waiting session/execution state, so a held request necessarily looks "running" in the TUI until its execution settles. Revisit if OpenCode adds a parked/waiting execution state or a per-instance footer override.
+
 ## Release status
 
 `opencode-offpeak` v0.1.6 is the canonical release:
@@ -297,7 +315,7 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
 - Package: `opencode-offpeak@0.1.6`, MIT
-- Verified CLI: OpenCode v2.0.26 and v2.0.27
+- Verified CLI: OpenCode v2.0.26, v2.0.27 and v2.0.30
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
 - GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
