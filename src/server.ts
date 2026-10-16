@@ -2,14 +2,14 @@ import { Plugin } from "@opencode/plugin";
 import { assertSupportedOpenCode } from "./compat.js";
 import { ConfigRepository } from "./config.js";
 import { type EngineNotification, OffpeakEngine, type SessionDriver } from "./engine.js";
-import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
 import {
   isRefusedHandshakeUrl,
   isRefusedRequestUrl,
-  REFUSED_HEADER,
   REFUSED_HANDSHAKE_URL,
+  REFUSED_HEADER,
   refusedRequest,
 } from "./refused.js";
+import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
 import { QueueRepository, RecoveryRepository } from "./store.js";
 
 export default Plugin.define({
