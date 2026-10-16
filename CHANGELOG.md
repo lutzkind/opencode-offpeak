@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 - 2026-10-16
+
+- **A session can hold several requests at once, and cancelling cancels all of them.** OpenCode prepares auxiliary requests (the automatic title, generate, compaction) concurrently with the agent loop, so one session can have more than one request parked. The held-request bookkeeping is now per request rather than per session: `cancelHold` cancels every request of that session that is still waiting, each gets its own one-shot refusal at the transport boundary, and none can be left behind to dispatch at the next allowed window. A refusal is matched by provider, model, and request kind, and only a fresh request *of the same kind* supersedes an un-consumed refusal.
+- Evidence: 107 tests pass, including a new case with a held primary request and a held title request cancelled together, each refusal consumed independently.
+- Found while verifying the consuming plugin end to end: the title request and the prompt were both parked, only the newest hold was cancellable, and the title's hold could still have dispatched paid work at the window.
+
 ## 0.1.7 - 2026-10-16
 
 - **Generic hold cancellation (`cancelHold`).** A held request can now be cancelled by whoever owns the routing decision that made it obsolete, through one new RPC method on the existing `opencode-offpeak` channel: input `{ sessionID, reason? }`, output `{ cancelled, state, model? }`. It is generic infrastructure — the plugin learns nothing about the caller — and it removes the need for a session interruption: no `session.interrupt`, no synthetic continuation prompt, no lost turn. `cancelled: true` means the hold lost the race and the request will be refused; `state: "committed"` means the dispatch decision had already been taken and the caller must wait for the next safe boundary; `state: "none"` means nothing was parked.

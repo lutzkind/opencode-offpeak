@@ -186,6 +186,38 @@ test("cancelling a parked request refuses it at the transport boundary instead o
   }
 });
 
+test("cancelling a session cancels every parked request it holds", async () => {
+  const clock = new ManualClock("2026-10-12T02:00:00Z");
+  const h = await harness("2026-10-12T02:00:00Z", { clock });
+  try {
+    // OpenCode prepares the automatic title concurrently with the agent loop.
+    const primary = park(h.engine, "cancel-concurrent", "primary");
+    const title = park(h.engine, "cancel-concurrent", "title");
+    await until(async () => (await h.engine.status(selectedModel)).interactiveHolds === 2);
+
+    const result = await h.engine.cancelHold({ sessionID: "cancel-concurrent" });
+    assert.equal(result.cancelled, true);
+    await primary.settled;
+    await title.settled;
+
+    const status = await h.engine.status(selectedModel);
+    assert.equal(status.interactiveHolds, 0);
+    assert.equal(status.armedRefusals, 2, "both requests are refused, not just the newest");
+    const consume = (kind) =>
+      h.engine.consumeRefusal({
+        sessionID: "cancel-concurrent",
+        providerID: "opencode-go",
+        modelID: "deepseek-v4.1-flash",
+        kind,
+      });
+    assert.equal(consume("primary"), true);
+    assert.equal(consume("title"), true);
+    assert.equal(consume("primary"), false);
+  } finally {
+    await h.close();
+  }
+});
+
 test("a refusal never leaks onto a different request", async () => {
   const clock = new ManualClock("2026-10-12T02:00:00Z");
   const h = await harness("2026-10-12T02:00:00Z", { clock });
