@@ -30,7 +30,7 @@
 
 Evidence-integrity note: the fixture harness now uses a local-only provider id (`offpeak-fixture`) because models.dev today began serving a real `opencode-go` provider entry, which shadowed the fixture endpoint in fresh isolated runs; the fix is confined to the harness and prevents any fixture run from resolving a real provider (no fixture run ever reached a paid endpoint: the requests were rejected without credentials).
 
-**Release and live state.** v0.1.9 (PR, CI, GitHub release tarball) installed live on the shared service; `/api/plugin` reports the v0.1.9 tag commit; `/offpeak status` ON/`auto` with queue, recovery, titleRecovery, compactionRecovery and failed all 0; production policies and provider configuration restored; no fixture/test state remains in the live environment. The work was developed on branch `pending-compaction` rebased onto v0.1.8 (v0.1.7/v0.1.8 shipped concurrently by the hold-cancellation pass; both feature sets are present in v0.1.9, and both suites pass together).
+**Release and live state.** v0.1.9 — merge `b7c4bd1dfb5c4aab012d607cceb24b472e3fbe43` (PR #14; CI run `38889845824` passed on `ubuntu-latest` and `macos-latest`), tag object `eb78b72b6ddd8fbc502ba28a6756e5201dacb68c`, tarball `opencode-offpeak-0.1.9.tgz` SHA-256 `d6abcb1a4f8e2bf2e633f68defdb3444e2a665d984486bb968c1d46826a04059` — was installed live on the shared service (`/api/plugin` version `b7c4bd1d…`, server+tui active, `opencode reload` applied). `/offpeak status` is ON/`auto` with queue, waiting, interactive, recovery, titleRecovery, compactionRecovery and failed all 0; the live OFF_PEAK smoke replied `offpeak v0.1.9 live ok` and its session was removed afterwards. The production policies and provider configuration are unchanged from v0.1.8 (the stored policy file was never edited). The work was developed on branch `pending-compaction` rebased onto v0.1.8 (v0.1.7/v0.1.8 shipped concurrently by the hold-cancellation pass; both feature sets are present in v0.1.9, and both suites pass together: 115/115).
 
 **Remaining limitation.** A compaction that finished its failed attempt on a disposed instance still records that one failed attempt (fail-closed by design); the recovery then completes the compaction semantically at the next opportunity. A plugin/server shutdown cannot avoid that terminal record, because OpenCode offers no "parked" execution state (see the held-request UI investigation above).
 
@@ -66,18 +66,19 @@ Evidence-integrity note: the fixture harness now uses a local-only provider id (
 
 ## Release status
 
-`opencode-offpeak` v0.1.6 is the canonical release:
+`opencode-offpeak` v0.1.9 is the canonical release:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.9
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.6`
-- Tag commit: `1fe61d2f5979f6f4df32208df7ed3f1cea8c9ae6` (annotated tag object `199ce646facb4a3f7adb4e3cc6b84e1ac232bfaf`; merge of PR #11 `1fe61d2`)
-- Implementation commit: `887a352` (`feat(providers): direct DeepSeek API policy, verified Zen semantics, held-request feedback`)
-- Attached `opencode-offpeak-0.1.6.tgz` SHA-256: `67704376b1f2aafc7eebbe1b7b9ff0c39f0e89b69b2c8d773fdd25c95467043f` (reproduced byte-for-byte from a clean `v0.1.6` tag archive + `npm ci` + `npm run compile` + `npm pack`; the downloaded release asset hash matches)
-- CI: PR #11 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38749826267`)
-- The `v0.1.0` through `v0.1.5` tags were not mutated and remain installable.
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.9`
+- Tag commit: `b7c4bd1dfb5c4aab012d607cceb24b472e3fbe43` (annotated tag object `eb78b72b6ddd8fbc502ba28a6756e5201dacb68c`; merge of PR #14 `63bfc77`/`6a3e323`)
+- Implementation commits: `6a3e323` (`feat: durable pending-compaction recovery for held compaction requests`), `63bfc77` (release prep and docs)
+- Attached `opencode-offpeak-0.1.9.tgz` SHA-256: `d6abcb1a4f8e2bf2e633f68defdb3444e2a665d984486bb968c1d46826a04059` (reproduced byte-for-byte from a clean `v0.1.9` tag archive + `npm ci` + `npm run compile` + `npm pack`; the downloaded release asset digest matches)
+- CI: PR #14 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38889845824`)
+- Live install: `/root/.config/opencode/opencode.json` pins exactly `#v0.1.9` (the `#v0.1.8` entry was removed with `opencode plugin remove`); `/api/plugin` reports version `b7c4bd1dfb5c4aab012d607cceb24b472e3fbe43` with server+TUI active; `opencode reload` applied. `/offpeak status`: ON, `auto`, queue/waiting/interactive/recovery/titleRecovery/compactionRecovery/failed all 0; Go policy `deepseek-opencode-go` OFF_PEAK-allowed, Zen `UNTRACKED` with the flat-price note. Live OFF_PEAK smoke at 10:52Z replied `offpeak v0.1.9 live ok`; the test session was removed afterwards through the supported session API, leaving `session_v2`, `session_message`, queue and recovery clean.
+- The `v0.1.0` through `v0.1.8` tags were not mutated and remain installable.
 
 ## 2026-10-15 v0.1.6 — direct DeepSeek API, verified Zen semantics, held-request feedback
 
