@@ -270,15 +270,19 @@ export class OffpeakEngine {
    */
   readonly #holdAborts = new Map<string, number>();
   /**
-   * Requests parked by an interactive hold, keyed by session. At most one hold
-   * exists per session, so the entry is the session's authoritative request
-   * state while it waits.
+   * Requests parked by an interactive hold, keyed by session. OpenCode prepares
+   * auxiliary requests (for example the automatic title) concurrently with the
+   * agent loop, so a session can hold several requests at once and each of them
+   * is cancellable.
    */
-  readonly #holds = new Map<string, HeldRequest>();
-  /** Armed refusals, keyed by session, consumed once at the transport boundary. */
-  readonly #refusals = new Map<string, RefusedRequest>();
+  readonly #holds = new Map<string, Map<number, HeldRequest>>();
+  /** Armed refusals, keyed by session, consumed once each at the boundary. */
+  readonly #refusals = new Map<string, RefusedRequest[]>();
   /** Consumed refusals, used to keep this plugin's own retry recovery out of the way. */
-  readonly #consumedRefusals = new Map<string, { at: number; providerID: string; modelID: string }>();
+  readonly #consumedRefusals = new Map<
+    string,
+    { at: number; providerID: string; modelID: string }
+  >();
   /** Last settled hold per session, so a late `cancelHold` can report the truth. */
   readonly #holdOutcomes = new Map<string, { state: string; at: number }>();
   #nextHoldID = 0;
@@ -536,8 +540,8 @@ export class OffpeakEngine {
         : {}),
       waiting: tasks.filter((task) => task.state === "WAITING_OFFPEAK").length,
       interactiveWaiting: this.#interactiveWaiters.size,
-      interactiveHolds: this.#holds.size,
-      armedRefusals: this.#refusals.size,
+      interactiveHolds: this.holdDiagnostics().interactiveHolds,
+      armedRefusals: this.holdDiagnostics().armedRefusals,
       cancelledHolds: this.#cancelledHolds,
       refusedRequests: this.#refusedRequests,
       recoveryWaiting: this.#recoveries.size,
@@ -749,38 +753,49 @@ export class OffpeakEngine {
    * discoverable and cancellable before it is dispatched.
    */
   #beginHold(input: GuardInput): HeldRequest {
-    const existing = this.#holds.get(input.sessionID);
-    if (existing !== undefined) this.#endHold(existing);
-    // A fresh request is a fresh decision: a refusal armed for an earlier
-    // request of the same session must never leak onto this one.
-    this.#refusals.delete(input.sessionID);
+    const kind = input.kind ?? "primary";
+    const session = this.#holds.get(input.sessionID) ?? new Map<number, HeldRequest>();
+    // A fresh request of the same kind is a fresh decision: a refusal armed for
+    // an earlier request of that kind must never leak onto this one. Other
+    // kinds (a held title beside a held prompt) are untouched.
+    const remaining = (this.#refusals.get(input.sessionID) ?? []).filter(
+      (refusal) => refusal.kind !== kind,
+    );
+    if (remaining.length === 0) this.#refusals.delete(input.sessionID);
+    else this.#refusals.set(input.sessionID, remaining);
     const hold: HeldRequest = {
       id: ++this.#nextHoldID,
       sessionID: input.sessionID,
       providerID: input.providerID,
       modelID: input.modelID,
-      kind: input.kind ?? "primary",
+      kind,
       state: "holding",
       at: this.#clock.now(),
     };
-    this.#holds.set(input.sessionID, hold);
+    session.set(hold.id, hold);
+    this.#holds.set(input.sessionID, session);
     return hold;
   }
 
   #endHold(hold: HeldRequest): void {
-    const current = this.#holds.get(hold.sessionID);
-    if (current !== undefined && current.id === hold.id) this.#holds.delete(hold.sessionID);
+    const session = this.#holds.get(hold.sessionID);
+    if (session !== undefined) {
+      session.delete(hold.id);
+      if (session.size === 0) this.#holds.delete(hold.sessionID);
+    }
     this.#holdOutcomes.set(hold.sessionID, { state: hold.state, at: this.#clock.now() });
   }
 
   /** Arm the one-shot transport refusal for a cancelled request. */
   #armRefusal(hold: HeldRequest): void {
-    this.#refusals.set(hold.sessionID, {
+    const refusals = this.#refusals.get(hold.sessionID) ?? [];
+    refusals.push({
       providerID: hold.providerID,
       modelID: hold.modelID,
       kind: hold.kind,
       expiresAt: this.#clock.now() + REFUSAL_TTL_MS,
     });
+    this.#refusals.set(hold.sessionID, refusals);
     this.#refusedRequests += 1;
     this.#announceResume(hold.sessionID);
   }
@@ -799,31 +814,37 @@ export class OffpeakEngine {
    *   which only its owner may cancel.
    */
   async cancelHold(input: { sessionID: string; reason?: string }): Promise<CancelHoldResult> {
-    const hold = this.#holds.get(input.sessionID);
-    if (hold === undefined) {
+    const session = this.#holds.get(input.sessionID);
+    const holds = [...(session?.values() ?? [])];
+    const cancellable = holds.filter((hold) => hold.state === "holding");
+    const first = cancellable[0] ?? holds[0];
+    if (cancellable.length === 0 || first === undefined) {
       const last = this.#holdOutcomes.get(input.sessionID);
       const state =
-        last !== undefined && this.#clock.now() - last.at < HOLD_OUTCOME_TTL_MS ? last.state : "none";
-      return { cancelled: false, state };
-    }
-    if (hold.state !== "holding") {
+        first !== undefined
+          ? first.state
+          : last !== undefined && this.#clock.now() - last.at < HOLD_OUTCOME_TTL_MS
+            ? last.state
+            : "none";
       return {
         cancelled: false,
-        state: hold.state,
-        model: `${hold.providerID}/${hold.modelID}`,
+        state,
+        ...(first === undefined ? {} : { model: `${first.providerID}/${first.modelID}` }),
       };
     }
-    hold.state = "refused";
+    for (const hold of cancellable) {
+      hold.state = "refused";
+      this.#cancelledHolds += 1;
+    }
     this.#holdOutcomes.set(input.sessionID, { state: "refused", at: this.#clock.now() });
-    this.#cancelledHolds += 1;
-    // The request is obsolete: nothing may continue it later.
+    // The requests are obsolete: nothing may continue them later.
     await this.#removeRecovery(input.sessionID, PRIMARY_RECOVERY_ORIGINS);
     this.#signal.notify();
     this.#requestPump();
     return {
       cancelled: true,
       state: "refused",
-      model: `${hold.providerID}/${hold.modelID}`,
+      model: `${first.providerID}/${first.modelID}`,
     };
   }
 
@@ -838,16 +859,19 @@ export class OffpeakEngine {
     modelID: string;
     kind: string;
   }): boolean {
-    const refusal = this.#refusals.get(input.sessionID);
+    const refusals = this.#refusals.get(input.sessionID);
+    const index =
+      refusals?.findIndex(
+        (refusal) =>
+          refusal.providerID === input.providerID &&
+          refusal.modelID === input.modelID &&
+          refusal.kind === input.kind,
+      ) ?? -1;
+    if (refusals === undefined || index < 0) return false;
+    const [refusal] = refusals.splice(index, 1);
     if (refusal === undefined) return false;
-    if (
-      refusal.providerID !== input.providerID ||
-      refusal.modelID !== input.modelID ||
-      refusal.kind !== input.kind
-    ) {
-      return false;
-    }
-    this.#refusals.delete(input.sessionID);
+
+    if (refusals.length === 0) this.#refusals.delete(input.sessionID);
     if (this.#clock.now() > refusal.expiresAt) return false;
     this.#consumedRefusals.set(input.sessionID, {
       at: this.#clock.now(),
@@ -865,8 +889,14 @@ export class OffpeakEngine {
     refusedRequests: number;
   } {
     return {
-      interactiveHolds: this.#holds.size,
-      armedRefusals: this.#refusals.size,
+      interactiveHolds: [...this.#holds.values()].reduce(
+        (total, session) => total + session.size,
+        0,
+      ),
+      armedRefusals: [...this.#refusals.values()].reduce(
+        (total, refusals) => total + refusals.length,
+        0,
+      ),
       cancelledHolds: this.#cancelledHolds,
       refusedRequests: this.#refusedRequests,
     };
