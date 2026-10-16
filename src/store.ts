@@ -72,6 +72,25 @@ export interface RecoveryDocument {
   entries: RecoveryEntry[];
 }
 
+/**
+ * An explicit, session-scoped override of off-peak protection. Only sessions
+ * the user deliberately switched off are stored; the absence of an entry means
+ * protection is ON, which is the default for every session. The override is an
+ * explicit authorization for verified PEAK-priced inference in that one
+ * interactive session — it never applies to queue-owned sessions and never
+ * turns an unverified (UNKNOWN) model into an allowed request.
+ */
+export interface SessionProtectionOverride {
+  protection: "off";
+  updatedAt: string;
+}
+
+export interface SessionOverridesDocument {
+  schemaVersion: 1;
+  /** Keyed by OpenCode session ID. */
+  sessions: Record<string, SessionProtectionOverride>;
+}
+
 export interface JsonStorage {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown): Promise<void>;
@@ -79,6 +98,7 @@ export interface JsonStorage {
 
 export const QUEUE_STORAGE_KEY = "opencode-offpeak/queue-v1";
 export const RECOVERY_STORAGE_KEY = "opencode-offpeak/recovery-v1";
+export const SESSION_OVERRIDES_STORAGE_KEY = "opencode-offpeak/session-overrides-v1";
 
 export function emptyQueue(): QueueDocument {
   return { schemaVersion: 1, tasks: [] };
@@ -86,6 +106,10 @@ export function emptyQueue(): QueueDocument {
 
 export function emptyRecovery(): RecoveryDocument {
   return { schemaVersion: 1, entries: [] };
+}
+
+export function emptySessionOverrides(): SessionOverridesDocument {
+  return { schemaVersion: 1, sessions: {} };
 }
 
 export class QueueRepository {
@@ -121,6 +145,27 @@ export class RecoveryRepository {
 
   async save(document: RecoveryDocument): Promise<void> {
     await this.storage.set(RECOVERY_STORAGE_KEY, document as unknown as JsonValue);
+  }
+}
+
+export class SessionOverridesRepository {
+  constructor(private readonly storage: JsonStorage) {}
+
+  async load(): Promise<SessionOverridesDocument> {
+    const value = await this.storage.get(SESSION_OVERRIDES_STORAGE_KEY);
+    if (value === undefined) return emptySessionOverrides();
+    if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.sessions)) {
+      throw new Error("Stored offpeak session overrides are invalid; refusing to overwrite them.");
+    }
+    const sessions: Record<string, SessionProtectionOverride> = {};
+    for (const [sessionID, override] of Object.entries(value.sessions)) {
+      sessions[sessionID] = validateSessionOverride(sessionID, override);
+    }
+    return { schemaVersion: 1, sessions };
+  }
+
+  async save(document: SessionOverridesDocument): Promise<void> {
+    await this.storage.set(SESSION_OVERRIDES_STORAGE_KEY, document as unknown as JsonValue);
   }
 }
 
@@ -247,6 +292,19 @@ function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
     throw new Error(`Stored recovery entry ${index} has an invalid origin.`);
   }
   return value as unknown as RecoveryEntry;
+}
+
+function validateSessionOverride(sessionID: string, value: unknown): SessionProtectionOverride {
+  if (!sessionID.trim()) throw new Error("Stored session override has an empty session ID.");
+  if (!isRecord(value))
+    throw new Error(`Stored session override for ${sessionID} is not an object.`);
+  if (value.protection !== "off") {
+    throw new Error(`Stored session override for ${sessionID} has an invalid protection value.`);
+  }
+  if (typeof value.updatedAt !== "string") {
+    throw new Error(`Stored session override for ${sessionID} has an invalid update time.`);
+  }
+  return { protection: "off", updatedAt: value.updatedAt };
 }
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };

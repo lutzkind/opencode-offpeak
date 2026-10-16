@@ -20,6 +20,7 @@ export const OFFPEAK_RPC = {
           cwd: { type: "string" },
           providerID: { type: "string" },
           modelID: { type: "string" },
+          sessionID: { type: "string" },
         },
         required: ["action"],
         additionalProperties: false,
@@ -103,7 +104,7 @@ export interface OffpeakHoldEvent {
 
 export interface OffpeakResumeEvent {
   sessionID: string;
-  kind?: "release" | "continuation";
+  kind?: "release" | "continuation" | "override";
 }
 
 export interface OffpeakRpcInput {
@@ -113,6 +114,8 @@ export interface OffpeakRpcInput {
   cwd?: string;
   providerID?: string;
   modelID?: string;
+  /** Current interactive session, for session-scoped protection control. */
+  sessionID?: string;
 }
 
 export interface OffpeakRpcOutput {

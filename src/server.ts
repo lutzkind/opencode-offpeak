@@ -10,7 +10,7 @@ import {
   refusedRequest,
 } from "./refused.js";
 import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
-import { QueueRepository, RecoveryRepository } from "./store.js";
+import { QueueRepository, RecoveryRepository, SessionOverridesRepository } from "./store.js";
 
 export default Plugin.define({
   id: "opencode-offpeak",
@@ -23,6 +23,7 @@ export default Plugin.define({
     };
     const repository = new QueueRepository(storage);
     const recoveries = new RecoveryRepository(storage);
+    const sessionOverrides = new SessionOverridesRepository(storage);
     const sessions: SessionDriver = {
       create: async ({ cwd, model, taskID }) => {
         const session = await context.session.create({
@@ -39,6 +40,15 @@ export default Plugin.define({
       wait: async (sessionID) => context.session.wait({ sessionID }),
       get: async (sessionID) => {
         const session = await context.session.get({ sessionID });
+        // A missing session (or a host that returns undefined instead of
+        // throwing) is reported explicitly, so state cleanup can distinguish it
+        // from a transient error and only reap sessions that no longer exist.
+        if (!session) {
+          const error = new Error(`Session not found: ${sessionID}`);
+          error.name = "SessionNotFoundError";
+          Object.assign(error, { _tag: "SessionNotFoundError" });
+          throw error;
+        }
         // The wire format carries millis; the typed client exposes a DateTime.
         const created = (session.time as { created?: unknown } | undefined)?.created;
         const createdMs = typeof created === "number" ? created : Date.parse(String(created));
@@ -71,6 +81,7 @@ export default Plugin.define({
     const engine = new OffpeakEngine({
       repository,
       recoveries,
+      sessionOverrides,
       location: context.location?.directory ?? "",
       config,
       sessions,
@@ -198,6 +209,14 @@ export default Plugin.define({
               sessionID: event.data.sessionID,
               reason: event.data.reason,
             });
+            continue;
+          }
+          // OpenCode's supported session-deletion event: an explicit per-session
+          // protection override for a session that no longer exists is reaped
+          // here instead of lingering in plugin storage. State for a session
+          // that still exists is never removed.
+          if (event.type === "session.deleted") {
+            await engine.forgetSession(event.data.sessionID);
           }
         }
       } catch (error) {
@@ -218,8 +237,31 @@ export default Plugin.define({
             await engine.setEnabled(false);
             return {
               message:
-                "OpenCode Offpeak is OFF. Automation is paused; queued tasks and session IDs are preserved. Peak pricing is still blocked.",
+                "OpenCode Offpeak is OFF. Automation is paused; queued tasks and session IDs are preserved. Peak pricing is still blocked except for sessions you explicitly switched with /offpeak session off.",
             };
+          case "session-on":
+          case "session-off": {
+            const sessionID = input.sessionID?.trim();
+            if (!sessionID) {
+              throw new Error(
+                "No current OpenCode session was provided. Run /offpeak session on|off from an open session.",
+              );
+            }
+            const protection = await engine.setSessionProtection(
+              sessionID,
+              input.action === "session-off" ? "off" : "on",
+            );
+            // Lazy, bounded cleanup: a session command is a natural state
+            // access, so stale overrides (deleted sessions) are reaped here.
+            void engine.pruneSessionProtections().catch(() => undefined);
+            return {
+              message:
+                protection === "OFF"
+                  ? "Session off-peak protection disabled. This session may use verified peak-priced inference."
+                  : "Session off-peak protection enabled. Peak-priced requests will wait for off-peak.",
+              state: protection,
+            };
+          }
           case "queue": {
             if (!input.prompt) throw new Error("Usage: /offpeak queue <task>");
             if (!input.providerID || !input.modelID) {
@@ -237,6 +279,7 @@ export default Plugin.define({
             const status = await engine.status({
               ...(input.providerID ? { providerID: input.providerID } : {}),
               ...(input.modelID ? { modelID: input.modelID } : {}),
+              ...(input.sessionID?.trim() ? { sessionID: input.sessionID.trim() } : {}),
             });
             return { status: status as unknown as Record<string, unknown> };
           }
@@ -268,7 +311,7 @@ export default Plugin.define({
             return { message: `Explicit 15-minute peak-price override active for ${id}.` };
           default:
             throw new Error(
-              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now",
+              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|session on|session off",
             );
         }
       },

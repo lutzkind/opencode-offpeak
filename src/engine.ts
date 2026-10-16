@@ -15,6 +15,9 @@ import {
   type RecoveryEntry,
   type RecoveryOrigin,
   type RecoveryRepository,
+  type SessionOverridesDocument,
+  type SessionOverridesRepository,
+  type SessionProtectionOverride,
   type TaskModel,
   type TaskState,
 } from "./store.js";
@@ -57,6 +60,8 @@ export interface EngineStatus {
   automaticExecution: "ACTIVE" | "PAUSED";
   automaticResume: "ACTIVE" | "PAUSED";
   override: { active: boolean; taskID?: string; expiresAt?: string };
+  /** Off-peak protection for the queried session ("ON" by default). */
+  sessionProtection?: "ON" | "OFF";
   providerID?: string;
   modelID?: string;
   policyID?: string;
@@ -225,7 +230,30 @@ export type EngineNotification =
       /** Preformatted deadline ("17:00 Asia/Bangkok") for the UI. */
       display?: string;
     }
-  | { type: "resume"; sessionID: string; kind: "release" | "continuation" };
+  | {
+      type: "resume";
+      sessionID: string;
+      /**
+       * `release` — the allowed pricing window arrived normally.
+       * `continuation` — a persisted recovery continued the session.
+       * `override` — the user switched this session's off-peak protection OFF,
+       * releasing its still-valid waiting work at PEAK rates.
+       */
+      kind: "release" | "continuation" | "override";
+    };
+
+/**
+ * True when OpenCode reports that a session does not exist: the supported
+ * client's typed `SessionNotFoundError`, or a host-specific equivalent
+ * message. Transient errors must never be mistaken for a deleted session,
+ * because an override for a session that still exists must be kept.
+ */
+function isSessionNotFound(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  if ((error as { _tag?: unknown })._tag === "SessionNotFoundError") return true;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === "string" && /\bsession not found\b|\bno such session\b/i.test(message);
+}
 
 export class PricingBlockedError extends Error {
   readonly code = "OFFPEAK_PRICING_BLOCKED";
@@ -242,6 +270,8 @@ export interface EngineOptions {
   sessions: SessionDriver;
   /** Optional persisted recovery metadata for interactive sessions. */
   recoveries?: RecoveryRepository;
+  /** Optional persisted per-session protection overrides. */
+  sessionOverrides?: SessionOverridesRepository;
   /** Plugin instance location; recovery entries are scoped to it. */
   location?: string;
   clock?: EngineClock;
@@ -308,6 +338,12 @@ export class OffpeakEngine {
    */
   readonly #running = new Set<string>();
   readonly #recoveriesRepo: RecoveryRepository | undefined;
+  /**
+   * Session-scoped protection overrides, keyed by session ID. Only explicit
+   * "off" entries are stored; a missing key means protection is ON (default).
+   */
+  readonly #sessionProtections = new Map<string, SessionProtectionOverride>();
+  readonly #sessionOverridesRepo: SessionOverridesRepository | undefined;
   readonly #location: string;
   /**
    * Recovery entries keyed by `${origin}:${sessionID}`. A session can hold a
@@ -330,6 +366,7 @@ export class OffpeakEngine {
     this.#config = options.config;
     this.#sessions = options.sessions;
     this.#recoveriesRepo = options.recoveries;
+    this.#sessionOverridesRepo = options.sessionOverrides;
     this.#location = options.location ?? "";
     this.#clock = options.clock ?? systemClock;
     this.#signal = new AsyncSignal(this.#clock);
@@ -345,7 +382,17 @@ export class OffpeakEngine {
       this.#onError(error);
     }
     try {
+      await this.#loadSessionProtections();
+    } catch (error) {
+      this.#onError(error);
+    }
+    try {
       await this.#reconcileAfterLoad();
+    } catch (error) {
+      this.#onError(error);
+    }
+    try {
+      await this.pruneSessionProtections();
     } catch (error) {
       this.#onError(error);
     }
@@ -367,6 +414,7 @@ export class OffpeakEngine {
     this.#holds.clear();
     this.#refusals.clear();
     this.#consumedRefusals.clear();
+    this.#sessionProtections.clear();
     this.#watcher?.close();
     if (this.#timer) this.#clock.clearTimeout(this.#timer);
     if (this.#recoveryTimer) this.#clock.clearTimeout(this.#recoveryTimer);
@@ -381,6 +429,79 @@ export class OffpeakEngine {
     });
     this.#signal.notify();
     if (enabled) this.#requestPump();
+  }
+
+  /**
+   * Sets off-peak protection for one interactive session.
+   *
+   * `"off"` is an explicit, session-scoped authorization for verified
+   * PEAK-priced inference in that one session: its peak-priced requests are
+   * allowed immediately (including native auxiliary lifecycle work such as
+   * compaction, title and generate), and any still-valid work it is waiting
+   * with is released on the spot. It never applies to queue-owned sessions,
+   * never authorizes an UNKNOWN or invalid-policy request, and never changes
+   * any other session. `"on"` restores the default protection.
+   *
+   * The override persists in OpenCode plugin storage until it is changed or
+   * the session is deleted; there is no timer and no expiry.
+   */
+  async setSessionProtection(sessionID: string, protection: "on" | "off"): Promise<"ON" | "OFF"> {
+    const id = sessionID.trim();
+    if (!id) throw new Error("A session ID is required for a session protection change.");
+    const had = this.#sessionProtections.has(id);
+    if (protection === "off") {
+      // Refresh the timestamp but keep a single authoritative entry.
+      this.#sessionProtections.set(id, {
+        protection: "off",
+        updatedAt: new Date(this.#clock.now()).toISOString(),
+      });
+    } else {
+      this.#sessionProtections.delete(id);
+    }
+    if ((protection === "off") !== had) await this.#persistSessionProtections();
+    // Wake held requests and recovery delivery so a switch to OFF releases
+    // still-valid waiting work immediately; a switch to ON simply restores the
+    // normal waiting behavior for future requests.
+    this.#signal.notify();
+    this.#requestPump();
+    return protection === "off" ? "OFF" : "ON";
+  }
+
+  /** Off-peak protection for one session; absence means ON (the default). */
+  sessionProtection(sessionID: string): "ON" | "OFF" {
+    return this.#sessionProtections.has(sessionID) ? "OFF" : "ON";
+  }
+
+  /**
+   * Forgets every explicit override for a session that no longer exists.
+   * Called from OpenCode's supported `session.deleted` event; never removes
+   * state for a session that still exists.
+   */
+  async forgetSession(sessionID: string): Promise<void> {
+    if (!this.#sessionProtections.delete(sessionID)) return;
+    await this.#persistSessionProtections();
+  }
+
+  /**
+   * Bounded lazy cleanup for overrides whose session no longer exists. Runs on
+   * start-up and explicit session commands, never on a timer, and never removes
+   * an override for a session that still exists.
+   */
+  async pruneSessionProtections(): Promise<void> {
+    if (this.#sessionProtections.size === 0) return;
+    let changed = false;
+    for (const sessionID of [...this.#sessionProtections.keys()]) {
+      try {
+        await this.#sessions.get(sessionID);
+      } catch (error) {
+        // Only a confident not-found may reap an override; a transient error
+        // means the session may still exist and its state must be kept.
+        if (isSessionNotFound(error) && this.#sessionProtections.delete(sessionID)) {
+          changed = true;
+        }
+      }
+    }
+    if (changed) await this.#persistSessionProtections();
   }
 
   async queue(input: { prompt: string; cwd: string; model: TaskModel }): Promise<OffpeakTask> {
@@ -504,7 +625,12 @@ export class OffpeakEngine {
     this.#requestPump();
   }
 
-  async status(current?: { providerID?: string; modelID?: string }): Promise<EngineStatus> {
+  async status(current?: {
+    providerID?: string;
+    modelID?: string;
+    sessionID?: string;
+  }): Promise<EngineStatus> {
+    if (current?.sessionID !== undefined) await this.#pruneSessionOverride(current.sessionID);
     const settings = await this.#config.read();
     const tasks = await this.list();
     const selected =
@@ -528,6 +654,8 @@ export class OffpeakEngine {
     );
     const enabled = settings.config?.enabled ?? false;
     const providerNote = selected?.providerID ? flatProviderNote(selected.providerID) : undefined;
+    const sessionProtection =
+      current?.sessionID !== undefined ? this.sessionProtection(current.sessionID) : undefined;
     return {
       enabled,
       mode: settings.config?.mode ?? "auto",
@@ -536,6 +664,7 @@ export class OffpeakEngine {
       override: override?.overrideUntil
         ? { active: true, taskID: override.id, expiresAt: override.overrideUntil }
         : { active: false },
+      ...(sessionProtection ? { sessionProtection } : {}),
       ...(selected?.providerID ? { providerID: selected.providerID } : {}),
       ...(selected?.modelID ? { modelID: selected.modelID } : {}),
       ...(decision.policy?.id ? { policyID: decision.policy.id } : {}),
@@ -543,7 +672,7 @@ export class OffpeakEngine {
       requestsAllowed:
         (!enabled && running !== undefined) || decision.state === "UNKNOWN"
           ? false
-          : decision.allowed,
+          : decision.allowed || (sessionProtection === "OFF" && decision.state === "PEAK"),
       ...(decision.nextTransition !== undefined ? { nextTransition: decision.nextTransition } : {}),
       ...(providerNote && decision.state === "UNTRACKED" ? { providerNote } : {}),
       displayTimeZone: settings.config?.displayTimeZone ?? "UTC",
@@ -649,6 +778,17 @@ export class OffpeakEngine {
     if (decision.state === "UNKNOWN") {
       throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${decision.reason}`);
     }
+    // An explicit session-scoped override: verified PEAK pricing is authorized
+    // for this interactive session only. It is checked after the UNKNOWN
+    // fail-closed guard and after the config error guard, so it can never turn
+    // an unverified model or an invalid configuration into an allowed request,
+    // and it never applies to a queue-owned session (task !== undefined).
+    if (
+      task === undefined &&
+      decision.state === "PEAK" &&
+      this.#sessionProtectionOff(input.sessionID)
+    )
+      return;
     if (this.#hasOverride(task, this.#clock.now()) && first.config.enabled) return;
     if (decision.allowed && (!task || first.config.enabled)) return;
 
@@ -748,6 +888,21 @@ export class OffpeakEngine {
         if (decision.state === "UNKNOWN") {
           if (task) await this.#setTaskError(task.id, decision.reason);
           throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${decision.reason}`);
+        }
+        // The user switched this interactive session's protection off while it
+        // was waiting: the verified PEAK request is authorized now, so the hold
+        // commits and the same request continues — no retry, no re-send, and no
+        // duplicate provider call. A refused hold is handled above and is never
+        // resurrected by this path.
+        if (
+          task === undefined &&
+          decision.state === "PEAK" &&
+          this.#sessionProtectionOff(input.sessionID)
+        ) {
+          if (hold !== undefined) hold.state = "committed";
+          if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
+          this.#announceResume(input.sessionID, "override");
+          return;
         }
         if (
           task &&
@@ -995,11 +1150,12 @@ export class OffpeakEngine {
   /**
    * Announces the release of a hold that this instance announced. A hold that
    * was interrupted, cancelled, or transferred to a recovery continuation
-   * produces no release notification here.
+   * produces no release notification here. `override` says the release came
+   * from `/offpeak session off` while pricing is still PEAK.
    */
-  #announceResume(sessionID: string): void {
+  #announceResume(sessionID: string, kind: "release" | "override" = "release"): void {
     if (!this.#announcedHolds.delete(sessionID)) return;
-    this.#notify({ type: "resume", sessionID, kind: "release" });
+    this.#notify({ type: "resume", sessionID, kind });
   }
 
   #registerInteractiveWaiter(): number {
@@ -1057,6 +1213,10 @@ export class OffpeakEngine {
       this.#requestPump();
       return "hold";
     }
+    // This session is explicitly operating at verified PEAK rates: a retryable
+    // provider failure is nothing more than that, so OpenCode's normal retry
+    // behavior applies and no recovery continuation is registered.
+    if (this.#sessionProtectionOff(input.sessionID)) return "pass";
     await this.#registerRecovery(input.sessionID, input.providerID, input.modelID, "retry-failure");
     this.#signal.notify();
     this.#requestPump();
@@ -1108,6 +1268,46 @@ export class OffpeakEngine {
     for (const entry of document.entries) {
       if (entry.directory !== this.#location) continue;
       this.#recoveries.set(this.#recoveryKey(entry), entry);
+    }
+  }
+
+  async #loadSessionProtections(): Promise<void> {
+    const repo = this.#sessionOverridesRepo;
+    if (!repo) return;
+    const document = await repo.load();
+    this.#sessionProtections.clear();
+    for (const [sessionID, override] of Object.entries(document.sessions)) {
+      if (override.protection === "off") this.#sessionProtections.set(sessionID, override);
+    }
+  }
+
+  async #persistSessionProtections(): Promise<void> {
+    const repo = this.#sessionOverridesRepo;
+    if (!repo) return;
+    const document: SessionOverridesDocument = {
+      schemaVersion: 1,
+      sessions: Object.fromEntries(
+        [...this.#sessionProtections.entries()].map(([sessionID, override]) => [
+          sessionID,
+          { ...override },
+        ]),
+      ),
+    };
+    await this.#lock.run(() => repo.save(document));
+  }
+
+  /** True when the user explicitly switched this session's protection off. */
+  #sessionProtectionOff(sessionID: string): boolean {
+    return this.#sessionProtections.has(sessionID);
+  }
+
+  /** Removes the override for one session that no longer exists (lazy). */
+  async #pruneSessionOverride(sessionID: string): Promise<void> {
+    if (!this.#sessionProtections.has(sessionID)) return;
+    try {
+      await this.#sessions.get(sessionID);
+    } catch (error) {
+      if (isSessionNotFound(error)) await this.forgetSession(sessionID);
     }
   }
 
@@ -1218,9 +1418,12 @@ export class OffpeakEngine {
       // runner keeps a pending compaction ahead of queued prompts, so
       // compact-first ordering survives without waiting for the boundary. In
       // queue/guard modes a re-trigger during peak would fail closed, so it
-      // waits for the allowed window.
+      // waits for the allowed window — unless this session's protection was
+      // explicitly switched off, in which case its pending compaction proceeds
+      // immediately at the authorized peak rates.
       const deliverable =
-        settings.config.enabled && (settings.config.mode === "auto" || decision.allowed);
+        (settings.config.enabled && (settings.config.mode === "auto" || decision.allowed)) ||
+        this.#sessionProtectionOff(entry.sessionID);
       if (deliverable) {
         const result = await this.#deliverCompactionRecovery(entry);
         if (result.retryAt !== undefined)
@@ -1243,9 +1446,13 @@ export class OffpeakEngine {
       // A continuation that belongs with a compaction admitted in this pass is
       // delivered with it: the runner keeps the compaction ahead, so the
       // continuation waits behind the checkpoint while the peak window holds
-      // both.
+      // both. A session whose protection is explicitly off proceeds
+      // immediately.
       const forced = compactionAdmitted.has(entry.sessionID);
-      if (settings.config.enabled && (forced || decision.allowed)) {
+      if (
+        (settings.config.enabled && (forced || decision.allowed)) ||
+        this.#sessionProtectionOff(entry.sessionID)
+      ) {
         const retryAt = await this.#deliverRecovery(entry, { force: forced });
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
         continue;
@@ -1262,7 +1469,10 @@ export class OffpeakEngine {
         entry.modelID,
         this.#clock.now(),
       );
-      if (settings.config.enabled && decision.allowed) {
+      if (
+        (settings.config.enabled && decision.allowed) ||
+        this.#sessionProtectionOff(entry.sessionID)
+      ) {
         const retryAt = await this.#deliverTitleRecovery(entry);
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
         continue;

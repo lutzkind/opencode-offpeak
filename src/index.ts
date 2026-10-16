@@ -48,7 +48,14 @@ export type {
   RecoveryDocument,
   RecoveryEntry,
   RecoveryOrigin,
+  SessionOverridesDocument,
+  SessionProtectionOverride,
   TaskModel,
   TaskState,
 } from "./store.js";
-export { QueueRepository, RecoveryRepository } from "./store.js";
+export {
+  QueueRepository,
+  RecoveryRepository,
+  SESSION_OVERRIDES_STORAGE_KEY,
+  SessionOverridesRepository,
+} from "./store.js";
