@@ -1,4 +1,16 @@
-# Handoff — 2026-10-15
+# Handoff — 2026-10-16
+
+## 2026-10-16 hold cancellation (`cancelHold`, v0.1.7)
+
+**What changed.** A held request can now be cancelled generically and without ending the session. New RPC method on the existing channel: `opencode-offpeak.cancelHold { sessionID, reason? } -> { cancelled, state, model? }`. The held-request state (`holding` / `committed` / `refused`) is a single synchronous transition, so a cancellation and an allowed-window release can never both win. A cancelled hold returns from the loop and arms a one-shot refusal; the transport-boundary hooks registered *before* the pricing guards consume it and replace the request with a credential-free placeholder aimed at a closed loopback endpoint (`127.0.0.1:1`, marker header `x-opencode-offpeak-refused`). OpenCode classifies that as a retryable transport failure, so its own retry machinery continues the same execution on the route the caller selects — no `session.interrupt`, no synthetic continuation, no lost turn. A refused placeholder is skipped by the pricing guard, expires after 60s, and is dropped when a fresh hold starts. `noteRetryFailure` ignores a refusal this plugin produced, so the v0.1.3 retry recovery cannot duplicate the caller's resumed work. `/offpeak status` adds `interactiveHolds`, `armedRefusals`, `cancelledHolds`, `refusedRequests`.
+
+**Why it is needed.** The consuming plugin (`opencode-free-first`) reclaims a peak-held paid request when the free route becomes usable again. Cancelling the hold previously required `session.interrupt`, and OpenCode 2.0.30's headless runner treats any interruption as terminal, so `opencode run` exited before the resumed work finished. OpenCode's plugin API offers no other mechanism: session hooks have no typed failure channel (a hook that throws fails the execution), so a transport-level refusal is the only supported way to hand the retry decision back to OpenCode.
+
+**Scope.** Generic infrastructure: this plugin learns nothing about the caller or the reason, a queue-owned hold is never cancellable this way (`state: "task"`), and the capability is inert when unused. No new process, scheduler, database, queue, or credential path; no session, transcript, or model-context mutation; the paid-dispatch guarantee is unchanged (a refused request cannot be sent).
+
+**Validation.** `npm run lint`, `npm run typecheck`, `npm test` — **106/106** (99 existing + 7 new in `test/hold-cancel.test.mjs`: cancellation arms the refusal, the refusal is one-shot and never leaks onto another request/model/kind, expiry and supersession by a fresh hold, the committed-race report, a session with no hold, queue-owned holds untouched, and retry-recovery suppression). The consuming plugin's coexistence suite exercises the same flow with the real CLI, including a headless `opencode run` that stays attached and prints the resumed result while the paid provider receives zero requests.
+
+**Coexistence note.** This work was developed in a git worktree (`/root/agent-tmp/opencode/offpeak-hold-cancel`) because another agent was concurrently editing the canonical checkout's `src/store.ts`/`src/engine.ts` for the pending-compaction recovery. Nothing of that in-flight work was touched; the canonical checkout was restored to exactly the concurrent agent's state before this branch was cut.
 
 ## Release status
 

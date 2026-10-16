@@ -69,6 +69,14 @@ export interface EngineStatus {
   waiting: number;
   /** Interactive requests currently held at the pricing boundary (auto mode). */
   interactiveWaiting: number;
+  /** Requests parked by an interactive hold right now. */
+  interactiveHolds: number;
+  /** Cancelled holds whose refusal has not reached the transport yet. */
+  armedRefusals: number;
+  /** Holds cancelled through `cancelHold` since start-up. */
+  cancelledHolds: number;
+  /** Requests refused at the transport boundary since start-up. */
+  refusedRequests: number;
   /** Interactive sessions waiting for an off-peak recovery continuation. */
   recoveryWaiting: number;
   /** Subset of recoveryWaiting: sessions whose automatic title is still pending. */
@@ -145,6 +153,51 @@ export interface RetryFailureInput {
 }
 
 /**
+ * A request currently parked by this plugin's pre-model hold.
+ *
+ * `state` is the single authoritative transition for the request, mutated
+ * synchronously so a cancellation and a release can never both win:
+ *
+ * - `holding`   — waiting for the allowed window; `cancelHold` can still win.
+ * - `committed` — the pricing decision has been taken and the request is about
+ *                 to proceed; a later `cancelHold` reports that instead of
+ *                 pretending to cancel it.
+ * - `refused`   — a caller cancelled the hold; the hold loop returns and the
+ *                 transport boundary refuses the request without sending it.
+ */
+interface HeldRequest {
+  readonly id: number;
+  readonly sessionID: string;
+  readonly providerID: string;
+  readonly modelID: string;
+  readonly kind: string;
+  state: "holding" | "committed" | "refused";
+  readonly at: number;
+}
+
+/** A refused attempt, waiting for its request to reach the transport boundary. */
+interface RefusedRequest {
+  readonly providerID: string;
+  readonly modelID: string;
+  readonly kind: string;
+  readonly expiresAt: number;
+}
+
+export interface CancelHoldResult {
+  readonly cancelled: boolean;
+  /** `refused` | `committed` | `none` | `task`, for caller diagnostics. */
+  readonly state: string;
+  readonly model?: string;
+}
+
+/** How long an armed refusal waits for its request to reach the boundary. */
+const REFUSAL_TTL_MS = 60_000;
+/** How long a consumed refusal suppresses this plugin's own retry recovery. */
+const REFUSAL_RETRY_WINDOW_MS = 60_000;
+/** How long `cancelHold` remembers a hold that already settled. */
+const HOLD_OUTCOME_TTL_MS = 30_000;
+
+/**
  * User-facing notifications for an intentionally held primary interactive
  * request. They are emitted as plugin RPC events and rendered by the TUI as
  * non-chat toasts: they never enter the session, the model context, or
@@ -216,6 +269,21 @@ export class OffpeakEngine {
    * epoch moved on fails closed instead of lingering as a stale waiter.
    */
   readonly #holdAborts = new Map<string, number>();
+  /**
+   * Requests parked by an interactive hold, keyed by session. At most one hold
+   * exists per session, so the entry is the session's authoritative request
+   * state while it waits.
+   */
+  readonly #holds = new Map<string, HeldRequest>();
+  /** Armed refusals, keyed by session, consumed once at the transport boundary. */
+  readonly #refusals = new Map<string, RefusedRequest>();
+  /** Consumed refusals, used to keep this plugin's own retry recovery out of the way. */
+  readonly #consumedRefusals = new Map<string, { at: number; providerID: string; modelID: string }>();
+  /** Last settled hold per session, so a late `cancelHold` can report the truth. */
+  readonly #holdOutcomes = new Map<string, { state: string; at: number }>();
+  #nextHoldID = 0;
+  #cancelledHolds = 0;
+  #refusedRequests = 0;
   readonly #recoveriesRepo: RecoveryRepository | undefined;
   readonly #location: string;
   /**
@@ -273,6 +341,9 @@ export class OffpeakEngine {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
+    this.#holds.clear();
+    this.#refusals.clear();
+    this.#consumedRefusals.clear();
     this.#watcher?.close();
     if (this.#timer) this.#clock.clearTimeout(this.#timer);
     if (this.#recoveryTimer) this.#clock.clearTimeout(this.#recoveryTimer);
@@ -465,6 +536,10 @@ export class OffpeakEngine {
         : {}),
       waiting: tasks.filter((task) => task.state === "WAITING_OFFPEAK").length,
       interactiveWaiting: this.#interactiveWaiters.size,
+      interactiveHolds: this.#holds.size,
+      armedRefusals: this.#refusals.size,
+      cancelledHolds: this.#cancelledHolds,
+      refusedRequests: this.#refusedRequests,
       recoveryWaiting: this.#recoveries.size,
       titleRecoveryWaiting: [...this.#recoveries.values()].filter(
         (entry) => entry.origin === TITLE_RECOVERY_ORIGIN,
@@ -599,6 +674,7 @@ export class OffpeakEngine {
       );
       this.#requestPump();
     }
+    const hold = task === undefined ? this.#beginHold(input) : undefined;
     const abortEpoch = this.#holdAborts.get(input.sessionID) ?? 0;
     try {
       while (!this.#disposed) {
@@ -606,6 +682,17 @@ export class OffpeakEngine {
           throw new PricingBlockedError(
             "Offpeak hold was interrupted in OpenCode; the request was not sent.",
           );
+        }
+        // A caller cancelled this hold. The request still must not be sent, so
+        // the loop returns (the request is allowed to proceed) and a one-shot
+        // refusal is armed for the transport boundary, which fails the attempt
+        // without contacting the provider. That keeps OpenCode's own retry
+        // machinery in charge: it can retry the same execution on another route,
+        // so no session interruption is needed to cancel the hold.
+        if (hold !== undefined && hold.state === "refused") {
+          this.#armRefusal(hold);
+          if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
+          return;
         }
         const signalVersion = this.#signal.version();
         const settings = await this.#config.read();
@@ -630,6 +717,9 @@ export class OffpeakEngine {
           return;
         }
         if (settings.config.enabled && decision.allowed) {
+          // Commit synchronously, before any await can interleave a cancel: from
+          // here the dispatch wins and `cancelHold` reports that honestly.
+          if (hold !== undefined) hold.state = "committed";
           if (task) await this.#transition(task.id, "RUNNING");
           if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
           this.#announceResume(input.sessionID);
@@ -648,9 +738,138 @@ export class OffpeakEngine {
       }
       throw new PricingBlockedError("Offpeak plugin is shutting down; request blocked.");
     } finally {
+      if (hold !== undefined) this.#endHold(hold);
       if (waiter !== undefined) this.#interactiveWaiters.delete(waiter);
       this.#announcedHolds.delete(input.sessionID);
     }
+  }
+
+  /**
+   * Park an interactive request. Registration is what makes the request
+   * discoverable and cancellable before it is dispatched.
+   */
+  #beginHold(input: GuardInput): HeldRequest {
+    const existing = this.#holds.get(input.sessionID);
+    if (existing !== undefined) this.#endHold(existing);
+    // A fresh request is a fresh decision: a refusal armed for an earlier
+    // request of the same session must never leak onto this one.
+    this.#refusals.delete(input.sessionID);
+    const hold: HeldRequest = {
+      id: ++this.#nextHoldID,
+      sessionID: input.sessionID,
+      providerID: input.providerID,
+      modelID: input.modelID,
+      kind: input.kind ?? "primary",
+      state: "holding",
+      at: this.#clock.now(),
+    };
+    this.#holds.set(input.sessionID, hold);
+    return hold;
+  }
+
+  #endHold(hold: HeldRequest): void {
+    const current = this.#holds.get(hold.sessionID);
+    if (current !== undefined && current.id === hold.id) this.#holds.delete(hold.sessionID);
+    this.#holdOutcomes.set(hold.sessionID, { state: hold.state, at: this.#clock.now() });
+  }
+
+  /** Arm the one-shot transport refusal for a cancelled request. */
+  #armRefusal(hold: HeldRequest): void {
+    this.#refusals.set(hold.sessionID, {
+      providerID: hold.providerID,
+      modelID: hold.modelID,
+      kind: hold.kind,
+      expiresAt: this.#clock.now() + REFUSAL_TTL_MS,
+    });
+    this.#refusedRequests += 1;
+    this.#announceResume(hold.sessionID);
+  }
+
+  /**
+   * Cancel a parked request without dispatching it and without interrupting the
+   * session. Returns the authoritative outcome:
+   *
+   * - `{ cancelled: true, state: "refused" }` — the hold was still waiting; the
+   *   request will be refused at the transport boundary without being sent.
+   * - `{ cancelled: false, state: "committed" }` — the dispatch decision was
+   *   already taken; the caller keeps the fallback and must wait for the next
+   *   safe boundary.
+   * - `{ cancelled: false, state: "none" }` — nothing was held for this session.
+   * - `{ cancelled: false, state: "task" }` — the hold belongs to a queue task,
+   *   which only its owner may cancel.
+   */
+  async cancelHold(input: { sessionID: string; reason?: string }): Promise<CancelHoldResult> {
+    const hold = this.#holds.get(input.sessionID);
+    if (hold === undefined) {
+      const last = this.#holdOutcomes.get(input.sessionID);
+      const state =
+        last !== undefined && this.#clock.now() - last.at < HOLD_OUTCOME_TTL_MS ? last.state : "none";
+      return { cancelled: false, state };
+    }
+    if (hold.state !== "holding") {
+      return {
+        cancelled: false,
+        state: hold.state,
+        model: `${hold.providerID}/${hold.modelID}`,
+      };
+    }
+    hold.state = "refused";
+    this.#holdOutcomes.set(input.sessionID, { state: "refused", at: this.#clock.now() });
+    this.#cancelledHolds += 1;
+    // The request is obsolete: nothing may continue it later.
+    await this.#removeRecovery(input.sessionID, PRIMARY_RECOVERY_ORIGINS);
+    this.#signal.notify();
+    this.#requestPump();
+    return {
+      cancelled: true,
+      state: "refused",
+      model: `${hold.providerID}/${hold.modelID}`,
+    };
+  }
+
+  /**
+   * Consume the refusal armed for this request, if any. Called from the
+   * transport-boundary hooks before the pricing guard: a request that was
+   * already refused must not be re-evaluated or sent.
+   */
+  consumeRefusal(input: {
+    sessionID: string;
+    providerID: string;
+    modelID: string;
+    kind: string;
+  }): boolean {
+    const refusal = this.#refusals.get(input.sessionID);
+    if (refusal === undefined) return false;
+    if (
+      refusal.providerID !== input.providerID ||
+      refusal.modelID !== input.modelID ||
+      refusal.kind !== input.kind
+    ) {
+      return false;
+    }
+    this.#refusals.delete(input.sessionID);
+    if (this.#clock.now() > refusal.expiresAt) return false;
+    this.#consumedRefusals.set(input.sessionID, {
+      at: this.#clock.now(),
+      providerID: input.providerID,
+      modelID: input.modelID,
+    });
+    return true;
+  }
+
+  /** Diagnostics: parked requests and cancellation counters. */
+  holdDiagnostics(): {
+    interactiveHolds: number;
+    armedRefusals: number;
+    cancelledHolds: number;
+    refusedRequests: number;
+  } {
+    return {
+      interactiveHolds: this.#holds.size,
+      armedRefusals: this.#refusals.size,
+      cancelledHolds: this.#cancelledHolds,
+      refusedRequests: this.#refusedRequests,
+    };
   }
 
   /**
@@ -702,6 +921,21 @@ export class OffpeakEngine {
    */
   async noteRetryFailure(input: RetryFailureInput): Promise<"pass" | "hold"> {
     if (this.#disposed) return "pass";
+    const refused = this.#consumedRefusals.get(input.sessionID);
+    if (refused !== undefined) {
+      this.#consumedRefusals.delete(input.sessionID);
+      if (
+        this.#clock.now() - refused.at <= REFUSAL_RETRY_WINDOW_MS &&
+        refused.providerID === input.providerID &&
+        refused.modelID === input.modelID
+      ) {
+        // This failure is this plugin's own refusal of a cancelled hold, not a
+        // provider failure. The retry decision belongs to OpenCode and to the
+        // plugin that asked for the cancellation; registering a recovery
+        // continuation here would duplicate the resumed work.
+        return "pass";
+      }
+    }
     const settings = await this.#config.read();
     if (!settings.config) return "pass";
     if (!settings.config.enabled || settings.config.mode !== "auto") return "pass";

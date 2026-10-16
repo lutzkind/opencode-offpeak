@@ -26,6 +26,30 @@ export const OFFPEAK_RPC = {
       },
       output: object,
     },
+    /**
+     * Cancel a request this plugin is holding for the session, without
+     * interrupting the session. Generic infrastructure for any caller that
+     * decides a parked request is obsolete: the request is refused at the
+     * transport boundary (never sent) and OpenCode's own retry machinery
+     * decides what happens next.
+     *
+     * The result is authoritative: `cancelled: true` means the hold lost the
+     * race and the request will be refused; `state: "committed"` means the
+     * dispatch decision had already been taken and the caller must wait for the
+     * next safe boundary instead.
+     */
+    cancelHold: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+      output: object,
+    },
   },
   /**
    * Server-to-TUI notifications. They are published on OpenCode's event stream
@@ -95,4 +119,8 @@ export interface OffpeakRpcOutput {
   message?: string;
   status?: Record<string, unknown>;
   tasks?: unknown[];
+  /** `cancelHold` result: whether the hold lost the race, and how it settled. */
+  cancelled?: boolean;
+  state?: string;
+  model?: string;
 }

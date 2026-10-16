@@ -1,6 +1,6 @@
 {
   "name": "opencode-offpeak",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Queue OpenCode agent tasks and guard model requests against expensive pricing windows.",
   "author": "Lutz Kind",
   "license": "MIT",
