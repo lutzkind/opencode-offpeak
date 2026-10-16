@@ -61,6 +61,23 @@ The HTTP and experimental WebSocket transport guard still runs immediately befor
 
 If OpenCode itself interrupts a waiting session (its location-activity sweep ends a session that has had no durable events for 60 minutes), the plugin keeps the persisted deferral and continues the same session automatically at the next allowed window. A user cancel clears the pending deferral instead, so nothing continues after you cancel.
 
+### Cancelling a held request without interrupting the session
+
+A hold is not always worth waiting out: another plugin can discover that the request it parked is obsolete — for example a free route became usable again — and it is the job of that plugin, not this one, to decide so. `cancelHold` is the generic hook for that decision:
+
+```
+rpc.opencode-offpeak.cancelHold { sessionID, reason? }
+  -> { cancelled: boolean, state: "refused" | "committed" | "none" | "task", model?: string }
+```
+
+- `cancelled: true` — the hold was still waiting. The request is refused at the transport boundary before anything is sent, and OpenCode's own retry machinery decides what happens next. The session is **not** interrupted: no `session.interrupt`, no continuation prompt, no lost turn. The caller typically retries the same execution on the route it prefers.
+- `state: "committed"` — the allowed window arrived first and the dispatch decision was already taken. The caller keeps the paid work and waits for the next safe boundary. A hold can only settle one way.
+- `state: "none"` / `"task"` — nothing was parked for that session, or the hold belongs to a queue task this plugin owns.
+
+The refusal is deliberately boring: the outgoing request is replaced with a placeholder aimed at a closed loopback endpoint (`127.0.0.1:1`) carrying only the marker header `x-opencode-offpeak-refused`. It holds no credentials, no provider headers, no user data, and no body, it cannot reach any service, and the pricing guard skips it instead of holding it again. This is the only supported way to give OpenCode a retryable failure from a plugin: a hook that throws would end the whole execution instead.
+
+A refusal produced this way is not treated as a provider failure, so the peak-aware retry recovery does not register a continuation for it — the caller that asked for the cancellation owns what happens next, and no work is ever resumed twice.
+
 ### Timeout and retry recovery
 
 A request can start during off-peak, be accepted by the provider, cross into a peak window, and then fail with a retryable provider or network error such as `Timed out waiting for response headers`. That failure is real (the request was already sent), so the plugin's job is to make sure nothing further reaches the provider and the work is not lost. OpenCode normally retries such failures, and a retry attempt is itself a new paid request: during peak pricing it must not reach the provider, and the work must not be lost when OpenCode's retry budget runs out.

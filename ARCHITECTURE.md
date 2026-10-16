@@ -60,6 +60,19 @@ The server plugin registers two lifecycle points:
 
 A queued `auto` task transitions to `WAITING_OFFPEAK` and waits at whichever point it reaches first (normally `model.request`); its existing override still applies. In `auto` mode, a normal interactive request for a supported model is deferred the same way. It creates no task and no session, is tracked only in server memory (shown by `/offpeak status`), and is released exactly once when the plugin is enabled and the policy allows. Wake-ups come from the shared config-change signal plus one timer scheduled for the policy's `nextTransition`; there is no polling loop. If the plugin shuts down while a request is held, the request fails closed as blocked rather than being sent under an uncertain pricing state. Requests in `queue`/`guard` mode, and requests that arrive while the plugin is OFF, are blocked immediately by the transport guard; OFF does not release a request that is already held.
 
+### Cancelling a held request
+
+A caller that owns a routing decision can cancel the request this plugin is holding for a session through the `cancelHold` RPC method. `state` on the held request is the single authoritative transition, and it is mutated synchronously:
+
+```
+holding --pricing allowed--> committed   (dispatch wins; cancelHold reports "committed")
+holding --cancelHold-------> refused     (cancellation wins; the request is refused at the boundary)
+```
+
+A `refused` hold returns from the loop and arms a one-shot refusal keyed by session, provider, model, and kind. The transport-boundary hooks registered before the pricing guards consume it and replace the request with a credential-free placeholder aimed at a closed loopback endpoint, so OpenCode sees a retryable transport failure and its own retry policy decides what happens next. A placeholder is never re-evaluated by the guards. An armed refusal expires after 60 seconds and is dropped when a fresh hold starts for the same session, so it cannot refuse an unrelated request. `consumeRefusal` also suppresses this plugin's own retry recovery for that one failure, because a refusal is not a provider failure and the caller owns the follow-up.
+
+The mechanism is deliberately generic: this plugin exports a capability, not a policy. It knows nothing about who calls it or why, a queue-owned hold is never cancellable this way, and an unused capability changes nothing.
+
 ### Auxiliary requests and pending titles
 
 OpenCode prepares auxiliary requests with the same session identity as the agent loop: `compaction` (context summarization inside a turn), `generate` (stateless text generation), and `title` (automatic chat naming). Compaction and generate share the turn's fate: if their hold is interrupted, the primary recovery continuation re-runs the step and the auxiliary request is prepared again. An automatic title does not: OpenCode generates it once when the first input of an untitled root session is promoted, and a lost title request is not retried by OpenCode itself.

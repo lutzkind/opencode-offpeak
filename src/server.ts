@@ -3,6 +3,13 @@ import { assertSupportedOpenCode } from "./compat.js";
 import { ConfigRepository } from "./config.js";
 import { type EngineNotification, OffpeakEngine, type SessionDriver } from "./engine.js";
 import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
+import {
+  isRefusedHandshakeUrl,
+  isRefusedRequestUrl,
+  REFUSED_HEADER,
+  REFUSED_HANDSHAKE_URL,
+  refusedRequest,
+} from "./refused.js";
 import { QueueRepository, RecoveryRepository } from "./store.js";
 
 export default Plugin.define({
@@ -69,6 +76,33 @@ export default Plugin.define({
       },
       onError: (error) => console.error("[opencode-offpeak]", error),
     });
+    // A cancelled hold must win over every pricing guard. These run first (hook
+    // callbacks run in registration order), so an already-refused request is a
+    // placeholder from that moment on: it is never re-evaluated, never held
+    // again at the transport boundary, and never sent.
+    const refusalHooks = [
+      await context.session.hook("http.request", (request) => {
+        const consumed = engine.consumeRefusal({
+          sessionID: request.sessionID,
+          providerID: request.model.providerID,
+          modelID: request.model.id,
+          kind: request.kind,
+        });
+        if (!consumed) return;
+        request.request = refusedRequest();
+      }),
+      await context.session.hook("experimental.ws.handshake", (request) => {
+        const consumed = engine.consumeRefusal({
+          sessionID: request.sessionID,
+          providerID: request.model.providerID,
+          modelID: request.model.id,
+          kind: request.kind,
+        });
+        if (!consumed) return;
+        request.url = REFUSED_HANDSHAKE_URL;
+        request.headers = { [REFUSED_HEADER]: "1" };
+      }),
+    ];
     const hooks = await Promise.all([
       // Pre-model pricing guard: runs before any provider attempt (and before
       // OpenCode's response-header timeout clock) exists, so a request that must
@@ -84,24 +118,28 @@ export default Plugin.define({
           transport: "model",
         }),
       ),
-      context.session.hook("http.request", (request) =>
-        engine.guardRequest({
+      context.session.hook("http.request", (request) => {
+        // A refused placeholder must not be re-evaluated: the cancellation
+        // already decided this attempt is not sent.
+        if (isRefusedRequestUrl(request.request.url)) return;
+        return engine.guardRequest({
           sessionID: request.sessionID,
           providerID: request.model.providerID,
           modelID: request.model.id,
           kind: request.kind,
           transport: "http",
-        }),
-      ),
-      context.session.hook("experimental.ws.handshake", (request) =>
-        engine.guardRequest({
+        });
+      }),
+      context.session.hook("experimental.ws.handshake", (request) => {
+        if (isRefusedHandshakeUrl(request.url)) return;
+        return engine.guardRequest({
           sessionID: request.sessionID,
           providerID: request.model.providerID,
           modelID: request.model.id,
           kind: request.kind,
           transport: "websocket",
-        }),
-      ),
+        });
+      }),
       context.session.hook("experimental.ws.send", (request) =>
         engine.guardRequest({
           sessionID: request.sessionID,
@@ -214,6 +252,16 @@ export default Plugin.define({
             );
         }
       },
+      cancelHold: async (rawInput: unknown): Promise<OffpeakRpcOutput> => {
+        const input = rawInput as { sessionID?: string; reason?: string };
+        const sessionID = input.sessionID?.trim();
+        if (!sessionID) throw new Error("cancelHold requires a sessionID.");
+        const result = await engine.cancelHold({
+          sessionID,
+          ...(input.reason ? { reason: input.reason } : {}),
+        });
+        return { ...result };
+      },
     });
 
     await engine.start();
@@ -237,7 +285,10 @@ export default Plugin.define({
       eventAbort.abort();
       await events;
       await engine.dispose();
-      await Promise.all(hooks.map((registration) => registration.dispose()));
+      await Promise.all([
+        ...refusalHooks.map((registration) => registration.dispose()),
+        ...hooks.map((registration) => registration.dispose()),
+      ]);
       await rpc.dispose();
     };
   },
