@@ -9,7 +9,7 @@ The plugin does not run a second agent runtime. OpenCode owns the sessions, mode
 
 ## Compatibility enforcement
 
-Both entrypoints are defined with `Plugin.define(...)` and start by checking `context.app.version` against the tested range `>=2.0.26 <2.1.0` (validated against OpenCode 2.0.26 and 2.0.27; the same range declared in `package.json` `engines.opencode`). OpenCode releases before 2.0.26 activate TUI plugins outside the Solid keymap provider owner, so `context.keymap.layer()` fails with `Keymap.Provider is missing` there even though the plugin follows the documented API. On an unsupported host the plugin refuses to initialize with an explicit, actionable version error instead of reaching that confusing runtime failure.
+Both entrypoints are defined with `Plugin.define(...)` and start by checking `context.app.version` against the tested range `>=2.0.26 <2.1.0` (validated against OpenCode 2.0.26, 2.0.27, and 2.0.30; the same range declared in `package.json` `engines.opencode`). OpenCode releases before 2.0.26 activate TUI plugins outside the Solid keymap provider owner, so `context.keymap.layer()` fails with `Keymap.Provider is missing` there even though the plugin follows the documented API. On an unsupported host the plugin refuses to initialize with an explicit, actionable version error instead of reaching that confusing runtime failure.
 
 ```mermaid
 flowchart LR
@@ -28,6 +28,8 @@ flowchart LR
 ## State and persistence
 
 The queue is one versioned JSON document in OpenCode plugin storage. Each task stores its ID, prompt, working directory, provider/model, policy ID, state, explicit OpenCode session ID, timestamps, retry metadata, last error, and any expiring override. There is no database or second queue service.
+
+Session-scoped off-peak protection is a second, tiny plugin-storage document (`opencode-offpeak/session-overrides-v1`) that records only the sessions the user explicitly switched off (`protection: "off"` with an update timestamp); the absence of an entry means protection is ON, which is the default for every session. It is deliberately not part of `offpeak.json`: it describes one interactive session's explicit authorization, not an installation setting, and it survives reloads and restarts with the session. OpenCode's supported `session.deleted` event removes an entry when its session is deleted; otherwise stale entries are reaped by bounded lazy cleanup on start-up, session commands, and status reads. Only a confident "session not found" is ever treated as deletion — a transient error keeps the entry. There is no timer, no expiry, and no periodic sweep.
 
 The setting file is `$OPENCODE_CONFIG_DIR/offpeak.json` when `OPENCODE_CONFIG_DIR` is set; otherwise it is `$XDG_CONFIG_HOME/opencode/offpeak.json`, defaulting to `~/.config/opencode/offpeak.json`. `OPENCODE_OFFPEAK_CONFIG` can override the file path. It is canonical for the persistent enabled toggle, execution mode, display timezone, and policy definitions. Commands write it atomically with owner-only permissions. The queue remains in OpenCode storage.
 
@@ -72,6 +74,14 @@ holding --cancelHold-------> refused     (cancellation wins; the request is refu
 A session can hold several requests at once (the agent loop and an auxiliary title request are prepared concurrently), so holds are tracked per request and `cancelHold` cancels every waiting request of that session. A `refused` hold returns from the loop and arms a one-shot refusal keyed by session, provider, model, and kind. The transport-boundary hooks registered before the pricing guards consume it and replace the request with a credential-free placeholder aimed at a closed loopback endpoint, so OpenCode sees a retryable transport failure and its own retry policy decides what happens next. A placeholder is never re-evaluated by the guards. An armed refusal expires after 60 seconds and is dropped when a fresh hold starts for the same session, so it cannot refuse an unrelated request. `consumeRefusal` also suppresses this plugin's own retry recovery for that one failure, because a refusal is not a provider failure and the caller owns the follow-up.
 
 The mechanism is deliberately generic: this plugin exports a capability, not a policy. It knows nothing about who calls it or why, a queue-owned hold is never cancellable this way, and an unused capability changes nothing.
+
+### Session-scoped off-peak protection
+
+`/offpeak session off` records an explicit per-session authorization for verified peak-priced inference; `/offpeak session on` removes it. The TUI resolves the current session from OpenCode's supported command context — `ui.router.current()` (the focused route) first, then the active entry of `ui.tabs.list()` — so the user never types a session ID; on the home screen, where no session is focused, the command refuses instead of guessing.
+
+The override is checked inside the request guard after the fail-closed guards and only for requests that are not queue-owned: a request that evaluates `PEAK` under a verified policy is allowed immediately for that session, and `UNKNOWN`/invalid-configuration requests still fail closed. A hold that is already waiting re-reads the override after every signal wake-up, so switching protection off commits the same parked request through the existing signal — no re-send, no retry, no duplicate provider call, no polling loop. Persisted recovery entries for the session are released on the same pass, keeping the native order (pending compaction, primary continuation, title check); entries of other sessions and other classes are untouched. A refused or committed hold is never recalled, and switching protection back on changes nothing for a request already dispatched — the next request that crosses the guard waits normally again.
+
+Precedence is explicit and documented: the per-session grant is newer and more specific than the global automation state, so it applies in `auto`, `queue`, and `guard` modes and while the plugin is globally OFF — for that one session only. `/offpeak off` itself stays passive (it pauses every queue start and auto-resume, releases nothing, and blocks every other session and every task). Background queue tasks never inherit the override, even when they run in the same OpenCode session; `/offpeak run-now <task-id>` remains the task-scoped authorization. Status reports the current session's protection and, at peak with protection off, renders `Pricing: PEAK` with `Requests: ALLOWED (session override)`.
 
 ### Auxiliary requests and pending titles
 
@@ -125,6 +135,8 @@ Recovery delivery is guarded against live work so it can never duplicate it. `se
 ## Override
 
 `/offpeak run-now <task-id>` is a task-scoped, 15-minute override. It is persisted with an absolute expiry and shown in status while active. OFF pauses its use; it does not create or extend it. Expiry returns the next provider request to normal policy enforcement.
+
+`/offpeak session on|off` is the separate, session-scoped, non-expiring protection switch described above. The two overrides are independent and never converted into one another: a task override never applies to an interactive session, and a session override never applies to a queue task.
 
 ## Intentionally outside the architecture
 

@@ -2,7 +2,7 @@
 
 ## `/offpeak` is not recognized
 
-Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
 
 ## `Keymap.Provider is missing` in the TUI
 
@@ -17,6 +17,10 @@ Run `/offpeak status` and `/offpeak list`. Confirm the plugin is ON, `mode` is n
 Check status for `PEAK`, `UNKNOWN`, or `UNTRACKED`. `UNKNOWN` for a configured provider usually means a new model ID or invalid policy/config. Fix the policy using current provider pricing sources. Do not disable the plugin as a price override.
 
 If you intentionally accept peak pricing for a queued task, turn the plugin ON and use `/offpeak run-now <task-id>`. The override expires after 15 minutes.
+
+## One session should run through peak
+
+Use `/offpeak session off` in that session. It disables off-peak protection for the current interactive session only: its verified peak-priced requests run immediately (including compaction, title, and generate work), and a request it already has waiting for off-peak wakes on the spot — no `continue` message and no re-sent prompt. Every other session and every queue task stays protected. `/offpeak session on` restores the default. There is no timer: the override persists across reloads and restarts until you change it or the session is deleted. Run the command from an open session; on the home screen it refuses because no session is focused. `UNKNOWN` models and an invalid configuration still fail closed even for an overridden session, and `OFF_PEAK`/`FLAT`/`UNTRACKED` behavior is unchanged. `/offpeak status` shows `Session protection: ON|OFF` and, while peak is active with protection off, `Requests: ALLOWED (session override)`.
 
 ## Interactive message waits at peak
 

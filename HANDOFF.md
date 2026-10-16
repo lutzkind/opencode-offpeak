@@ -349,23 +349,23 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
-- Package: `opencode-offpeak@0.1.6`, MIT
+- Package: `opencode-offpeak@0.1.10`, MIT
 - Verified CLI: OpenCode v2.0.26, v2.0.27 and v2.0.30
 - Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
-- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.6`
+- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
 
 ## Architecture
 
 One package uses OpenCode v2 request hooks, session APIs, plugin storage, RPC, and background server. Queue metadata is persisted in OpenCode plugin storage. The persistent toggle and policy configuration live in `$OPENCODE_CONFIG_DIR/offpeak.json`, or `$XDG_CONFIG_HOME/opencode/offpeak.json` by default. Task records keep explicit OpenCode session IDs. There is no database, second agent runtime, daemon, remote queue, or telemetry.
 
-The request guard checks HTTP and experimental WebSocket model requests before transport. It fails closed for invalid configuration, invalid pricing data, and unknown models under a configured provider. `OFF` pauses queue automation and keeps the hard guard active; only the explicit task-scoped 15-minute `/offpeak run-now <task-id>` action can authorize peak inference.
+The request guard checks HTTP and experimental WebSocket model requests before transport. It fails closed for invalid configuration, invalid pricing data, and unknown models under a configured provider. `OFF` pauses queue automation and keeps the hard guard active; only the explicit task-scoped 15-minute `/offpeak run-now <task-id>` action can authorize peak inference for a task, and only the explicit session-scoped `/offpeak session off` can authorize verified peak inference for one interactive session.
 
-Two built-in policies ship (v0.1.6): `deepseek-opencode-go` (provider `opencode-go`) and `deepseek-api` (provider `deepseek`, the direct DeepSeek API), sharing one verified UTC schedule — weekdays 01:00–04:00 and 06:00–10:00 UTC are peak; weekends, the remaining hours, and Chinese statutory public holidays are off-peak — and one shared Chinese holiday calendar. Vendor-documented flat-priced models evaluate `FLAT` (never held); a model with no verified entry fails closed. OpenCode Zen (provider `opencode`) has no time-based pricing at all and therefore no policy: its requests are never delayed. Each policy carries its own source URL and `verifiedAt` date; provider terms can change, so re-verify the sources before updating a policy (see `docs/pricing-policies.md`).
+Two built-in policies ship: `deepseek-opencode-go` (provider `opencode-go`) and `deepseek-api` (provider `deepseek`, the direct DeepSeek API), sharing one verified UTC schedule — weekdays 01:00–04:00 and 06:00–10:00 UTC are peak; weekends, the remaining hours, and Chinese statutory public holidays are off-peak — and one shared Chinese holiday calendar. Vendor-documented flat-priced models evaluate `FLAT` (never held); a model with no verified entry fails closed. OpenCode Zen (provider `opencode`) has no time-based pricing at all and therefore no policy: its requests are never delayed. Each policy carries its own source URL and `verifiedAt` date; provider terms can change, so re-verify the sources before updating a policy (see `docs/pricing-policies.md`).
 
 ## Implemented behavior
 
-- Persistent `/offpeak on`, `/offpeak off`, `/offpeak status`, `/offpeak pricing`, `/offpeak list`, `/offpeak queue`, `/offpeak cancel`, `/offpeak retry`, `/offpeak resume`, and `/offpeak run-now` controls.
+- Persistent `/offpeak on`, `/offpeak off`, `/offpeak session on`, `/offpeak session off`, `/offpeak status`, `/offpeak pricing`, `/offpeak list`, `/offpeak queue`, `/offpeak cancel`, `/offpeak retry`, `/offpeak resume`, and `/offpeak run-now` controls. Session protection is per session, defaults to ON, persists until changed, and never affects another session or a queue task.
 - Sequential queue with FIFO order, task-specific model/policy/working directory, explicit session binding, cancellation, retry, and visible failure state.
 - `auto`, `queue`, and `guard` modes; automatic same-session pause/resume in `auto` mode.
 - Request-boundary block for peak pricing, including tasks that cross a pricing boundary. Local tools already in flight are allowed to settle.
@@ -407,7 +407,7 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 ## User action required
 
-None. The v0.1.6 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. The server-side plugin is already reloaded to v0.1.6; a TUI process started before the reload (for example PID 4053968) keeps its older TUI entrypoint until it is relaunched, so relaunch a TUI to see the new `/offpeak status` wording and the hold/resume toasts. Plugin behavior (holding, recovery, notifications on the event stream) is server-side and unaffected by an older TUI process.
+None. The v0.1.10 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. The server-side plugin is already reloaded to v0.1.10; a TUI process started before the reload keeps its older TUI entrypoint until it is relaunched, so relaunch a TUI to see the `/offpeak session on|off` command and the `Session protection` status line. Plugin behavior (holding, recovery, session overrides) is server-side and unaffected by an older TUI process. Running `/offpeak session on|off` requires a focused session; on the home screen the command refuses instead of guessing.
 
 ## Next normal maintenance
 

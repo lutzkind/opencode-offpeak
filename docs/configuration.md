@@ -23,6 +23,8 @@ If `policies` is omitted, the built-in DeepSeek/OpenCode Go policy is used. If y
 - `displayTimeZone`: valid IANA timezone for status output; defaults to the system timezone.
 - `policies`: complete list of pricing policy definitions. See [pricing policies](pricing-policies.md).
 
+`/offpeak session on|off` does not write this file. Session-scoped off-peak protection is stored as an explicit per-session override in OpenCode plugin storage (key `opencode-offpeak/session-overrides-v1`); the default for every session is ON, and absence of an entry means protection is on. The override is deliberately not part of `offpeak.json` because it belongs to one interactive session, not to the installation: it survives reloads and restarts with the session, is removed when the session is deleted, and never changes global settings. While a session's protection is off it may dispatch verified peak-priced work at peak rates (see the README section); `UNKNOWN` models and invalid configuration still fail closed for it.
+
 The policy timezone is authoritative for pricing. Changing `displayTimeZone` does not move a pricing boundary. The running server watches the config file and reloads settings after atomic updates.
 
 ## Invalid configuration
