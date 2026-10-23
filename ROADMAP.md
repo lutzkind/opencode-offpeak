@@ -2,7 +2,7 @@
 
 ## Current: 0.1.x
 
-- OpenCode CLI v2.0.26 API adapter.
+- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.1.3 (v0.2.0).
 - DeepSeek via OpenCode Go policy.
 - Persistent sequential queue, ON/OFF, status/list/cancel/retry/resume controls.
 - Request-boundary HTTP and experimental WebSocket guard.

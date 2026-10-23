@@ -4,15 +4,15 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 
 `opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. Pricing is enforced at two lifecycle points: a pre-model deferral and the outbound transport guard. In `auto` mode, a supported request that reaches peak pricing waits at the pre-model hook — before OpenCode creates the provider attempt and its response-header timer — and the same session continues the same turn automatically when off-peak pricing returns, with zero provider traffic while pricing is blocked. The transport guard remains the final hard barrier immediately before OpenCode sends an HTTP request or an experimental WebSocket frame. If a request is already in flight and fails with a retryable provider/network error after peak pricing begins, the retry is stopped before it can reach the provider and the same session continues automatically at the next off-peak window. When one session must deliberately run through a peak window, `/offpeak session off` authorizes verified peak-priced inference for that session alone; every other session stays protected.
 
-> **Compatibility:** OpenCode CLI `>=2.0.26 <2.1.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26, 2.0.27, and 2.0.30. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime. Later API versions are not claimed until CI and runtime checks cover them.
+> **Compatibility:** OpenCode CLI `>=2.0.26 <2.2.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26, 2.0.27, 2.0.30, and the current production **2.1.3**. OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses; the real TUI and headless coexistence suites run on 2.1.3. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime.
 
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.0
 ```
 
-This installs the released `v0.1.10` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.2.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -83,6 +83,24 @@ rpc.opencode-offpeak.cancelHold { sessionID, reason? }
 The refusal is deliberately boring: the outgoing request is replaced with a placeholder aimed at a closed loopback endpoint (`127.0.0.1:1`) carrying only the marker header `x-opencode-offpeak-refused`. It holds no credentials, no provider headers, no user data, and no body, it cannot reach any service, and the pricing guard skips it instead of holding it again. This is the only supported way to give OpenCode a retryable failure from a plugin: a hook that throws would end the whole execution instead.
 
 A refusal produced this way is not treated as a provider failure, so the peak-aware retry recovery does not register a continuation for it — the caller that asked for the cancellation owns what happens next, and no work is ever resumed twice.
+
+### Canonical pricing for other plugins (`pricing` RPC)
+
+Another plugin may need to know whether a model is in a verified PEAK window
+without copying this plugin's schedule or holiday calendar. The read-only
+`pricing` RPC is the canonical answer:
+
+```
+rpc.opencode-offpeak.pricing { providerID, modelID }
+  -> { state: "PEAK" | "OFF_PEAK" | "FLAT" | "UNTRACKED" | "UNKNOWN",
+       allowed: boolean, policyID?, nextTransition?, reason? }
+```
+
+It evaluates the same configured policies and clock as the guard and has no side
+effects: it never queues, holds, blocks, or sends a request. `opencode-free-first`
+`v0.2.0` uses it for `freeUsageMode: "peak-only"`; an unavailable RPC or an
+unrecognized state is treated as not-PEAK by the consumer. The method does not
+create a second pricing engine or expose any mutable state.
 
 ### Session-scoped off-peak protection (`/offpeak session on|off`)
 

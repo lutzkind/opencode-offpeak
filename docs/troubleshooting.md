@@ -2,7 +2,7 @@
 
 ## `/offpeak` is not recognized
 
-Confirm the installed CLI is within `>=2.0.26 <2.1.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+Confirm the installed CLI is within `>=2.0.26 <2.2.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.0`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
 
 ## `Keymap.Provider is missing` in the TUI
 
@@ -26,7 +26,7 @@ Use `/offpeak session off` in that session. It disables off-peak protection for 
 
 In `auto` mode, a supported interactive request sent during a peak window is deferred at OpenCode's pre-model hook — before any provider attempt (and its response-header timeout) starts — instead of being discarded or timing out, and the same session proceeds automatically when off-peak returns; no second message is needed. `/offpeak status` shows it under `Interactive` while it waits. In `queue` or `guard` mode, and while the plugin is OFF, interactive peak requests are blocked immediately by the transport guard. If a deferred request fails closed because the plugin or server shut down, resend it after the server is back.
 
-While the request is held, the TUI keeps its normal animated "working" indicator even though nothing has been sent to the provider. OpenCode 2.0.26–2.0.30 reports a session as either `idle` or `running` and exposes no "waiting" state to plugins (the hold happens inside the request hook, before any provider attempt), so the indicator cannot be switched off without ending the turn; the hold toast (transient, about 15 seconds) and `/offpeak status` (persistent) are the authoritative waiting signals. The indicator stops when the execution settles: at the off-peak release it flows straight into the real request, and after a user cancel, a service shutdown/reload, or OpenCode's 60-minute inactivity sweep the session goes idle — except after a user cancel, the persisted deferral continues the same session at the next allowed window.
+While the request is held, the TUI keeps its normal animated "working" indicator even though nothing has been sent to the provider. OpenCode 2.0.26–2.1.3 reports a session as either `idle` or `running` and exposes no "waiting" state to plugins (the hold happens inside the request hook, before any provider attempt), so the indicator cannot be switched off without ending the turn; the hold toast (transient, about 15 seconds) and `/offpeak status` (persistent) are the authoritative waiting signals. The indicator stops when the execution settles: at the off-peak release it flows straight into the real request, and after a user cancel, a service shutdown/reload, or OpenCode's 60-minute inactivity sweep the session goes idle — except after a user cancel, the persisted deferral continues the same session at the next allowed window.
 
 ## Manual compaction during peak
 

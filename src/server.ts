@@ -9,7 +9,12 @@ import {
   REFUSED_HEADER,
   refusedRequest,
 } from "./refused.js";
-import { OFFPEAK_RPC, type OffpeakRpcInput, type OffpeakRpcOutput } from "./rpc.js";
+import {
+  OFFPEAK_RPC,
+  type OffpeakPricingOutput,
+  type OffpeakRpcInput,
+  type OffpeakRpcOutput,
+} from "./rpc.js";
 import { QueueRepository, RecoveryRepository, SessionOverridesRepository } from "./store.js";
 
 export default Plugin.define({
@@ -314,6 +319,15 @@ export default Plugin.define({
               "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|session on|session off",
             );
         }
+      },
+      pricing: async (rawInput: unknown): Promise<OffpeakPricingOutput> => {
+        const input = rawInput as { providerID?: unknown; modelID?: unknown };
+        const providerID = typeof input.providerID === "string" ? input.providerID.trim() : "";
+        const modelID = typeof input.modelID === "string" ? input.modelID.trim() : "";
+        if (!providerID || !modelID) {
+          throw new Error("pricing requires providerID and modelID.");
+        }
+        return engine.pricing({ providerID, modelID });
       },
       cancelHold: async (rawInput: unknown): Promise<OffpeakRpcOutput> => {
         const input = rawInput as { sessionID?: string; reason?: string };

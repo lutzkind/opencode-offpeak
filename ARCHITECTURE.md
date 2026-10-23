@@ -9,7 +9,7 @@ The plugin does not run a second agent runtime. OpenCode owns the sessions, mode
 
 ## Compatibility enforcement
 
-Both entrypoints are defined with `Plugin.define(...)` and start by checking `context.app.version` against the tested range `>=2.0.26 <2.1.0` (validated against OpenCode 2.0.26, 2.0.27, and 2.0.30; the same range declared in `package.json` `engines.opencode`). OpenCode releases before 2.0.26 activate TUI plugins outside the Solid keymap provider owner, so `context.keymap.layer()` fails with `Keymap.Provider is missing` there even though the plugin follows the documented API. On an unsupported host the plugin refuses to initialize with an explicit, actionable version error instead of reaching that confusing runtime failure.
+Both entrypoints are defined with `Plugin.define(...)` and start by checking `context.app.version` against the tested range `>=2.0.26 <2.2.0` (validated against OpenCode 2.0.26, 2.0.27, 2.0.30, and 2.1.3; the same range declared in `package.json` `engines.opencode`). OpenCode 2.1's session/compaction schema change (`providerState` → `native`) does not affect the hooks used here; its internal retry of buffered model calls only changes how quickly a failed probe settles. OpenCode releases before 2.0.26 activate TUI plugins outside the Solid keymap provider owner, so `context.keymap.layer()` fails with `Keymap.Provider is missing` there even though the plugin follows the documented API. On an unsupported host the plugin refuses to initialize with an explicit, actionable version error instead of reaching that confusing runtime failure.
 
 ```mermaid
 flowchart LR
@@ -61,6 +61,16 @@ The server plugin registers two lifecycle points:
 - `http.request`, `experimental.ws.handshake`, and `experimental.ws.send` — run immediately before the provider transport sends the request/frame. These remain the final hard barrier: a blocked request never crosses them, and OFF/`queue`/`guard` modes block interactive requests here exactly as before.
 
 A queued `auto` task transitions to `WAITING_OFFPEAK` and waits at whichever point it reaches first (normally `model.request`); its existing override still applies. In `auto` mode, a normal interactive request for a supported model is deferred the same way. It creates no task and no session, is tracked only in server memory (shown by `/offpeak status`), and is released exactly once when the plugin is enabled and the policy allows. Wake-ups come from the shared config-change signal plus one timer scheduled for the policy's `nextTransition`; there is no polling loop. If the plugin shuts down while a request is held, the request fails closed as blocked rather than being sent under an uncertain pricing state. Requests in `queue`/`guard` mode, and requests that arrive while the plugin is OFF, are blocked immediately by the transport guard; OFF does not release a request that is already held.
+
+### Read-only pricing query
+
+`pricing` is the second RPC method and the single canonical classification
+surface for other plugins. It takes `{ providerID, modelID }`, calls the same
+`evaluatePricing` used by every guard with the same stored policies and clock,
+and returns `{ state, allowed, policyID?, nextTransition?, reason? }`. It has no
+queue, hold, timer, or persistence side effect. `opencode-free-first` consumes it
+for `peak-only`; this plugin remains the only owner of the weekly windows and the
+Chinese holiday calendar.
 
 ### Cancelling a held request
 

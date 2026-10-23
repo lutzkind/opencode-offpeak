@@ -54,6 +54,23 @@ const systemClock: EngineClock = {
   clearTimeout: (timer) => clearTimeout(timer),
 };
 
+export interface PricingQuery {
+  providerID: string;
+  modelID: string;
+}
+
+/**
+ * Read-only answer for the canonical pricing classification. Other plugins use
+ * this instead of copying the schedule or holiday calendar.
+ */
+export interface PricingAnswer {
+  state: PolicyDecision["state"];
+  allowed: boolean;
+  policyID?: string;
+  nextTransition?: number;
+  reason?: string;
+}
+
 export interface EngineStatus {
   enabled: boolean;
   mode: OffpeakConfig["mode"];
@@ -623,6 +640,35 @@ export class OffpeakEngine {
     });
     this.#signal.notify();
     this.#requestPump();
+  }
+
+  /**
+   * Evaluate the configured pricing policy for one model. This is the single
+   * source of truth for PEAK/OFF_PEAK and is deliberately side-effect free:
+   * no queue, hold, timer, or provider request is involved.
+   */
+  async pricing(input: PricingQuery): Promise<PricingAnswer> {
+    const settings = await this.#config.read();
+    if (!settings.config) {
+      return {
+        state: "UNKNOWN",
+        allowed: false,
+        reason: settings.error ?? "Offpeak configuration is unavailable.",
+      };
+    }
+    const decision = evaluatePricing(
+      settings.config.policies,
+      input.providerID,
+      input.modelID,
+      this.#clock.now(),
+    );
+    return {
+      state: decision.state,
+      allowed: decision.allowed,
+      ...(decision.policy?.id === undefined ? {} : { policyID: decision.policy.id }),
+      ...(decision.nextTransition === undefined ? {} : { nextTransition: decision.nextTransition }),
+      ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+    };
   }
 
   async status(current?: {

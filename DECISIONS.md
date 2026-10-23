@@ -107,3 +107,28 @@ Sometimes one interactive session must deliberately run through a peak window wh
 The override is deliberately narrow. It authorizes only requests that evaluate `PEAK` under a verified policy, and only for that one interactive session: `UNKNOWN` and invalid configuration still fail closed, `OFF_PEAK`/`FLAT`/`UNTRACKED` behavior is unchanged, queue-owned sessions never inherit it (a task running in the same OpenCode session still obeys its own task semantics and `/offpeak run-now`), and no other session changes. It covers the session's native lifecycle work (primary, compaction, title, generate) because the user authorized the session, not a request kind. It is checked after every fail-closed guard, so it cannot turn an unverified model into an allowed request.
 
 Two collision points were defined explicitly rather than left implicit. First, a hold that is already waiting must wake immediately: the hold loop re-reads the override after every signal wake-up, and `setSessionProtection` notifies the existing signal and pump, so the same parked request commits with no re-send, no retry, no duplicate provider call, and no new polling, watchdog, or timer; persisted recovery entries for that session are released on the same pass in native order. A refused hold (v0.1.7/v0.1.8 `cancelHold`) is handled before the override check and is never resurrected, and a committed dispatch is never recalled. Second, global precedence: `/offpeak off` remains passive automation (it pauses queue starts and auto-resume, releases nothing, and blocks every session and task), but the explicit per-session grant is newer and more specific, so it applies in `auto`/`queue`/`guard` modes and even while the plugin is globally OFF — for that one session only. This is a deliberate, documented choice in the same category as an explicit `run-now` authorization, not a silent redefinition of `/offpeak off`. Evidence: 19 new deterministic tests (134 total) for the full matrix, and real OpenCode 2.0.30 TUI fixture runs where a held request releases on the spot with exactly one provider call before the boundary, a second session keeps waiting through the same peak window, the override survives a reload and a full server restart, and compaction runs immediately under the override with no pending marker while compact-first behavior with protection on is unchanged.
+
+## OpenCode 2.1 compatibility and the canonical pricing RPC (v0.2.0)
+
+The live host was auto-upgraded from OpenCode 2.0.30 to 2.1.3 and this package
+refused to load because the declared range was `>=2.0.26 <2.1.0`. The failure was
+the guard itself, not a missing runtime contract: the 2.1.0 breaking change
+renamed the session/step payload's `providerState` to `native`, and this plugin
+does not read that field. It relies on `model.request`, `http.request` /
+`http.response`, the experimental WebSocket hooks, `retry`, `session.execution.*`
+and `session.model.selected` events, model transforms, and RPC — all unchanged in
+shape and order. The range is therefore extended to `>=2.0.26 <2.2.0` only after
+the real TUI and the full free-first coexistence suites pass on 2.1.3. A new
+minor line is not claimed on version-number compatibility alone: the guard moves
+with tested evidence.
+
+The same release adds a read-only `pricing` RPC that delegates directly to
+`evaluatePricing`. `opencode-free-first` needs to know whether DeepSeek Go is in
+PEAK before deciding whether Free may be spent. The alternatives were to import
+this plugin (couples lifecycles and packaging), copy the weekly windows and
+holiday calendar (two authorities that drift), or scrape status text (unstable).
+A small RPC is the same pattern as the existing `cancelHold` capability: a
+generic, side-effect-free interface on the existing OpenCode plugin RPC channel,
+with no new service, queue, timer, or state. The method returns exactly the
+canonical answer, including `nextTransition`, so the consumer can cache until the
+boundary rather than poll.

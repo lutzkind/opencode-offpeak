@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 - 2026-10-23
+
+### Added
+
+- **Read-only `pricing` RPC.** `{ providerID, modelID }` returns
+  `{ state, allowed, policyID?, nextTransition?, reason? }` from the same
+  `evaluatePricing` used by the guards, with no queue, hold, timer, provider
+  request, or persisted-state side effect. It is the canonical PEAK/OFF_PEAK
+  source for `opencode-free-first` `freeUsageMode: "peak-only"`, which needs no
+  copy of the weekly windows or Chinese holiday calendar.
+
+### Compatibility
+
+- **OpenCode `>=2.0.26 <2.2.0`**, validated against the current production
+  **2.1.3** binary. Root cause of the live load failure was the package's
+  deliberately narrow `<2.1.0` version guard, not a removed hook: OpenCode 2.1's
+  breaking session-schema change (`providerState` → `native`) is not used by
+  this plugin, and `model.request`, the HTTP/WebSocket guards, `retry`, session
+  events, RPC, and both entrypoints behave as before. The real TUI smoke test now
+  loads the packed plugin and runs `/offpeak status` on 2.1.3; the full
+  deterministic suite passes.
+
+### Tests
+
+- 134 deterministic tests, including a real OpenCode 2.1.3 TUI load and
+  `/offpeak status`, the packed-install manifest contract, and the new pricing
+  RPC (canonical PEAK answer, policy id, next transition, input validation).
+
 ## 0.1.10 - 2026-10-16
 
 - **Session-scoped off-peak protection (`/offpeak session on|off`).** One interactive session can now deliberately run through a peak window while every other session stays protected. `/offpeak session off` disables off-peak protection for the current session only: its verified peak-priced requests (primary, compaction, title, and generate alike) run immediately, and a request it already has waiting for off-peak is released on the spot through the existing engine signal — no `continue` prompt, no re-sent message, no duplicate provider call, no polling loop. `/offpeak session on` restores normal waiting. The default is ON for every session, and only explicit overrides are stored.
