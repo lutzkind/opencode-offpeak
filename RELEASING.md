@@ -2,13 +2,22 @@
 
 ## Current public distribution
 
-`v0.1.10` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
+`v0.2.0` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.0
 ```
 
-`v0.1.0` through `v0.1.9` remain available at their own tags, but `v0.1.10` is the canonical release: it adds session-scoped off-peak protection (`/offpeak session on|off` — an explicit, persistent, timer-free authorization for one interactive session to use verified peak-priced inference while every other session stays protected; the override wakes already-held work immediately, survives reloads and restarts, never touches queue tasks, and still fails closed for `UNKNOWN` and invalid configuration). This sits on top of the v0.1.9 pending-compaction recovery, the v0.1.7/v0.1.8 hold-cancellation work, the v0.1.6 direct DeepSeek API/verified Zen/held-request feedback, the v0.1.5 title-recovery work, the v0.1.4 pre-model peak deferral and Chinese holiday policy, the v0.1.3 retry recovery, the v0.1.2 interactive boundary hold, the v0.1.1 compatibility enforcement, the documented `Plugin.define(...)` TUI shape, and the real-TUI regression smoke test. OpenCode officially accepts npm-compatible Git package specifications, including GitHub URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)). This install path loads both the server and TUI entrypoints. npm publication is optional future distribution; npm login, 2FA, or registry publication is not required before this release can be installed or used.
+`v0.1.0` through `v0.1.10` remain available at their own tags. `v0.2.0` is the
+canonical release: it extends the tested OpenCode range through 2.1.3 and adds
+the read-only canonical `pricing` RPC consumed by `opencode-free-first`
+`peak-only`. The 2.1.3 validation covers the real TUI load and `/offpeak status`,
+the full deterministic suite, and the two-plugin coexistence suite. OpenCode
+officially accepts npm-compatible Git package specifications, including GitHub
+URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)).
+This install path loads both the server and TUI entrypoints. npm publication is
+optional future distribution; npm login, 2FA, or registry publication is not
+required before this release can be installed or used.
 
 ## Optional npm distribution
 

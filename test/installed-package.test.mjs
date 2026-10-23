@@ -30,7 +30,7 @@ test("a clean packed install loads both entrypoints and keeps the manifest contr
     const packageRoot = path.join(extract, "package");
     const installed = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
     assert.equal(installed.version, manifest.version);
-    assert.equal(installed.engines.opencode, ">=2.0.26 <2.1.0");
+    assert.equal(installed.engines.opencode, ">=2.0.26 <2.2.0");
     assert.equal(installed.engines.node, ">=22");
     assert.equal(installed.main, "./src/server.ts");
     assert.equal(installed.exports["./tui"].bun, "./tui.ts");

@@ -2,13 +2,17 @@
  * OpenCode host compatibility.
  *
  * The plugin is tested against the OpenCode v2 plugin API shipped with
- * OpenCode 2.0.26. Hosts before 2.0.26 activate TUI plugins outside the
- * Solid keymap provider owner, so `context.keymap.layer()` fails with
- * "Keymap.Provider is missing" even though the plugin follows the
- * documented API. Unsupported hosts must fail with this explicit
- * compatibility error instead of the confusing runtime failure.
+ * OpenCode 2.0.26 through 2.1.3. Hosts before 2.0.26 activate TUI plugins
+ * outside the Solid keymap provider owner, so `context.keymap.layer()` fails
+ * with "Keymap.Provider is missing" even though the plugin follows the
+ * documented API. OpenCode 2.1 changes the session/compaction payload schema
+ * (`providerState` → `native`) but not the plugin hooks this plugin uses
+ * (`model.request`, `http.request`, `retry`, session events, RPC); it is
+ * covered by the compatibility and coexistence suites. Unsupported hosts must
+ * fail with this explicit compatibility error instead of the confusing runtime
+ * failure.
  */
-export const SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.1.0";
+export const SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.2.0";
 
 const VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/;
 
@@ -19,7 +23,9 @@ export function isSupportedOpenCodeVersion(version: string): boolean {
   const major = Number(match[1]);
   const minor = Number(match[2]);
   const patch = Number(match[3]);
-  return major === 2 && minor === 0 && patch >= 26;
+  if (major !== 2) return false;
+  if (minor === 0) return patch >= 26;
+  return minor === 1;
 }
 
 /**

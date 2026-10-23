@@ -28,6 +28,24 @@ export const OFFPEAK_RPC = {
       output: object,
     },
     /**
+     * Read-only pricing classification for one model. This is the canonical
+     * PEAK/OFF_PEAK source for other plugins (for example
+     * `opencode-free-first`), evaluated with this plugin's configured policies,
+     * holiday calendar, and clock. It never queues, holds, or sends a request.
+     */
+    pricing: {
+      input: {
+        type: "object",
+        properties: {
+          providerID: { type: "string" },
+          modelID: { type: "string" },
+        },
+        required: ["providerID", "modelID"],
+        additionalProperties: false,
+      },
+      output: object,
+    },
+    /**
      * Cancel a request this plugin is holding for the session, without
      * interrupting the session. Generic infrastructure for any caller that
      * decides a parked request is obsolete: the request is refused at the
@@ -126,4 +144,15 @@ export interface OffpeakRpcOutput {
   cancelled?: boolean;
   state?: string;
   model?: string;
+}
+
+/** Answer to the read-only `pricing` RPC. */
+export interface OffpeakPricingOutput {
+  /** `PEAK`, `OFF_PEAK`, `FLAT`, `UNTRACKED`, or `UNKNOWN`. */
+  state: string;
+  allowed: boolean;
+  policyID?: string;
+  /** Epoch milliseconds of the next classification boundary, when known. */
+  nextTransition?: number;
+  reason?: string;
 }

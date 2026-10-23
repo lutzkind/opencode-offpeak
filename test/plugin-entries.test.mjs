@@ -137,6 +137,20 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
   try {
     assert.equal(rpcDefinition.id, "opencode-offpeak");
     assert.deepEqual(Object.keys(rpcDefinition.events).sort(), ["hold", "resume"]);
+    // The canonical, side-effect-free pricing classification exposed to other
+    // plugins. It uses the same configured policy and never queues or holds.
+    const pricing = await rpcHandlers.pricing({
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+    });
+    assert.equal(pricing.state, "PEAK");
+    assert.equal(pricing.allowed, false);
+    assert.equal(pricing.policyID, "deepseek-opencode-go");
+    assert.equal(typeof pricing.nextTransition, "number");
+    await assert.rejects(
+      rpcHandlers.pricing({ providerID: "opencode-go" }),
+      /pricing requires providerID and modelID/,
+    );
     assert.ok(hooks.has("model.request"));
     assert.ok(hooks.has("http.request"));
     assert.ok(hooks.has("experimental.ws.handshake"));
@@ -462,7 +476,7 @@ test("both entrypoints reject unsupported OpenCode hosts with an actionable erro
       },
       rpc: { register: async () => ({ dispose: async () => undefined }) },
     });
-  }, /requires OpenCode >=2\.0\.26 <2\.1\.0; this server host runs 2\.0\.18/);
+  }, /requires OpenCode >=2\.0\.26 <2\.2\.0; this server host runs 2\.0\.18/);
   await assert.rejects(async () => {
     await tuiPlugin.setup({
       app: oldHost,
@@ -474,7 +488,7 @@ test("both entrypoints reject unsupported OpenCode hosts with an actionable erro
         toast: { show: () => undefined },
       },
     });
-  }, /requires OpenCode >=2\.0\.26 <2\.1\.0; this TUI host runs 2\.0\.18/);
+  }, /requires OpenCode >=2\.0\.26 <2\.2\.0; this TUI host runs 2\.0\.18/);
   await assert.rejects(async () => {
     await tuiPlugin.setup({
       app: undefined,
