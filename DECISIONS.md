@@ -132,3 +132,54 @@ generic, side-effect-free interface on the existing OpenCode plugin RPC channel,
 with no new service, queue, timer, or state. The method returns exactly the
 canonical answer, including `nextTransition`, so the consumer can cache until the
 boundary rather than poll.
+
+## 2026-11-09: OpenCode 2.2 compatibility and the verified-ceiling policy
+
+The live host was upgraded to OpenCode 2.2.6 and this package refused to load
+because the declared range was `>=2.0.26 <2.2.0`. The failure was the guard
+itself, not a removed runtime contract. `context.app.version` is still a
+`string` on 2.2.6 (checked in the published `@opencode/plugin` and
+`@opencode/client` declarations and at runtime), and the surfaces this plugin
+uses are unchanged: `model.request`, `http.request`, the experimental WebSocket
+hooks, `retry`, session lifecycle events, storage, RPC, and the TUI command
+context (`keymap.layer`, `ui.toast`, `data.on`, `ui.model`, `ui.router`,
+`ui.tabs`, `client.rpc`). The plugin defines no custom renderables, ScrollBox
+wrappers, or custom `RenderContext`, so the OpenTUI 0.7/0.8 changes do not
+apply. The range is extended to `>=2.0.26 <2.3.0` only after the packed plugin
+loads in the real 2.2.6 TUI, `/offpeak status` works there, and the full
+deterministic suite passes. The minimum stays at 2.0.26, and the same packed
+suite also runs on a real 2.0.26 binary so widening did not silently drop old
+hosts.
+
+The `@opencode/plugin` dependency stays pinned at `2.0.26`, the minimum
+supported host. The package imports only the identity helper `Plugin.define`
+from it; the host owns the runtime contract. Pinning the dependency to the
+minimum keeps the TypeScript target honest for the oldest supported host, and a
+separate scratch typecheck against `@opencode/plugin@2.2.6` proves the source
+also compiles against the newest declarations. Raising the dependency to the
+newest host would make the package look like it requires 2.2 while the declared
+engine range still promises 2.0.26.
+
+The compatibility error no longer says `Run \`opencode upgrade\``. That advice
+was correct when the ceiling was a minimum-version defect, but it is actively
+wrong when a newer host is rejected: upgrading is what broke the install. The
+message now tells the operator to use a release inside the range or to update
+`opencode-offpeak` before using a newer host.
+
+A second, independent cause of a load failure was checked and ruled out on this
+host: OpenCode 2.2.3 split managed-policy plugin control from `integration.use`
+into `plugin.use`. This host has no managed policy source (`/etc/opencode` does
+not exist, `OPENCODE_MANAGED_POLICY` is unset, and `opencode debug config` shows
+no `policies` block), so no `plugin.use: deny` is masking the version failure. A
+managed deny remains an operator policy finding, not something a wider version
+range can fix.
+
+**Ceiling maintenance decision.** This is the second time a narrow upper bound
+was overtaken within days: v0.1.6 shipped `>=2.0.26 <2.1.0`, and v0.2.0 shipped
+`<2.2.0`. The deliberate policy is to keep an explicit, verified ceiling and
+widen it per tested release; removing the ceiling or turning the guard into a
+warning would be an architecture change and is not done here. A new minor line
+is admitted only after the real packed plugin loads on it and the deterministic
+suite passes, with the previous minimum re-verified. The ceiling is therefore
+maintenance data, not a claim that future minors are safe by version number
+alone.

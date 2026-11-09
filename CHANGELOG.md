@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.2.1 - 2026-11-09
+
+### Compatibility
+
+- **OpenCode `>=2.0.26 <2.3.0`.** The live host runs **2.2.6**, which the
+  previous `<2.2.0` guard rejected before any hook or command was registered;
+  peak-price blocking was therefore completely absent on that host. The range
+  is widened only after the packed plugin loads and runs `/offpeak status` in
+  the real 2.2.6 TUI, the full deterministic suite passes, and the same packed
+  suite still loads on a real **2.0.26** binary. The minimum stays at 2.0.26.
+- **Why 2.2 is safe for this plugin.** `context.app.version` remains a string,
+  and the plugin uses only unchanged surfaces (`model.request`, HTTP and
+  experimental WebSocket hooks, `retry`, session events, storage, RPC, and the
+  TUI keymap/toast/data/router/tabs/client APIs). It defines no custom
+  renderables, so the OpenTUI 0.7/0.8 changes do not apply. OpenCode 2.2.3's
+  `integration.use` → `plugin.use` managed-policy split was checked separately;
+  it is an operator policy surface, not a plugin API break.
+
+### Fixed
+
+- The compatibility error no longer tells the operator to run
+  `opencode upgrade`. That advice was wrong for a too-new host: upgrading is
+  what triggered the load failure. The message now points at a release inside
+  the supported range or a matching `opencode-offpeak` update.
+- The hard-coded compatibility assertions now accept `2.2.0` through `2.2.6`
+  and reject the new `2.3.0` ceiling boundary, instead of asserting that
+  `2.2.0` is unsupported.
+
+### Evidence
+
+- 135 deterministic tests (134 prior + the explicit no-upgrade-advice guard),
+  `npm run lint`, `npm run typecheck`, and a reproducible `npm pack`.
+- Packed-plugin real-TUI load and `/offpeak status` on OpenCode **2.2.6**;
+  packed-plugin real-TUI load and `/offpeak status` on the minimum **2.0.26**.
+- Live behavioural proof with a local fixture provider (zero paid traffic): a
+  simulated PEAK window held the request with zero provider requests, then
+  released it once at the boundary in the same session.
+- Live install pinned to `v0.2.1`; `/api/plugin` reports both server and TUI
+  entrypoints active.
+- Thanks to @jasontally for PR #17, which proposed the same widening direction
+  and independently reported the 2.2.5 problem. Its CI never executed, it
+  predated 2.2.6, and it left hard-coded assertions and release metadata
+  incomplete, so this release reproduces the validation independently rather
+  than merging that branch.
+
 ## 0.2.0 - 2026-10-23
 
 ### Added

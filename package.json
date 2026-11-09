@@ -1,6 +1,6 @@
 {
   "name": "opencode-offpeak",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Queue OpenCode agent tasks and guard model requests against expensive pricing windows.",
   "author": "Lutz Kind",
   "license": "MIT",
@@ -8,7 +8,7 @@
   "main": "./src/server.ts",
   "engines": {
     "node": ">=22",
-    "opencode": ">=2.0.26 <2.2.0"
+    "opencode": ">=2.0.26 <2.3.0"
   },
   "exports": {
     ".": {
@@ -56,7 +56,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src test",
     "format": "biome format --write src test",
-    "test": "npm run compile && node --test test/*.test.mjs",
+    "test": "npm run compile && node --test --test-force-exit test/*.test.mjs",
     "check": "npm run lint && npm run typecheck && npm test"
   },
   "keywords": [

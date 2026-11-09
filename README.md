@@ -4,15 +4,15 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 
 `opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. Pricing is enforced at two lifecycle points: a pre-model deferral and the outbound transport guard. In `auto` mode, a supported request that reaches peak pricing waits at the pre-model hook — before OpenCode creates the provider attempt and its response-header timer — and the same session continues the same turn automatically when off-peak pricing returns, with zero provider traffic while pricing is blocked. The transport guard remains the final hard barrier immediately before OpenCode sends an HTTP request or an experimental WebSocket frame. If a request is already in flight and fails with a retryable provider/network error after peak pricing begins, the retry is stopped before it can reach the provider and the same session continues automatically at the next off-peak window. When one session must deliberately run through a peak window, `/offpeak session off` authorizes verified peak-priced inference for that session alone; every other session stays protected.
 
-> **Compatibility:** OpenCode CLI `>=2.0.26 <2.2.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26, 2.0.27, 2.0.30, and the current production **2.1.3**. OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses; the real TUI and headless coexistence suites run on 2.1.3. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with an actionable error instead of failing later at runtime.
+> **Compatibility:** OpenCode CLI `>=2.0.26 <2.3.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 (the minimum), 2.0.27, 2.0.30, 2.1.3, and the current **2.2.6** (the live host). OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses. OpenCode 2.2 leaves the hooks, RPC channel, and TUI surfaces used here unchanged; the OpenTUI 0.7/0.8 changes apply to custom renderables, which this plugin does not define. OpenCode 2.2.3 split managed-policy plugin control from `integration.use` into `plugin.use`; that affects operators who deny plugins, not this plugin's runtime contract. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with a clear error instead of failing later at runtime.
 
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.1
 ```
 
-This installs the released `v0.2.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.2.1` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 

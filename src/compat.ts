@@ -2,17 +2,19 @@
  * OpenCode host compatibility.
  *
  * The plugin is tested against the OpenCode v2 plugin API shipped with
- * OpenCode 2.0.26 through 2.1.3. Hosts before 2.0.26 activate TUI plugins
+ * OpenCode 2.0.26 through 2.2.6. Hosts before 2.0.26 activate TUI plugins
  * outside the Solid keymap provider owner, so `context.keymap.layer()` fails
  * with "Keymap.Provider is missing" even though the plugin follows the
  * documented API. OpenCode 2.1 changes the session/compaction payload schema
  * (`providerState` → `native`) but not the plugin hooks this plugin uses
- * (`model.request`, `http.request`, `retry`, session events, RPC); it is
- * covered by the compatibility and coexistence suites. Unsupported hosts must
- * fail with this explicit compatibility error instead of the confusing runtime
- * failure.
+ * (`model.request`, `http.request`, `retry`, session events, RPC). OpenCode
+ * 2.2 leaves those hooks, the RPC channel, and the TUI surfaces used here
+ * unchanged; the OpenTUI 0.7/0.8 changes apply to custom renderables, which
+ * this plugin does not define. Both lines are covered by the compatibility,
+ * packed-install, and real-TUI suites. Unsupported hosts must fail with this
+ * explicit compatibility error instead of the confusing runtime failure.
  */
-export const SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.2.0";
+export const SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.3.0";
 
 const VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/;
 
@@ -25,7 +27,7 @@ export function isSupportedOpenCodeVersion(version: string): boolean {
   const patch = Number(match[3]);
   if (major !== 2) return false;
   if (minor === 0) return patch >= 26;
-  return minor === 1;
+  return minor === 1 || minor === 2;
 }
 
 /**
@@ -41,6 +43,6 @@ export function assertSupportedOpenCode(
   const version = typeof app?.version === "string" ? app.version : undefined;
   if (version && isSupportedOpenCodeVersion(version)) return;
   throw new Error(
-    `opencode-offpeak requires OpenCode ${SUPPORTED_OPENCODE_RANGE}; this ${surface} host runs ${version ?? "an unknown version"}. Run \`opencode upgrade\` and restart OpenCode before using this plugin.`,
+    `opencode-offpeak requires OpenCode ${SUPPORTED_OPENCODE_RANGE}; this ${surface} host runs ${version ?? "an unknown version"}. Use an OpenCode release inside that range, or update opencode-offpeak before using a newer host, then restart OpenCode.`,
   );
 }
