@@ -2,19 +2,22 @@
 
 ## Current public distribution
 
-`v0.2.0` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
+`v0.2.1` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.1
 ```
 
-`v0.1.0` through `v0.1.10` remain available at their own tags. `v0.2.0` is the
-canonical release: it extends the tested OpenCode range through 2.1.3 and adds
-the read-only canonical `pricing` RPC consumed by `opencode-free-first`
-`peak-only`. The 2.1.3 validation covers the real TUI load and `/offpeak status`,
-the full deterministic suite, and the two-plugin coexistence suite. OpenCode
-officially accepts npm-compatible Git package specifications, including GitHub
-URLs and exact tags ([plugin installation docs](https://opencode.ai/v2/docs/plugins)).
+`v0.1.0` through `v0.2.0` remain available at their own tags. `v0.2.1` is the
+canonical release: it extends the tested OpenCode range through the full 2.2
+line (`>=2.0.26 <2.3.0`), validated against the live **2.2.6** host and the
+minimum **2.0.26** host, and keeps the read-only canonical `pricing` RPC
+consumed by `opencode-free-first` `peak-only`. The validation covers the real
+packed-plugin TUI load and `/offpeak status` on both hosts, the full
+deterministic suite, the zero-paid-traffic peak hold/release fixture run, and
+the live install. OpenCode officially accepts npm-compatible Git package
+specifications, including GitHub URLs and exact tags
+([plugin installation docs](https://opencode.ai/v2/docs/plugins)).
 This install path loads both the server and TUI entrypoints. npm publication is
 optional future distribution; npm login, 2FA, or registry publication is not
 required before this release can be installed or used.

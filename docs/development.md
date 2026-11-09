@@ -3,10 +3,10 @@
 ## Requirements
 
 - Node.js 22 or newer for the TypeScript/build/test toolchain.
-- OpenCode CLI `>=2.0.26 <2.2.0` for runtime integration.
+- OpenCode CLI `>=2.0.26 <2.3.0` for runtime integration.
 - npm for install/build/pack checks.
 
-The plugin API dependency is pinned to `@opencode/plugin@2.0.26`, matching the minimum supported CLI version. OpenCode's generic plugin documentation still describes its older hook API, so changes to the v2 package/runtime are treated as compatibility changes and must be verified against the installed v2 CLI.
+The plugin API dependency is pinned to `@opencode/plugin@2.0.26`, matching the minimum supported CLI version. The package imports only the identity helper `Plugin.define` from it; the host owns the runtime contract. Pinning the dependency to the minimum keeps the TypeScript target honest for the oldest supported host. The source is additionally typechecked in a scratch environment against `@opencode/plugin@2.2.6` when widening the range, so the newest declarations are verified without raising the package's runtime dependency. OpenCode's generic plugin documentation still describes its older hook API, so changes to the v2 package/runtime are treated as compatibility changes and must be verified against the installed v2 CLI.
 
 ## Commands
 
