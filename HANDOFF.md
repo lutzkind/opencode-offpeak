@@ -1,4 +1,59 @@
-# Handoff — 2026-10-16
+# Handoff — 2026-11-09
+
+## 2026-11-09 OpenCode 2.2.6 restoration (`v0.2.1`)
+
+**Reported state.** The live OpenCode background service had been auto-upgraded from **2.1.3 to 2.2.6** at `2026-11-09T03:46:46Z` (`updated OpenCode from=2.1.3 to=2.2.6 method=curl`), the service was replaced at `03:47:12Z` (`reason=version-mismatch previousVersion=2.1.3`), and `opencode-offpeak` disappeared. `opencode --version` and the service both report **2.2.6**. The live spec was `git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.0`, resolved to `0e4b49a7a39ed4483e95407912734ce553430f87`.
+
+**Exact failure (live `/api/plugin`).** `opencode-offpeak` had `features: {server: true, tui: true}` but `state.status: "failed"` with:
+
+```text
+Error: opencode-offpeak requires OpenCode >=2.0.26 <2.2.0; this server host runs 2.2.6. Run `opencode upgrade` and restart OpenCode before using this plugin.
+    at assertSupportedOpenCode (.../src/compat.ts:43:13)
+    at .../src/server.ts:23:5
+```
+
+The TUI entrypoint was never registered either. This was a complete loss of peak-price blocking: OpenCode Go / direct DeepSeek requests would dispatch at peak rates unguarded. The server log showed the same failure at `03:47:16Z` after a reload and again at `03:47:18Z`.
+
+**Root cause (verified, not inferred).** `src/compat.ts` declared `SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.2.0"` and `isSupportedOpenCodeVersion` returned false for every 2.2.x value. `assertSupportedOpenCode(...)` is the first statement of `setup()` in both `src/server.ts` and `src/tui.ts`, so the plugin threw before registering hooks, commands, or guards. The failure was the guard, not a removed plugin API:
+
+- The host's published `@opencode/plugin@2.2.6` declarations still define `App.version: string`; a runtime probe on both 2.0.26 and 2.2.6 logged `{"version":"2.2.6","type":"string"}` / `{"version":"2.0.26","type":"string"}`.
+- The plugin uses only `Plugin.define`, `model.request`, `http.request`, the experimental WebSocket hooks, `retry`, session events, storage, RPC, and the TUI keymap/toast/data/model/router/tabs/client surfaces. All remain present. It defines no custom renderables, ScrollBox wrappers, or custom `RenderContext`, so the OpenTUI 0.7/0.8 changes do not apply.
+- OpenCode 2.2.3's `integration.use` → `plugin.use` managed-policy split was checked separately. This host has no `/etc/opencode`, no `OPENCODE_MANAGED_POLICY`, and no `policies` block in `opencode debug config`; no `plugin.use: deny` masked the version failure. That split is an operator-policy finding, not a version-range defect.
+
+**Change.** `SUPPORTED_OPENCODE_RANGE` is now `>=2.0.26 <2.3.0`; `isSupportedOpenCodeVersion` accepts minor `0` (patch ≥ 26), `1`, and `2`, and still rejects 2.3.0 and 3.x. The minimum stays **2.0.26**. `package.json` `engines.opencode` is exactly the constant. `@opencode/plugin` stays pinned at **2.0.26** as the minimum-host identity helper (the package imports only `Plugin.define`); the source also typechecks against a scratch `@opencode/plugin@2.2.6` install. The compatibility error no longer says `Run \`opencode upgrade\`` — that was actively wrong for a too-new host. It now says to use a release inside the range or update `opencode-offpeak` before using a newer host.
+
+**Test changes.** `test/compat.test.mjs` now accepts 2.2.0 through 2.2.6 (plus 2.1.4), rejects 2.3.0/2.3.1 as the new ceiling, keeps the manifest/engines equality assertion, and adds an explicit test that the error never recommends `opencode upgrade`. `test/installed-package.test.mjs` and the two entrypoint error regexes were updated. The suite is **135 tests** (134 prior + the no-upgrade-advice guard). The test script now uses `node --test --test-force-exit` because the Ubuntu CI job reproducibly stalled after the engine test file in a lingering test-runner child; the tests themselves still complete normally, and 135/135 passes under Node 22 and Node 24 locally.
+
+**Dual matrix (deterministic).**
+
+| Target | Result |
+|---|---|
+| Host OpenCode **2.2.6** | `npm run lint`, `npm run typecheck`, `npm test` — **135/135**, including the packed-plugin real-TUI load and `/offpeak status` |
+| Minimum OpenCode **2.0.26** (isolated binary from the official 2.0.26 tarball) | same suite — **135/135**, including the packed-plugin real-TUI load and `/offpeak status` |
+| Scratch `@opencode/plugin@2.2.6` typecheck | passed (source compiles against the newest declarations) |
+| Runtime `context.app.version` probe | string on both 2.0.26 and 2.2.6 |
+
+**Zero-paid-traffic behavioural proof (published release artifact).** A pre-titled `opencode run --standalone` session used the released `opencode-offpeak-0.2.1.tgz`, a catalog-free local fixture provider (`offpeak-fixture`, `http://127.0.0.1`), and a simulated PEAK window ending at `2026-11-09T10:02:00Z`. Result: **0 provider requests before the boundary**; exactly **1** primary request at `10:02:00.067Z`; reply `fixture-reply-ok`; exit 0; same session `ses_e403f1d69ffekjHTkR9ejD5k2J` titled `Fixture titled session`. No real provider, key, or paid endpoint was contacted. An earlier pretag run with the same shape produced the same result (0 before boundary, 1 at boundary) and is retained under `/tmp/opencode/offpeak-260-api/evidence/`.
+
+**Negative proof (release artifact).** The packaged `dist/compat.js` rejects `2.0.25` and `2.3.0` with the new message and accepts `2.0.26`/`2.2.6`; the message contains no `opencode upgrade` advice.
+
+**Release and live install.** PR **#18** (`fix/opencode-2.2-compat-v021`) passed CI run **42577242835** on `ubuntu-latest` and `macos-latest`; merge commit `713c1de`; release-notes commit `6800991`; annotated tag **v0.2.1** object `c926b9743f0a2a2116c651ed9eda1ee6e240e8cc`, tag commit `6800991550f092d85f6366b8832faef9a82a6b09`. The release asset is `opencode-offpeak-0.2.1.tgz`, SHA-256 **`f014a9dc05f010e7d037e05ea1323707cab3835430f182f06b8c4dcbc8e2aeab`**, reproduced byte-for-byte twice from a clean `v0.2.1` tag archive + `npm ci` + `npm run compile` + `npm pack`; the GitHub asset digest matches. Live install: `/root/.config/opencode/opencode.json` pins exactly `#v0.2.1` (the `#v0.2.0` entry was removed with `opencode plugin remove`); `opencode reload` applied; `/api/plugin` reports target `#v0.2.1`, version `6800991550f092d85f6366b8832faef9a82a6b09`, `state.status: "active"`, server and TUI active. Live TUI `/offpeak status`: `Plugin: ENABLED`, `Mode: auto`, `Policy: deepseek-opencode-go`, `Pricing: OFF_PEAK`, `Requests: ALLOWED`, next transition `Nov 10, 2026, 8:00 AM GMT+7`; live `pricing` RPC returned `OFF_PEAK`/allowed for `opencode-go/deepseek-v4.1-flash` and `UNTRACKED`/allowed for Zen. Production `offpeak.json` and provider configuration were not edited.
+
+**PR #17.** Closed with a comment crediting @jasontally. Its direction was correct, but its CI never executed, it predated 2.2.6, it left `test/installed-package.test.mjs` and the engine test-runner stall unresolved, and it did not ship a release or live install. The canonical fix reproduces the validation independently; credit is in the commit and CHANGELOG.
+
+**Architecture drift finding.** This is the second narrow-ceiling failure: v0.1.6 shipped `>=2.0.26 <2.1.0`, and v0.2.0 shipped `<2.2.0`, each overtaken within days. The deliberate decision in `DECISIONS.md` is to keep an explicit verified ceiling and widen it per tested release, re-verifying the minimum; removing the ceiling or turning the guard into a warning would be an architecture change and was not done. No `ARCHITECTURE CHANGE PROPOSED` item was required for this release.
+
+**Remaining limitations.** The ceiling still requires maintenance when a new minor line ships. A managed `plugin.use: deny` can still prevent loading independently of the version range. The 2.2.3 OpenTUI changes would matter to a plugin with custom renderables; this plugin has none. A TUI process started before the reload keeps its old TUI entrypoint until relaunched; the server-side plugin is v0.2.1. Peak-priced dispatches in an explicitly overridden session remain real peak-rate inference by design.
+
+## 2026-10-23 v0.2.0 — OpenCode 2.1 compatibility and canonical pricing RPC (backfilled)
+
+This entry was missing from the handoff even though v0.2.0 introduced the `<2.2.0` ceiling that broke the 2.2.6 host. It is recorded here from the repository, GitHub, and live evidence.
+
+**Release.** PR **#16** (`feat/opencode-2.1-and-pricing-rpc`) merged at `2026-10-23T04:25:53Z` as **`0e4b49a7a39ed4483e95407912734ce553430f87`**; CI run **39900181740** passed on `ubuntu-latest` and `macos-latest`. Annotated tag **v0.2.0** object `76e06c0df3200ee26154d7b84cbf137520dcbfad`, tag commit `0e4b49a`. GitHub release published `2026-10-23T04:26:03Z`; **no tarball asset was attached** (the publish workflow job was skipped because npm trusted publishing is not enabled). The live install pinned `#v0.2.0`, resolved to `0e4b49a`.
+
+**Content.** Extended the tested range from `<2.1.0` to **`>=2.0.26 <2.2.0`**, validated on the then-current production **2.1.3**; added the read-only canonical `pricing` RPC for `opencode-free-first` `free-only`/`peak-only`; 134 deterministic tests including the real 2.1.3 TUI load and `/offpeak status`. The release changed no pricing policy, provider configuration, queue schema, or guard semantics.
+
+**Defect introduced.** The `<2.2.0` upper bound was again too narrow. The release's real-TUI validation covered 2.1.3 only; it did not test any 2.2.x host. OpenCode 2.2.0 shipped four days later (2026-10-27), and the host auto-upgraded to 2.2.6 on 2026-11-09, at which point both entrypoints refused to load. The missing handoff entry is itself part of the continuity defect this pass repairs.
 
 ## 2026-10-16 session-scoped off-peak protection (`/offpeak session on|off`, v0.1.10)
 
@@ -111,19 +166,19 @@ Evidence-integrity note: the fixture harness now uses a local-only provider id (
 
 ## Release status
 
-`opencode-offpeak` v0.1.10 is the canonical release:
+`opencode-offpeak` v0.2.1 is the canonical release:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.1
 ```
 
-- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.1.10`
-- Tag commit: `b2ce8f0cbcfc6dcc7118a585d52c0176e521e13f` (annotated tag object `4943a1883c921561e0e068260df8434a591bb237`; merge of PR #15 `6f47c24`/`de249c8`)
-- Implementation commits: `de249c8` (`feat: session-scoped off-peak protection on/off for the current session`), `6f47c24` (release prep and docs)
-- Attached `opencode-offpeak-0.1.10.tgz` SHA-256: `024c1ee5bcfae972178f7ed92b99818b96e6222a9464b4ceba5ef9ade4f2ad51` (reproduced byte-for-byte twice from a clean `v0.1.10` tag archive + `npm ci` + `npm run compile` + `npm pack`; the downloaded release asset digest matches)
-- CI: PR #15 `verify` passed on `ubuntu-latest` and `macos-latest` (run `38926491431`)
-- Live install: `/root/.config/opencode/opencode.json` pins exactly `#v0.1.10` (the `#v0.1.9` entry was removed with `opencode plugin remove`); `/api/plugin` reports version `b2ce8f0cbcfc6dcc7118a585d52c0176e521e13f` with server+TUI active; `opencode reload` applied. `/offpeak status`: ON, `auto`, queue/waiting/interactive/holds/refusals/recovery/titleRecovery/compactionRecovery/failed all 0; storage `queue-v1`, `recovery-v1`, and `session-overrides-v1` all empty. Live session protection verified through the RPC (status ON → session-off persisted and reported OFF → session-on removed it) and the live OFF_PEAK smoke replied exactly `offpeak v0.1.10 live ok`; both test sessions were removed afterwards through the supported session API.
-- The `v0.1.0` through `v0.1.9` tags were not mutated and remain installable.
+- Release: `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.2.1`
+- Tag commit: `6800991550f092d85f6366b8832faef9a82a6b09` (annotated tag object `c926b9743f0a2a2116c651ed9eda1ee6e240e8cc`; merge of PR #18 `713c1de` plus release-notes commit `6800991`)
+- Implementation commits: `c24ba7b` (`fix: support OpenCode 2.2 through 2.2.6`), `69c6d3a` (`test: force the Node test runner to exit after completion`), `713c1de` (PR #18 merge), `6800991` (v0.2.1 release notes)
+- Attached `opencode-offpeak-0.2.1.tgz` SHA-256: `f014a9dc05f010e7d037e05ea1323707cab3835430f182f06b8c4dcbc8e2aeab` (reproduced byte-for-byte twice from a clean `v0.2.1` tag archive + `npm ci` + `npm run compile` + `npm pack`; the downloaded GitHub asset digest matches)
+- CI: PR #18 `verify` passed on `ubuntu-latest` and `macos-latest` (run `42577242835`). Two earlier runs of the same workflow (`42573358480`) were cancelled after the Ubuntu test-runner child stalled; the `--test-force-exit` fix made the suite exit deterministically.
+- Live install: `/root/.config/opencode/opencode.json` pins exactly `#v0.2.1` (the `#v0.2.0` entry was removed with `opencode plugin remove`); `/api/plugin` reports target `#v0.2.1`, version `6800991550f092d85f6366b8832faef9a82a6b09`, `state.status: "active"`, server+TUI active; `opencode reload` applied. Live TUI `/offpeak status`: `Plugin: ENABLED`, `Mode: auto`, `Policy: deepseek-opencode-go`, `Pricing: OFF_PEAK`, `Requests: ALLOWED`, next transition `Nov 10, 2026, 8:00 AM GMT+7`. Live `pricing` RPC: `opencode-go/deepseek-v4.1-flash` = `OFF_PEAK`/allowed; Zen = `UNTRACKED`/allowed. Production `offpeak.json` and provider configuration were not edited.
+- The `v0.1.0` through `v0.2.0` tags were not mutated and remain installable. v0.2.0 has no attached tarball asset; v0.2.1 does.
 
 ## 2026-10-15 v0.1.6 — direct DeepSeek API, verified Zen semantics, held-request feedback
 
@@ -394,10 +449,10 @@ The implementation commit at the v0.1.0 release was `2782893c2e09eff6116f77c62b6
 
 - Canonical checkout: `/root/opencode-offpeak`
 - Default branch: `main`
-- Package: `opencode-offpeak@0.1.10`, MIT
-- Verified CLI: OpenCode v2.0.26, v2.0.27 and v2.0.30
-- Declared supported range: `>=2.0.26 <2.1.0`, enforced at startup and declared in `engines.opencode`
-- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.1.10`
+- Package: `opencode-offpeak@0.2.1`, MIT
+- Verified CLI: OpenCode v2.0.26 (minimum), 2.0.27, 2.0.30, 2.1.3, and 2.2.6 (live host)
+- Declared supported range: `>=2.0.26 <2.3.0`, enforced at startup and declared in `engines.opencode`
+- GitHub install after release: `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.1`
 - Package exports OpenCode v2 server and TUI plugins. The TUI registers `/offpeak` and uses OpenCode plugin RPC to control the server-side queue.
 
 ## Architecture
@@ -420,7 +475,8 @@ Two built-in policies ship: `deepseek-opencode-go` (provider `opencode-go`) and 
 
 ## Verification performed
 
-- `npm run check`: lint and typecheck passed; all 28 tests passed, including lifecycle, OFF preservation, same-session resume, request-boundary, override, crash recovery, policy boundary, timezone/DST, and OpenCode v2 registration tests.
+- **v0.2.1 current:** `npm run lint`, `npm run typecheck`, `npm test` — **135/135** on the live **2.2.6** host and again on the minimum **2.0.26** binary, including the packed-plugin real-TUI load and `/offpeak status` on both. Scratch typecheck against `@opencode/plugin@2.2.6` passed. A runtime probe on both hosts confirmed `context.app.version` is a string. The published tarball's `dist/compat.js` rejects 2.0.25 and 2.3.0 with the corrected message (no `opencode upgrade` advice) and accepts 2.0.26/2.2.6. A pre-titled headless fixture run with the published tarball produced **0 provider requests before the peak boundary** and exactly **1** at the boundary, same session, exit 0.
+- Historical v0.1.0 verification: `npm run check` passed; all 28 tests passed, including lifecycle, OFF preservation, same-session resume, request-boundary, override, crash recovery, policy boundary, timezone/DST, and OpenCode v2 registration tests.
 - GitHub Actions run `37944688036` passed on both `ubuntu-latest` and `macos-latest` for implementation commit `2782893c2e09eff6116f77c62b6a4344f92c8224`.
 - GitHub Actions run `37946282697` passed on both `ubuntu-latest` and `macos-latest` for release commit `a77808de7bbb6c91a1460fbc47942ab1d3941814`.
 - `npm pack --dry-run` passed. A clean consumer installed the generated tarball; Node imports confirmed both packaged server and TUI `setup` entrypoints. The artifact contained 41 files (37,375 bytes compressed; 147,140 bytes unpacked).
@@ -439,7 +495,7 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 ## Known limitations
 
-- OpenCode compatibility is intentionally limited to the declared v2 range until later versions are tested. Hosts before 2.0.26 fail with the explicit compatibility error; the TUI process must be restarted after `opencode upgrade` to pick up a newer binary.
+- OpenCode compatibility is intentionally limited to the declared v2 range until later versions are tested. Hosts before 2.0.26 and beyond the `<2.3.0` ceiling fail with the explicit compatibility error. The ceiling is maintenance data, not a guarantee for future minors: a new line is admitted only after the packed plugin loads there and the suite passes. A managed `plugin.use: deny` (OpenCode 2.2.3+) can still prevent loading independently of the version range.
 - WebSocket request hooks are experimental in OpenCode v2.
 - A request deferred in `auto` mode lives in the running server process; a plugin/server shutdown fails it closed instead of replaying it, and the persisted deferral delivers one same-session continuation once the allowed window arrives.
 - In a shared OpenCode server, plugins load once per workspace, so the in-memory `interactiveWaiting` count is visible only from the instance that holds the request. The hold and release behavior is instance-independent and unaffected.
@@ -452,7 +508,7 @@ The 2026-10-12 repair used OpenCode's supported `opencode reload` on the shared 
 
 ## User action required
 
-None. The v0.1.10 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. The server-side plugin is already reloaded to v0.1.10; a TUI process started before the reload keeps its older TUI entrypoint until it is relaunched, so relaunch a TUI to see the `/offpeak session on|off` command and the `Session protection` status line. Plugin behavior (holding, recovery, session overrides) is server-side and unaffected by an older TUI process. Running `/offpeak session on|off` requires a focused session; on the home screen the command refuses instead of guessing.
+None for the live host: the server-side plugin is already reloaded to v0.2.1 and both entrypoints are active. A TUI process started before the reload keeps its older TUI entrypoint until it is relaunched, so relaunch a TUI to see the v0.2.1 command surface/status. The v0.2.1 GitHub release is the complete public distribution path and installs through OpenCode's supported `opencode plugin add` Git specification. Running `/offpeak session on|off` requires a focused session; on the home screen the command refuses instead of guessing.
 
 ## Next normal maintenance
 
