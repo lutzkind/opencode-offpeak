@@ -1,4 +1,47 @@
-# Handoff — 2026-11-09
+# Handoff — 2026-11-16
+
+## 2026-11-16 OpenCode 2.3.0 compatibility (`v0.2.2`)
+
+**Reported state.** The live host runs **OpenCode 2.3.0** (released 2026-11-13). `opencode-offpeak` was pinned at `v0.2.1`, whose range was `>=2.0.26 <2.3.0`, so both entrypoints threw the compatibility error before registering any hook or command. Live log evidence at `2026-11-16T03:39:39.853Z`:
+
+```text
+level=WARN message="failed to load plugin" plugin.id=opencode-offpeak cause="Cause([Die(Error: opencode-offpeak requires OpenCode >=2.0.26 <2.3.0; this server host runs 2.3.0. Use an OpenCode release inside that range, or update opencode-offpeak before using a newer host, then restart OpenCode.)])"
+```
+
+Peak-price blocking was completely absent on the host. The local suite reproduced it: `npm run check` failed only the real-TUI smoke test (134/135) because `/offpeak status` never registered on 2.3.0.
+
+**Root cause (verified, not inferred).** The failure was the guard, not a removed runtime contract. Diffing `@opencode/plugin@2.0.26` against `@opencode/plugin@2.3.0`:
+
+- `dist/tui` declarations are byte-identical.
+- `context.app.version` is still `string`; `rpc.register`, `storage`, and `session.hook` keep their signatures.
+- `model.request`, `http.request`, `http.response`, `experimental.ws.*`, and `retry` hook shapes are unchanged.
+- 2.3 only adds surfaces: `session.fork`, `experimental.model.resolve`, `experimental.idle`, artifacts, credentials, `session.instructions`, `session.list`, event type filters. It deprecates `generate` in favour of `experimental.generate.text`, which this plugin does not call.
+- `session.wait` moved to `ExperimentalSessionApi` but remains exposed as `context.session.wait`.
+
+**Change.** `SUPPORTED_OPENCODE_RANGE` is now `>=2.0.26 <2.4.0`; `isSupportedOpenCodeVersion` accepts minor `3` and still rejects `2.4.0` and 3.x. `package.json` `engines.opencode` is exactly the constant. Version is **0.2.2**. The `@opencode/plugin` dependency stays pinned at **2.0.26** per the 2026-11-09 decision; the source is separately typechecked against `@opencode/plugin@2.3.0`. Release metadata, README, ARCHITECTURE, DECISIONS, RELEASING, ROADMAP, SECURITY, `docs/development.md`, `docs/troubleshooting.md`, CHANGELOG, and `docs/releases/v0.2.2.md` were reconciled.
+
+**Test changes.** `test/compat.test.mjs` accepts `2.2.7` through `2.3.99` and rejects `2.4.0`; `test/installed-package.test.mjs` and both entrypoint error regexes assert the new range. Suite remains **135 tests**.
+
+**Dual matrix (deterministic).**
+
+| Target | Result |
+|---|---|
+| Host OpenCode **2.3.0** | `npm run lint`, `npm run typecheck`, `npm test` — **135/135**, including the packed-plugin real-TUI load and `/offpeak status` |
+| Minimum OpenCode **2.0.26** (isolated binary at `/tmp/opencode/offpeak-260-api/opencode-2.0.26/opencode`) | packed-plugin TUI smoke — **1/1 pass** |
+| Scratch `@opencode/plugin@2.3.0` typecheck | passed (source compiles against the newest declarations) |
+| Pinned `@opencode/plugin@2.0.26` typecheck | passed |
+
+**Zero-paid-traffic behavioural proof (release artifact).** The packed `0.2.2` tarball ran `opencode run --standalone` on **2.3.0** against a local fixture provider (`offpeak-fixture`, `http://127.0.0.1`) with a simulated PEAK window ending `2026-11-16T04:10:00Z`. Result: **0 provider requests before the boundary**; exactly **1** primary request at `04:10:00.075Z`; reply `fixture-reply-ok`; exit 0; same pre-titled session `ses_e1d74f8aeffeXuIka6nufVhdGE`. No real provider or paid endpoint was contacted. Evidence at `/tmp/opencode/offpeak-230/proof/summary.json`.
+
+**Negative proof.** Packaged `dist/compat.js` accepts `2.0.26`/`2.2.6`/`2.3.0`/`2.3.99` and rejects `2.0.25`/`2.4.0` with `opencode-offpeak requires OpenCode >=2.0.26 <2.4.0; ...` and no `opencode upgrade` advice.
+
+**Release and live install.** PR **#19** (`fix/opencode-2.3-compat-v022`) passed CI run **43802869511** on `ubuntu-latest` and `macos-latest`; merge commit **`0dc3129`**. Annotated tag **v0.2.2** object `7ac6eb639c6d3a8cfe8a14f19954aab0885916f0` → commit `0dc31298d95ece09d001250f10afa47a62d75ca6`. GitHub release `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.2.2` carries `opencode-offpeak-0.2.2.tgz`, **135995 bytes**, SHA-256 **`14579daa6bc7cf761960958de7e52cc6f9e8d7bd3794175c3574197d20d11b97`**, reproduced byte-for-byte from two clean `v0.2.2` tag archives (`npm ci` + `npm run compile` + `npm pack`). Live config pins `#v0.2.2`; `opencode reload` applied; `/api/plugin` reports target `#v0.2.2`, version `0dc31298...`, `state.status: "active"`, server and TUI active. Live TUI `/offpeak status` on 2.3.0: `Plugin: ENABLED`, `Mode: auto`, `Policy: deepseek-opencode-go`, `Pricing: OFF_PEAK`, `Requests: ALLOWED`, next transition `Nov 16, 2026, 1:00 PM GMT+7`, queue `0 queued, 0 waiting, 0 failed`. Live `pricing` RPC: `opencode-go/deepseek-v4.1-flash` → `OFF_PEAK`/allowed/`deepseek-opencode-go`/`nextTransition=1794808800000`; `opencode/deepseek-v4.1-flash-free` → `UNTRACKED`/allowed/`No policy matches this provider.` Production `offpeak.json`, provider configuration, and the queue schema were not edited.
+
+**Residual risk (new in 2.3).** OpenCode 2.3 no longer makes `rpc.call` wait up to five seconds for a Location that is still loading plugins. A `/offpeak` invocation in the first moments of startup could precede server-side RPC registration. The command is provided by the TUI entrypoint and normal interactive use happens after reconciliation; a probe that sent keys as soon as the composer rendered hit an unrelated early-TUI state, and no failure was observed once the TUI was interactive. No retry loop was added; this is recorded in `DECISIONS.md` and the release notes.
+
+**Third narrow-ceiling failure.** v0.1.6 shipped `<2.1.0`, v0.2.0 shipped `<2.2.0`, and v0.2.1 shipped `<2.3.0`; each was overtaken within days. The documented policy is still an explicit verified ceiling widened per tested release. Removing the ceiling or turning the guard into a warning remains an architecture change requiring user approval and was not done. A standing finding is recorded in `DECISIONS.md`: each OpenCode minor currently needs a plugin release before the host can use it.
+
+**Related finding (not changed here).** `opencode-free-first` v0.4.0 declares `engines.opencode: ">=2.0.26 <2.2.0"` but has no runtime version guard, so it loads and reports active on 2.3.0. Its manifest range is stale metadata, not a load failure; reconcile it in that repository rather than here.
 
 ## 2026-11-09 OpenCode 2.2.6 restoration (`v0.2.1`)
 
