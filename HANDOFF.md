@@ -20,7 +20,7 @@ Peak-price blocking was completely absent on the host. The local suite reproduce
 
 **Change.** `SUPPORTED_OPENCODE_RANGE` is now `>=2.0.26 <2.4.0`; `isSupportedOpenCodeVersion` accepts minor `3` and still rejects `2.4.0` and 3.x. `package.json` `engines.opencode` is exactly the constant. Version is **0.2.2**. The `@opencode/plugin` dependency stays pinned at **2.0.26** per the 2026-11-09 decision; the source is separately typechecked against `@opencode/plugin@2.3.0`. Release metadata, README, ARCHITECTURE, DECISIONS, RELEASING, ROADMAP, SECURITY, `docs/development.md`, `docs/troubleshooting.md`, CHANGELOG, and `docs/releases/v0.2.2.md` were reconciled.
 
-**Test changes.** `test/compat.test.mjs` accepts `2.2.7` through `2.3.99` and rejects `2.4.0`; `test/installed-package.test.mjs` and both entrypoint error regexes assert the new range. Suite remains **135 tests**.
+**Test changes.** `test/compat.test.mjs` accepts `2.2.7` through `2.3.99` and rejects `2.4.0`; `test/installed-package.test.mjs` and both entrypoint error regexes assert the new range. Suite remains **135 tests**. During evidence collection one full-suite run missed the shared five-second `until()` deadline while the real-TUI smoke test competed for CPU; the scenario passed on re-run and six consecutive full runs then passed. The deadline is now fifteen seconds (commit `ad1ab2e`, test-only, released artifact unchanged).
 
 **Dual matrix (deterministic).**
 
