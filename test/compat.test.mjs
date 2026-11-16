@@ -10,8 +10,8 @@ import {
 
 const root = path.resolve(import.meta.dirname, "..");
 
-test("supported OpenCode versions match the tested 2.0.26–2.2.x range", () => {
-  assert.equal(SUPPORTED_OPENCODE_RANGE, ">=2.0.26 <2.3.0");
+test("supported OpenCode versions match the tested 2.0.26–2.3.x range", () => {
+  assert.equal(SUPPORTED_OPENCODE_RANGE, ">=2.0.26 <2.4.0");
   for (const version of [
     "2.0.26",
     "2.0.27",
@@ -29,8 +29,13 @@ test("supported OpenCode versions match the tested 2.0.26–2.2.x range", () => 
     "2.2.4",
     "2.2.5",
     "2.2.6",
+    "2.2.7",
     "v2.2.5",
     "v2.2.6",
+    "2.3.0",
+    "v2.3.0",
+    "2.3.1",
+    "2.3.99",
   ]) {
     assert.equal(isSupportedOpenCodeVersion(version), true, version);
   }
@@ -38,8 +43,8 @@ test("supported OpenCode versions match the tested 2.0.26–2.2.x range", () => 
     "2.0.25",
     "2.0.18",
     "1.18.35",
-    "2.3.0",
-    "2.3.1",
+    "2.4.0",
+    "2.4.1",
     "3.0.0",
     "not-a-version",
     "",
@@ -58,13 +63,15 @@ test("compatibility guard passes inside the range and fails clearly outside it",
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.0.26" }, "TUI"));
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.1.4" }, "server"));
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.2.6" }, "TUI"));
+  assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.3.0" }, "server"));
+  assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.3.99" }, "TUI"));
   assert.throws(
     () => assertSupportedOpenCode({ version: "2.0.25" }, "TUI"),
-    /opencode-offpeak requires OpenCode >=2\.0\.26 <2\.3\.0; this TUI host runs 2\.0\.25\. Use an OpenCode release inside that range, or update opencode-offpeak before using a newer host, then restart OpenCode\./,
+    /opencode-offpeak requires OpenCode >=2\.0\.26 <2\.4\.0; this TUI host runs 2\.0\.25\. Use an OpenCode release inside that range, or update opencode-offpeak before using a newer host, then restart OpenCode\./,
   );
   assert.throws(
-    () => assertSupportedOpenCode({ version: "2.3.0" }, "server"),
-    /this server host runs 2\.3\.0/,
+    () => assertSupportedOpenCode({ version: "2.4.0" }, "server"),
+    /this server host runs 2\.4\.0/,
   );
   assert.throws(
     () => assertSupportedOpenCode(undefined, "server"),
@@ -79,7 +86,7 @@ test("compatibility guard passes inside the range and fails clearly outside it",
 test("the compatibility error never recommends upgrading a too-new host", () => {
   for (const [version, surface] of [
     ["2.0.25", "TUI"],
-    ["2.3.0", "server"],
+    ["2.4.0", "server"],
   ]) {
     assert.throws(
       () => assertSupportedOpenCode({ version }, surface),
