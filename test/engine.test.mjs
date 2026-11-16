@@ -126,7 +126,11 @@ class FakeSessions {
 }
 
 async function until(predicate, message = "condition was not reached") {
-  const end = Date.now() + 5000;
+  // Test files run concurrently, and the real-TUI smoke test competes for the
+  // CPU, so a loaded machine can delay a scheduled recovery past five seconds.
+  // The deadline only bounds a genuine hang; passing runs still settle in
+  // milliseconds.
+  const end = Date.now() + 15000;
   while (Date.now() < end) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
