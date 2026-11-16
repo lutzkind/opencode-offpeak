@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are developed on the latest release. Version 0.2.x supports OpenCode CLI `>=2.0.26 <2.3.0`.
+Security fixes are developed on the latest release. Version 0.2.x supports OpenCode CLI `>=2.0.26 <2.4.0`.
 
 ## Reporting a vulnerability
 

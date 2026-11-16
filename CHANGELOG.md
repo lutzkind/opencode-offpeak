@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.2 - 2026-11-16
+
+### Compatibility
+
+- **OpenCode `>=2.0.26 <2.4.0`.** The live host runs **2.3.0**, which the
+  previous `<2.3.0` guard rejected before any hook or command was registered, so
+  peak-price blocking was completely absent on that host. The range is widened
+  only after the packed plugin loads and runs `/offpeak status` in the real
+  2.3.0 TUI, the full deterministic suite passes, and the same packed suite
+  still loads on a real **2.0.26** binary. The minimum stays at 2.0.26.
+- **Why 2.3 is safe for this plugin.** `context.app.version` is still a string.
+  The `@opencode/plugin@2.3.0` declarations keep every surface this package
+  uses (`model.request`, `http.request`, the experimental WebSocket hooks,
+  `retry`, session events, storage, RPC, and the TUI keymap/toast/data/
+  router/tabs/client APIs) and only add new ones (`session.fork`,
+  `experimental.model.resolve`, `experimental.idle`, artifacts, credentials,
+  session instructions, event type filters). `dist/tui` is byte-identical to
+  2.0.26. The plugin defines no custom renderables, so the OpenTUI 0.7/0.8
+  changes do not apply.
+- **2.3 stops `rpc.call` from waiting for plugin load.** A command issued in the
+  first moments of startup can precede server-side registration. The command is
+  provided by the TUI entrypoint and normal interactive use happens after
+  reconciliation, so no retry loop was added; this is recorded as a residual
+  risk in `DECISIONS.md`.
+
+### Changed
+
+- The source typechecks against both the pinned `@opencode/plugin@2.0.26` and a
+  scratch `@opencode/plugin@2.3.0` install. The runtime dependency stays at the
+  minimum supported host.
+
+### Evidence
+
+- 135 deterministic tests, `npm run lint`, `npm run typecheck`, and a
+  reproducible `npm pack`.
+- Packed-plugin real-TUI load and `/offpeak status` on OpenCode **2.3.0** and on
+  the minimum **2.0.26**.
+- Live behavioural proof on 2.3.0 with a local fixture provider (zero paid
+  traffic): a simulated PEAK window held the request with zero provider
+  requests, then released it once at the boundary in the same session.
+- Live install pinned to `v0.2.2`; `/api/plugin` reports both server and TUI
+  entrypoints active.
+
 ## 0.2.1 - 2026-11-09
 
 ### Compatibility

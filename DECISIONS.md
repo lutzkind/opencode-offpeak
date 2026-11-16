@@ -183,3 +183,51 @@ is admitted only after the real packed plugin loads on it and the deterministic
 suite passes, with the previous minimum re-verified. The ceiling is therefore
 maintenance data, not a claim that future minors are safe by version number
 alone.
+
+## 2026-11-16: OpenCode 2.3 compatibility (v0.2.2)
+
+The live host was upgraded to OpenCode 2.3.0 and this package refused to load
+because the declared range was `>=2.0.26 <2.3.0`. As in the two previous
+ceiling failures, the failure was the guard, not a removed runtime contract.
+The published `@opencode/plugin@2.3.0` declarations keep every surface this
+package uses: `Plugin.define`, `context.app.version` (still `string`),
+`model.request`, `http.request`, the experimental WebSocket hooks, `retry`,
+session lifecycle events, storage, `rpc.register`/`client.rpc`, and the TUI
+context (`keymap.layer`, `ui.toast`, `data.on`, `ui.model`, `ui.router`,
+`ui.tabs`, `client.rpc`). OpenCode 2.3 only adds surfaces — `session.fork`,
+`experimental.model.resolve`, `experimental.idle`, artifacts, credentials,
+`session.instructions`, `session.list`, and event type filters — and deprecates
+`generate` in favour of `experimental.generate.text`, which this package does not
+call. The `dist/tui` declarations are byte-identical between 2.0.26 and 2.3.0.
+
+The range is extended to `>=2.0.26 <2.4.0` only after the packed plugin loads in
+the real **2.3.0** TUI, `/offpeak status` works there, the full deterministic
+suite passes, and the same packed suite still loads on a real **2.0.26** binary.
+A zero-paid-traffic headless fixture run on 2.3.0 produced **0 provider requests
+before the peak boundary** and exactly **1** at the boundary, in the same
+pre-titled session, exit 0.
+
+One behavioural change matters for diagnosis, not correctness: OpenCode 2.3's
+SDK no longer makes `rpc.call` wait up to five seconds for a Location that is
+still loading plugins. A slash command invoked in the first moments of startup
+could therefore reach the server before the plugin's RPC methods register. The
+command is itself provided by the TUI entrypoint, and normal interactive use
+happens after reconciliation, so no retry loop was added; a future release that
+needs startup-time RPC should refresh on the matching `*.updated` event instead
+of polling.
+
+The `@opencode/plugin` dependency stays pinned at `2.0.26`, the minimum supported
+host, per the 2026-11-09 decision. The source is typechecked against both
+`@opencode/plugin@2.0.26` (the pinned minimum) and a scratch
+`@opencode/plugin@2.3.0` install, so the newest declarations are verified without
+raising the package's runtime dependency.
+
+**Ceiling policy status.** This is the third narrow-ceiling failure in five
+weeks (v0.1.6 `<2.1.0`, v0.2.0 `<2.2.0`, v0.2.1 `<2.3.0`). The documented policy
+is still an explicit verified ceiling widened per tested release; changing the
+guard to a warning or removing the ceiling remains an architecture change that
+requires user approval and was not done here. The repeated cost is recorded as a
+standing finding: each OpenCode minor currently requires a plugin release before
+the host can use it. A future architecture change could distinguish "tested"
+from "known-incompatible" so a new minor degrades to a warning with the guard
+still failing closed for verified breaks.
