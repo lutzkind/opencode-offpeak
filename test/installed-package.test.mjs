@@ -34,6 +34,7 @@ test("a clean packed install loads both entrypoints and keeps the manifest contr
     assert.equal(installed.engines.node, ">=22");
     assert.equal(installed.main, "./src/server.ts");
     assert.equal(installed.exports["./tui"].bun, "./tui.ts");
+    assert.equal(installed.exports["./gui-experimental"], "./dist/gui-experimental.cjs");
 
     // Load the packed artifacts the way a consumer resolves them, with the
     // package's declared runtime dependency available.
@@ -41,6 +42,8 @@ test("a clean packed install loads both entrypoints and keeps the manifest contr
     await mkdir(consumer, { recursive: true });
     await exec("cp", ["-R", packageRoot, path.join(consumer, "opencode-offpeak")]);
     await symlink(path.join(root, "node_modules", "@opencode"), path.join(consumer, "@opencode"));
+    // Solid is a peer provided by the OpenCode TUI host; mirror that host here.
+    await symlink(path.join(root, "node_modules", "solid-js"), path.join(consumer, "solid-js"));
 
     const server = await import(
       pathToFileURL(path.join(consumer, "opencode-offpeak", "dist", "server.js")).href
@@ -52,6 +55,11 @@ test("a clean packed install loads both entrypoints and keeps the manifest contr
     assert.equal(tui.default.id, "opencode-offpeak");
     assert.equal(typeof server.default.setup, "function");
     assert.equal(typeof tui.default.setup, "function");
+    const guiBundle = await readFile(
+      path.join(consumer, "opencode-offpeak", "dist", "gui-experimental.cjs"),
+      "utf8",
+    );
+    assert.match(guiBundle, /@opencode\/plugin\/gui/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

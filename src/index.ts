@@ -9,9 +9,13 @@ export type {
 } from "./config.js";
 export { ConfigRepository, defaultConfig, validateConfig } from "./config.js";
 export type {
+  ClientOwnershipState,
+  ClientSessionStatus,
+  ClientStatus,
   EngineNotification,
   EngineStatus,
   GuardInput,
+  ProtectionSource,
   RetryFailureInput,
   SessionDriver,
   SessionSnapshot,
@@ -37,23 +41,32 @@ export {
   validatePolicy,
 } from "./policy.js";
 export type {
+  OffpeakClientSessionStatus,
+  OffpeakClientStatus,
   OffpeakEventName,
   OffpeakHoldEvent,
   OffpeakResumeEvent,
 } from "./rpc.js";
 export { OFFPEAK_RPC_ID, offpeakEventType } from "./rpc.js";
 export type {
+  ClientDefaults,
+  ClientProtection,
+  ClientsDocument,
+  OffpeakClient,
   OffpeakTask,
   QueueDocument,
   RecoveryDocument,
   RecoveryEntry,
   RecoveryOrigin,
+  SessionClientOwnership,
   SessionOverridesDocument,
   SessionProtectionOverride,
   TaskModel,
   TaskState,
 } from "./store.js";
 export {
+  CLIENT_SETTINGS_STORAGE_KEY,
+  ClientsRepository,
   QueueRepository,
   RecoveryRepository,
   SESSION_OVERRIDES_STORAGE_KEY,

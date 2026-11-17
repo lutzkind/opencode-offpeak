@@ -1,7 +1,7 @@
 {
   "name": "opencode-offpeak",
-  "version": "0.2.2",
-  "description": "Queue OpenCode agent tasks and guard model requests against expensive pricing windows.",
+  "version": "0.3.0",
+  "description": "Queue OpenCode agent tasks, guard peak pricing, and configure independent CLI and Desktop protection.",
   "author": "Lutz Kind",
   "license": "MIT",
   "type": "module",
@@ -33,7 +33,8 @@
     "./policy": {
       "types": "./dist/policy.d.ts",
       "import": "./dist/policy.js"
-    }
+    },
+    "./gui-experimental": "./dist/gui-experimental.cjs"
   },
   "types": "./dist/server.d.ts",
   "files": [
@@ -52,12 +53,13 @@
     "ROADMAP.md"
   ],
   "scripts": {
-    "compile": "tsc -p tsconfig.build.json",
+    "compile": "tsc -p tsconfig.build.json && npm run build:gui",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "biome check src test",
+    "lint": "biome check src test vite.config.ts",
     "format": "biome format --write src test",
     "test": "npm run compile && node --test --test-force-exit test/*.test.mjs",
-    "check": "npm run lint && npm run typecheck && npm test"
+    "check": "npm run lint && npm run typecheck && npm test",
+    "build:gui": "vite build"
   },
   "keywords": [
     "opencode",
@@ -69,7 +71,10 @@
     "agent-queue",
     "llm-cost-optimization",
     "ai-coding-cost",
-    "pause-resume-agent"
+    "pause-resume-agent",
+    "opencode-desktop",
+    "opencode-gui",
+    "peak-pricing"
   ],
   "repository": {
     "type": "git",
@@ -80,12 +85,22 @@
   },
   "homepage": "https://github.com/lutzkind/opencode-offpeak#readme",
   "dependencies": {
-    "@opencode/plugin": "2.0.26"
+    "@opencode/plugin": "2.3.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@types/node": "24.12.2",
     "solid-js": "1.9.12",
-    "typescript": "5.8.2"
+    "typescript": "5.8.2",
+    "vite": "7.3.8",
+    "vite-plugin-solid": "2.11.16"
+  },
+  "peerDependencies": {
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "solid-js": {
+      "optional": true
+    }
   }
 }

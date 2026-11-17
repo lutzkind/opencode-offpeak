@@ -9,12 +9,18 @@ import {
 } from "./policy.js";
 import {
   AsyncSignal,
+  type ClientDefaults,
+  type ClientProtection,
+  type ClientsDocument,
+  type ClientsRepository,
   Mutex,
+  type OffpeakClient,
   type OffpeakTask,
   type QueueRepository,
   type RecoveryEntry,
   type RecoveryOrigin,
   type RecoveryRepository,
+  type SessionClientOwnership,
   type SessionOverridesDocument,
   type SessionOverridesRepository,
   type SessionProtectionOverride,
@@ -71,14 +77,51 @@ export interface PricingAnswer {
   reason?: string;
 }
 
+/**
+ * How a session's protection was decided. `session-override` is the existing
+ * explicit `/offpeak session off` authorization; `client-default` means the
+ * session was reliably registered by exactly one client; `ambiguous` means the
+ * session was observed with both clients; `unknown` means no client has
+ * registered it; `queue` is server-owned queue work, which never inherits a
+ * client default.
+ */
+export type ProtectionSource =
+  | "session-override"
+  | "client-default"
+  | "ambiguous"
+  | "unknown"
+  | "queue";
+
+export type ClientOwnershipState = OffpeakClient | "ambiguous" | "unknown" | "queue";
+
+export interface ClientSessionStatus {
+  sessionID: string;
+  ownership: ClientOwnershipState;
+  protection: "ON" | "OFF";
+  source: ProtectionSource;
+}
+
+export interface ClientStatus {
+  defaults: { cli: "ON" | "OFF"; desktop: "ON" | "OFF" };
+  session?: ClientSessionStatus;
+  /** Set when the stored client document could not be read or written. */
+  error?: string;
+}
+
 export interface EngineStatus {
   enabled: boolean;
   mode: OffpeakConfig["mode"];
   automaticExecution: "ACTIVE" | "PAUSED";
   automaticResume: "ACTIVE" | "PAUSED";
   override: { active: boolean; taskID?: string; expiresAt?: string };
-  /** Off-peak protection for the queried session ("ON" by default). */
+  /** Explicit session override only: "ON" when no override is stored. */
   sessionProtection?: "ON" | "OFF";
+  /** Persistent CLI and Desktop client defaults. */
+  clientDefaults: { cli: "ON" | "OFF"; desktop: "ON" | "OFF" };
+  /** Client ownership and effective protection for the queried session. */
+  client?: ClientSessionStatus;
+  /** Effective protection, including a client default, for the queried session. */
+  effectiveProtection?: "ON" | "OFF";
   providerID?: string;
   modelID?: string;
   policyID?: string;
@@ -289,6 +332,8 @@ export interface EngineOptions {
   recoveries?: RecoveryRepository;
   /** Optional persisted per-session protection overrides. */
   sessionOverrides?: SessionOverridesRepository;
+  /** Optional persisted CLI/Desktop defaults and session ownership. */
+  clients?: ClientsRepository;
   /** Plugin instance location; recovery entries are scoped to it. */
   location?: string;
   clock?: EngineClock;
@@ -361,6 +406,17 @@ export class OffpeakEngine {
    */
   readonly #sessionProtections = new Map<string, SessionProtectionOverride>();
   readonly #sessionOverridesRepo: SessionOverridesRepository | undefined;
+  /**
+   * Persistent client-level defaults. Both start ON, so an installation that
+   * predates this feature and every session whose client is unknown stay
+   * protected. Only the selected client's field is ever written.
+   */
+  #clientDefaults: ClientDefaults = { cli: "on", desktop: "on" };
+  /** Sessions observed by a client extension. Absence means unknown. */
+  readonly #clientSessions = new Map<string, SessionClientOwnership>();
+  readonly #clientsRepo: ClientsRepository | undefined;
+  #clientSettingsError: string | undefined;
+  #clientSettingsLoaded = false;
   readonly #location: string;
   /**
    * Recovery entries keyed by `${origin}:${sessionID}`. A session can hold a
@@ -384,6 +440,7 @@ export class OffpeakEngine {
     this.#sessions = options.sessions;
     this.#recoveriesRepo = options.recoveries;
     this.#sessionOverridesRepo = options.sessionOverrides;
+    this.#clientsRepo = options.clients;
     this.#location = options.location ?? "";
     this.#clock = options.clock ?? systemClock;
     this.#signal = new AsyncSignal(this.#clock);
@@ -401,6 +458,16 @@ export class OffpeakEngine {
     try {
       await this.#loadSessionProtections();
     } catch (error) {
+      this.#onError(error);
+    }
+    try {
+      await this.#loadClientSettings();
+    } catch (error) {
+      this.#clientSettingsLoaded = false;
+      this.#clientDefaults = { cli: "on", desktop: "on" };
+      this.#clientSessions.clear();
+      this.#clientSettingsError =
+        error instanceof Error ? error.message : "Stored client settings are unavailable.";
       this.#onError(error);
     }
     try {
@@ -432,6 +499,7 @@ export class OffpeakEngine {
     this.#refusals.clear();
     this.#consumedRefusals.clear();
     this.#sessionProtections.clear();
+    this.#clientSessions.clear();
     this.#watcher?.close();
     if (this.#timer) this.#clock.clearTimeout(this.#timer);
     if (this.#recoveryTimer) this.#clock.clearTimeout(this.#recoveryTimer);
@@ -490,35 +558,131 @@ export class OffpeakEngine {
   }
 
   /**
-   * Forgets every explicit override for a session that no longer exists.
-   * Called from OpenCode's supported `session.deleted` event; never removes
-   * state for a session that still exists.
+   * Current client defaults plus the queried session's ownership and effective
+   * protection. Read-only: it never creates or changes ownership.
    */
-  async forgetSession(sessionID: string): Promise<void> {
-    if (!this.#sessionProtections.delete(sessionID)) return;
-    await this.#persistSessionProtections();
+  async clientStatus(current?: { sessionID?: string }): Promise<ClientStatus> {
+    const sessionID = current?.sessionID?.trim();
+    const task = sessionID ? await this.#taskForSession(sessionID) : undefined;
+    const session =
+      sessionID !== undefined ? this.#sessionStatus(sessionID, task !== undefined) : undefined;
+    return {
+      defaults: {
+        cli: this.#clientDefaults.cli === "off" ? "OFF" : "ON",
+        desktop: this.#clientDefaults.desktop === "off" ? "OFF" : "ON",
+      },
+      ...(session ? { session } : {}),
+      ...(this.#clientSettingsError ? { error: this.#clientSettingsError } : {}),
+    };
   }
 
   /**
-   * Bounded lazy cleanup for overrides whose session no longer exists. Runs on
-   * start-up and explicit session commands, never on a timer, and never removes
-   * an override for a session that still exists.
+   * Changes exactly one client's default. The other client's field is read
+   * from the same document and written back unchanged; it is never derived
+   * from, or coupled to, this client's value.
+   */
+  async setClientProtection(
+    client: OffpeakClient,
+    protection: ClientProtection,
+  ): Promise<ClientStatus> {
+    this.#assertClientSettingsWritable();
+    this.#assertClient(client);
+    if (protection !== "on" && protection !== "off") {
+      throw new Error("Client protection must be on or off.");
+    }
+    const next: ClientDefaults = { ...this.#clientDefaults, [client]: protection };
+    if (next.cli === this.#clientDefaults.cli && next.desktop === this.#clientDefaults.desktop) {
+      return this.clientStatus();
+    }
+    await this.#persistClients({ defaults: next });
+    this.#clientDefaults = next;
+    // A changed default must take effect for existing sessions immediately:
+    // wake held requests and recovery delivery through the same signal used by
+    // every other configuration change. No timer and no polling are added.
+    this.#signal.notify();
+    this.#requestPump();
+    return this.clientStatus();
+  }
+
+  /**
+   * Records that a client has observed a session. The first client wins the
+   * single-owner state; a second, different client marks the session
+   * ambiguous instead of replacing the first. Repeated registration by the
+   * same client is idempotent.
+   */
+  async registerSessionClient(sessionID: string, client: OffpeakClient): Promise<ClientStatus> {
+    const id = sessionID.trim();
+    if (!id) throw new Error("A session ID is required for client registration.");
+    this.#assertClient(client);
+    this.#assertClientSettingsWritable();
+    const existing = this.#clientSessions.get(id);
+    if (existing?.clients.includes(client)) return this.clientStatus({ sessionID: id });
+    const clients: OffpeakClient[] = [...(existing?.clients ?? []), client];
+    const ownership: SessionClientOwnership = {
+      clients,
+      ambiguous: clients.length > 1,
+      updatedAt: new Date(this.#clock.now()).toISOString(),
+    };
+    await this.#persistClients({
+      sessions: new Map([...this.#clientSessions, [id, ownership]]),
+    });
+    this.#clientSessions.set(id, ownership);
+    if (ownership.ambiguous) {
+      // A session opened by both clients must not inherit the client that
+      // happened to register last. Keep it protected and wake any hold so it
+      // re-evaluates under the ambiguous state.
+      this.#signal.notify();
+      this.#requestPump();
+    } else if (this.#clientDefaults[client] === "off") {
+      // The client is authorized for verified peak pricing. A request that
+      // arrived before registration and is currently held may proceed now.
+      this.#signal.notify();
+      this.#requestPump();
+    }
+    return this.clientStatus({ sessionID: id });
+  }
+
+  /**
+   * Forgets explicit overrides and client ownership for a session that no
+   * longer exists. Called from OpenCode's supported `session.deleted` event;
+   * never removes state for a session that still exists.
+   */
+  async forgetSession(sessionID: string): Promise<void> {
+    const overrideRemoved = this.#sessionProtections.delete(sessionID);
+    const ownershipRemoved = this.#clientSessions.delete(sessionID);
+    if (!overrideRemoved && !ownershipRemoved) return;
+    await Promise.all([
+      overrideRemoved ? this.#persistSessionProtections() : Promise.resolve(),
+      ownershipRemoved ? this.#persistClients({}) : Promise.resolve(),
+    ]);
+  }
+
+  /**
+   * Bounded lazy cleanup for overrides and client ownership whose session no
+   * longer exists. Runs on start-up and explicit session commands, never on a
+   * timer, and never removes state for a session that still exists.
    */
   async pruneSessionProtections(): Promise<void> {
-    if (this.#sessionProtections.size === 0) return;
-    let changed = false;
-    for (const sessionID of [...this.#sessionProtections.keys()]) {
+    if (this.#sessionProtections.size === 0 && this.#clientSessions.size === 0) return;
+    let overridesChanged = false;
+    let ownershipChanged = false;
+    for (const sessionID of [
+      ...new Set([...this.#sessionProtections.keys(), ...this.#clientSessions.keys()]),
+    ]) {
       try {
         await this.#sessions.get(sessionID);
       } catch (error) {
-        // Only a confident not-found may reap an override; a transient error
-        // means the session may still exist and its state must be kept.
-        if (isSessionNotFound(error) && this.#sessionProtections.delete(sessionID)) {
-          changed = true;
-        }
+        // Only a confident not-found may reap state; a transient error means
+        // the session may still exist and its state must be kept.
+        if (!isSessionNotFound(error)) continue;
+        if (this.#sessionProtections.delete(sessionID)) overridesChanged = true;
+        if (this.#clientSessions.delete(sessionID)) ownershipChanged = true;
       }
     }
-    if (changed) await this.#persistSessionProtections();
+    await Promise.all([
+      overridesChanged ? this.#persistSessionProtections() : Promise.resolve(),
+      ownershipChanged ? this.#persistClients({}) : Promise.resolve(),
+    ]);
   }
 
   async queue(input: { prompt: string; cwd: string; model: TaskModel }): Promise<OffpeakTask> {
@@ -702,6 +866,13 @@ export class OffpeakEngine {
     const providerNote = selected?.providerID ? flatProviderNote(selected.providerID) : undefined;
     const sessionProtection =
       current?.sessionID !== undefined ? this.sessionProtection(current.sessionID) : undefined;
+    const client =
+      current?.sessionID !== undefined
+        ? this.#sessionStatus(
+            current.sessionID,
+            tasks.some((task) => task.sessionID === current.sessionID),
+          )
+        : undefined;
     return {
       enabled,
       mode: settings.config?.mode ?? "auto",
@@ -711,6 +882,16 @@ export class OffpeakEngine {
         ? { active: true, taskID: override.id, expiresAt: override.overrideUntil }
         : { active: false },
       ...(sessionProtection ? { sessionProtection } : {}),
+      clientDefaults: {
+        cli: this.#clientDefaults.cli === "off" ? "OFF" : "ON",
+        desktop: this.#clientDefaults.desktop === "off" ? "OFF" : "ON",
+      },
+      ...(client
+        ? {
+            client,
+            effectiveProtection: client.protection,
+          }
+        : {}),
       ...(selected?.providerID ? { providerID: selected.providerID } : {}),
       ...(selected?.modelID ? { modelID: selected.modelID } : {}),
       ...(decision.policy?.id ? { policyID: decision.policy.id } : {}),
@@ -718,7 +899,7 @@ export class OffpeakEngine {
       requestsAllowed:
         (!enabled && running !== undefined) || decision.state === "UNKNOWN"
           ? false
-          : decision.allowed || (sessionProtection === "OFF" && decision.state === "PEAK"),
+          : decision.allowed || (client?.protection === "OFF" && decision.state === "PEAK"),
       ...(decision.nextTransition !== undefined ? { nextTransition: decision.nextTransition } : {}),
       ...(providerNote && decision.state === "UNTRACKED" ? { providerNote } : {}),
       displayTimeZone: settings.config?.displayTimeZone ?? "UTC",
@@ -832,7 +1013,7 @@ export class OffpeakEngine {
     if (
       task === undefined &&
       decision.state === "PEAK" &&
-      this.#sessionProtectionOff(input.sessionID)
+      this.#effectiveProtectionOff(input.sessionID, false)
     )
       return;
     if (this.#hasOverride(task, this.#clock.now()) && first.config.enabled) return;
@@ -943,7 +1124,7 @@ export class OffpeakEngine {
         if (
           task === undefined &&
           decision.state === "PEAK" &&
-          this.#sessionProtectionOff(input.sessionID)
+          this.#effectiveProtectionOff(input.sessionID, false)
         ) {
           if (hold !== undefined) hold.state = "committed";
           if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
@@ -1262,7 +1443,7 @@ export class OffpeakEngine {
     // This session is explicitly operating at verified PEAK rates: a retryable
     // provider failure is nothing more than that, so OpenCode's normal retry
     // behavior applies and no recovery continuation is registered.
-    if (this.#sessionProtectionOff(input.sessionID)) return "pass";
+    if (this.#effectiveProtectionOff(input.sessionID, false)) return "pass";
     await this.#registerRecovery(input.sessionID, input.providerID, input.modelID, "retry-failure");
     this.#signal.notify();
     this.#requestPump();
@@ -1342,9 +1523,118 @@ export class OffpeakEngine {
     await this.#lock.run(() => repo.save(document));
   }
 
-  /** True when the user explicitly switched this session's protection off. */
-  #sessionProtectionOff(sessionID: string): boolean {
-    return this.#sessionProtections.has(sessionID);
+  async #loadClientSettings(): Promise<void> {
+    const repo = this.#clientsRepo;
+    if (!repo) {
+      this.#clientSettingsLoaded = true;
+      this.#clientSettingsError = undefined;
+      return;
+    }
+    const document = await repo.load();
+    this.#clientDefaults = { ...document.defaults };
+    this.#clientSessions.clear();
+    for (const [sessionID, ownership] of Object.entries(document.sessions)) {
+      this.#clientSessions.set(sessionID, {
+        clients: [...ownership.clients],
+        ambiguous: ownership.ambiguous,
+        updatedAt: ownership.updatedAt,
+      });
+    }
+    this.#clientSettingsLoaded = true;
+    this.#clientSettingsError = undefined;
+  }
+
+  /**
+   * Persists the full minimal document, replacing only the part the caller
+   * changed. The write happens before the in-memory value changes, so a
+   * failed storage write can never leave this process authorizing peak
+   * inference that a restart would forget.
+   */
+  async #persistClients(update: {
+    defaults?: ClientDefaults;
+    sessions?: Map<string, SessionClientOwnership>;
+  }): Promise<void> {
+    if (!this.#clientSettingsLoaded) return;
+    const repo = this.#clientsRepo;
+    const defaults = update.defaults ?? this.#clientDefaults;
+    const sessions = update.sessions ?? this.#clientSessions;
+    if (!repo) {
+      this.#clientSettingsError = undefined;
+      return;
+    }
+    const document: ClientsDocument = {
+      schemaVersion: 1,
+      defaults: { ...defaults },
+      sessions: Object.fromEntries(
+        [...sessions.entries()].map(([sessionID, ownership]) => [
+          sessionID,
+          {
+            clients: [...ownership.clients],
+            ambiguous: ownership.ambiguous,
+            updatedAt: ownership.updatedAt,
+          },
+        ]),
+      ),
+    };
+    await this.#lock.run(() => repo.save(document));
+    this.#clientSettingsError = undefined;
+  }
+
+  #assertClientSettingsWritable(): void {
+    if (!this.#clientSettingsLoaded) {
+      throw new Error(
+        this.#clientSettingsError ??
+          "Stored offpeak client settings are unavailable; refusing to change protection.",
+      );
+    }
+  }
+
+  #assertClient(client: string): asserts client is OffpeakClient {
+    if (client !== "cli" && client !== "desktop") {
+      throw new Error("Client must be cli or desktop.");
+    }
+  }
+
+  /**
+   * The effective protection of one session. Precedence is explicit:
+   * 1. queue-owned work never inherits a client default;
+   * 2. an explicit per-session override wins over any client default;
+   * 3. a session with exactly one registering client uses that client's default;
+   * 4. an unregistered or shared session is protected.
+   */
+  #sessionStatus(sessionID: string, taskOwned: boolean): ClientSessionStatus {
+    const override = this.#sessionProtections.has(sessionID);
+    const ownership = this.#clientSessions.get(sessionID);
+    const clients = ownership?.clients ?? [];
+    let state: ClientOwnershipState;
+    if (taskOwned) state = "queue";
+    else if (clients.length > 1) state = "ambiguous";
+    else if (clients.length === 1) state = clients[0] ?? "unknown";
+    else state = "unknown";
+
+    if (taskOwned) return { sessionID, ownership: state, protection: "ON", source: "queue" };
+    if (override) {
+      return { sessionID, ownership: state, protection: "OFF", source: "session-override" };
+    }
+    if (state === "cli" || state === "desktop") {
+      return {
+        sessionID,
+        ownership: state,
+        protection: this.#clientDefaults[state] === "off" ? "OFF" : "ON",
+        source: "client-default",
+      };
+    }
+    return {
+      sessionID,
+      ownership: state,
+      protection: "ON",
+      source: state === "ambiguous" ? "ambiguous" : "unknown",
+    };
+  }
+
+  /** True when the session is authorized for verified PEAK inference. */
+  #effectiveProtectionOff(sessionID: string, taskOwned: boolean): boolean {
+    return this.#sessionStatus(sessionID, taskOwned).protection === "OFF";
   }
 
   /** Removes the override for one session that no longer exists (lazy). */
@@ -1433,6 +1723,13 @@ export class OffpeakEngine {
     }
     const settings = await this.#config.read();
     if (!settings.config) return;
+    // Queue-owned work never inherits a client default. Load the queue once
+    // for this pass so the recovery checks below can distinguish it from an
+    // interactive session without a per-entry queue read.
+    const queue = await this.#repo.load();
+    const taskSessions = new Set(
+      queue.tasks.flatMap((task) => (task.sessionID === undefined ? [] : [task.sessionID])),
+    );
     let next: number | undefined;
     const entries = [...this.#recoveries.values()].filter(
       (entry) => entry.directory === this.#location,
@@ -1469,7 +1766,7 @@ export class OffpeakEngine {
       // immediately at the authorized peak rates.
       const deliverable =
         (settings.config.enabled && (settings.config.mode === "auto" || decision.allowed)) ||
-        this.#sessionProtectionOff(entry.sessionID);
+        this.#effectiveProtectionOff(entry.sessionID, taskSessions.has(entry.sessionID));
       if (deliverable) {
         const result = await this.#deliverCompactionRecovery(entry);
         if (result.retryAt !== undefined)
@@ -1497,7 +1794,7 @@ export class OffpeakEngine {
       const forced = compactionAdmitted.has(entry.sessionID);
       if (
         (settings.config.enabled && (forced || decision.allowed)) ||
-        this.#sessionProtectionOff(entry.sessionID)
+        this.#effectiveProtectionOff(entry.sessionID, taskSessions.has(entry.sessionID))
       ) {
         const retryAt = await this.#deliverRecovery(entry, { force: forced });
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
@@ -1517,7 +1814,7 @@ export class OffpeakEngine {
       );
       if (
         (settings.config.enabled && decision.allowed) ||
-        this.#sessionProtectionOff(entry.sessionID)
+        this.#effectiveProtectionOff(entry.sessionID, taskSessions.has(entry.sessionID))
       ) {
         const retryAt = await this.#deliverTitleRecovery(entry);
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);

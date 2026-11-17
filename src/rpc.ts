@@ -21,6 +21,12 @@ export const OFFPEAK_RPC = {
           providerID: { type: "string" },
           modelID: { type: "string" },
           sessionID: { type: "string" },
+          /** Client-level protection control: "cli" or "desktop". */
+          client: { type: "string" },
+          /** Client default to apply: "on" or "off". */
+          protection: { type: "string" },
+          /** Stable client-extension instance, for diagnostics only. */
+          instanceID: { type: "string" },
         },
         required: ["action"],
         additionalProperties: false,
@@ -134,12 +140,33 @@ export interface OffpeakRpcInput {
   modelID?: string;
   /** Current interactive session, for session-scoped protection control. */
   sessionID?: string;
+  /** Client-level protection control: "cli" or "desktop". */
+  client?: string;
+  /** Client default to apply: "on" or "off". */
+  protection?: string;
+  /** Stable client-extension instance, for diagnostics only. */
+  instanceID?: string;
+}
+
+export interface OffpeakClientSessionStatus {
+  sessionID: string;
+  ownership: "cli" | "desktop" | "ambiguous" | "unknown" | "queue";
+  protection: "ON" | "OFF";
+  source: "session-override" | "client-default" | "ambiguous" | "unknown" | "queue";
+}
+
+export interface OffpeakClientStatus {
+  defaults: { cli: "ON" | "OFF"; desktop: "ON" | "OFF" };
+  session?: OffpeakClientSessionStatus;
+  error?: string;
 }
 
 export interface OffpeakRpcOutput {
   message?: string;
   status?: Record<string, unknown>;
   tasks?: unknown[];
+  /** Client defaults and, when a session was supplied, its effective state. */
+  client?: OffpeakClientStatus;
   /** `cancelHold` result: whether the hold lost the race, and how it settled. */
   cancelled?: boolean;
   state?: string;

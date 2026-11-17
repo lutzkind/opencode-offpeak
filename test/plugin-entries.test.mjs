@@ -315,6 +315,67 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(sessionOn.state, "ON");
     assert.match(sessionOn.message, /Session off-peak protection enabled/);
 
+    // Client-level defaults are independent and start ON. Changing one does
+    // not write the other, and an explicit session override stays distinct
+    // from both the global toggle and a client default.
+    const initialClients = await rpcHandlers.control({ action: "client" });
+    assert.deepEqual(initialClients.client.defaults, { cli: "ON", desktop: "ON" });
+    const cliOff = await rpcHandlers.control({
+      action: "client-set",
+      client: "cli",
+      protection: "off",
+      sessionID: "entrypoint-client",
+    });
+    assert.deepEqual(cliOff.client.defaults, { cli: "OFF", desktop: "ON" });
+    const desktopOff = await rpcHandlers.control({
+      action: "client-set",
+      client: "desktop",
+      protection: "off",
+      sessionID: "entrypoint-client",
+    });
+    assert.deepEqual(desktopOff.client.defaults, { cli: "OFF", desktop: "OFF" });
+    const cliBackOn = await rpcHandlers.control({
+      action: "client-set",
+      client: "cli",
+      protection: "on",
+      sessionID: "entrypoint-client",
+    });
+    assert.deepEqual(cliBackOn.client.defaults, { cli: "ON", desktop: "OFF" });
+    await rpcHandlers.control({
+      action: "client-register",
+      client: "cli",
+      sessionID: "entrypoint-client",
+    });
+    let clientStatus = await rpcHandlers.control({
+      action: "client",
+      sessionID: "entrypoint-client",
+    });
+    assert.equal(clientStatus.client.session.ownership, "cli");
+    assert.equal(clientStatus.client.session.protection, "ON");
+    assert.equal(clientStatus.client.session.source, "client-default");
+    // A second, different client makes the session shared, never last-writer-wins.
+    await rpcHandlers.control({
+      action: "client-register",
+      client: "desktop",
+      sessionID: "entrypoint-client",
+    });
+    clientStatus = await rpcHandlers.control({
+      action: "client",
+      sessionID: "entrypoint-client",
+    });
+    assert.equal(clientStatus.client.session.ownership, "ambiguous");
+    assert.equal(clientStatus.client.session.protection, "ON");
+    assert.equal(clientStatus.client.session.source, "ambiguous");
+    await rpcHandlers.control({ action: "client-set", client: "desktop", protection: "on" });
+    await assert.rejects(
+      rpcHandlers.control({ action: "client-set", client: "mobile", protection: "off" }),
+      /Usage: \/offpeak client/,
+    );
+    await assert.rejects(
+      rpcHandlers.control({ action: "client-register", client: "desktop" }),
+      /requires a sessionID/,
+    );
+
     const off = await rpcHandlers.control({ action: "off" });
     assert.match(off.message, /Peak pricing is still blocked/);
     // OFF never releases a held request and is not a price override.
@@ -354,6 +415,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
 
     let layer;
     const eventHandlers = new Map();
+    const registrations = [];
     const tuiContext = {
       app: { name: "opencode", version: "2.0.26", channel: "latest" },
       data: {
@@ -366,7 +428,12 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       client: {
         rpc: (definition) => {
           assert.equal(definition.id, "opencode-offpeak");
-          return { control: (input) => rpcHandlers.control(input) };
+          return {
+            control: (input) => {
+              if (input.action === "client-register") registrations.push(input);
+              return rpcHandlers.control(input);
+            },
+          };
         },
       },
       location: { directory: "/fixture-project" },
@@ -378,6 +445,13 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       },
     };
     const disposeTui = tuiPlugin.setup(tuiContext);
+    // The CLI extension registers its focused session through the connected
+    // server's own RPC, before the user can submit a prompt in that session.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(
+      registrations.some((input) => input.client === "cli" && input.sessionID === "tui-session"),
+      "the TUI did not register its focused CLI session",
+    );
     assert.deepEqual([...eventHandlers.keys()].sort(), [
       "rpc.opencode-offpeak.hold",
       "rpc.opencode-offpeak.resume",
@@ -435,13 +509,31 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     });
     assert.equal(tuiSessionStatus.status.sessionProtection, "OFF");
     await command.run("/offpeak status");
-    assert.match(toasts.at(-1).message, /Session protection: OFF/);
+    assert.match(toasts.at(-1).message, /Session protection \(explicit\): OFF/);
     await command.run("/offpeak session on");
     assert.match(toasts.at(-1).message, /Session off-peak protection enabled/);
     await command.run("/offpeak status");
-    assert.match(toasts.at(-1).message, /Session protection: ON/);
+    assert.match(toasts.at(-1).message, /Session protection \(explicit\): ON/);
     await command.run("/offpeak session sometimes");
     assert.match(toasts.at(-1).message, /Usage: \/offpeak session on\|off/);
+    // Client-level commands are separate from the global and session controls.
+    await command.run("/offpeak client");
+    assert.match(toasts.at(-1).message, /CLI default: ON/);
+    assert.match(toasts.at(-1).message, /Desktop default: ON/);
+    assert.match(toasts.at(-1).message, /This session: CLI/);
+    await command.run("/offpeak client cli off");
+    assert.match(toasts.at(-1).message, /CLI default: OFF/);
+    assert.match(toasts.at(-1).message, /Desktop default: ON/);
+    await command.run("/offpeak client desktop off");
+    assert.match(toasts.at(-1).message, /CLI default: OFF/);
+    assert.match(toasts.at(-1).message, /Desktop default: OFF/);
+    await command.run("/offpeak client cli on");
+    assert.match(toasts.at(-1).message, /CLI default: ON/);
+    assert.match(toasts.at(-1).message, /Desktop default: OFF/);
+    await command.run("/offpeak client mobile on");
+    assert.match(toasts.at(-1).message, /Usage: \/offpeak client/);
+    await command.run("/offpeak client desktop on");
+    assert.match(toasts.at(-1).message, /Desktop default: ON/);
     // Without a focused session the command refuses instead of guessing.
     tuiContext.ui.router.current = () => ({ type: "home" });
     await command.run("/offpeak session off");

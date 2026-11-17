@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.0 - 2026-11-17
+
+### Independent CLI and Desktop protection
+
+- **Two persistent client defaults.** `/offpeak client` shows `cli` and
+  `desktop` defaults; `/offpeak client cli on|off` and
+  `/offpeak client desktop on|off` change one field each. Both initialize to ON
+  for existing installations, and changing one never writes the other.
+- **Native Desktop GUI.** `./gui-experimental` is built with the official
+  `@opencode/plugin/gui/vite` preset from `src/gui.tsx` into one prebuilt
+  `dist/gui-experimental.cjs`. It adds a Settings page with the Desktop switch,
+  the read-only CLI default, the current session's ownership and effective
+  protection, and explicit remote-server errors. It never updates the CLI
+  setting.
+- **Supported client identification.** The server request hooks have no client
+  identity. The TUI registers routed sessions as `cli` through its connected
+  server's typed RPC; the GUI registers routed sessions as `desktop` through
+  `SessionRef.server.client` (never an assumed local sidecar). Registration is
+  additive and idempotent. A session observed by both clients is `ambiguous`
+  and stays protected; an unregistered session is `UNKNOWN` and stays
+  protected. No IP/User-Agent/environment guess, heartbeat, lease, polling
+  loop, second server, database, queue, or scheduler is added.
+- **Fail-closed first-request behavior.** A brand-new Desktop draft has no
+  supported pre-submit hook, so its first peak request may race registration;
+  the server holds that unknown request and never sends it unprotected. It is
+  released when Desktop ownership arrives and the Desktop default is OFF.
+  Headless `opencode run` remains unknown and protected.
+- **State and migration.** A minimal `opencode-offpeak/clients-v1` document
+  stores both defaults and per-session ownership. It survives plugin reloads
+  and server restarts; `session.deleted` and bounded lazy cleanup remove
+  ownership. `/offpeak session on|off` and `/offpeak on|off` keep their existing
+  meanings and precedence.
+
+### Packaging and compatibility
+
+- `@opencode/plugin` is now `2.3.0` so the GUI SDK and Vite preset are
+  available. The declared runtime range remains `>=2.0.26 <2.4.0`; the
+  server/TUI surfaces used are unchanged.
+- Added `vite`, `vite-plugin-solid`, and the `solid-js` peer dependency; the
+  GUI bundle keeps `effect`, `@opencode/plugin/gui`, `solid-js`, and other app
+  modules external as required by the Desktop host.
+- New deterministic tests cover independent settings, cross-effect isolation,
+  session overrides, migration, reload/restart persistence, deletion cleanup,
+  shared/unknown fail-closed behavior, GUI RPC targeting, packaged-GUI loading,
+  and the global/queue invariants. A real OpenCode 2.3.0 fixture proves 0
+  provider requests for a protected client until the boundary and exactly 1
+  for an unprotected client; a real TUI test proves CLI registration and the
+  independent Desktop switch.
+
 ## 0.2.2 - 2026-11-16
 
 ### Compatibility

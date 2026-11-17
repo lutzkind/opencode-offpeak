@@ -1,20 +1,38 @@
 # opencode-offpeak
 
-Queue OpenCode agent tasks, block paid model requests during expensive pricing windows, and resume the **same OpenCode session** when off-peak pricing returns.
+Queue OpenCode agent tasks, block paid model requests during expensive pricing windows, and resume the **same OpenCode session** when off-peak pricing returns. OpenCode CLI/TUI and OpenCode Desktop have **independent** persistent protection defaults, so one client can run at peak while the other keeps waiting.
 
-`opencode-offpeak` is an OpenCode CLI v2 plugin. Its default policy covers DeepSeek models through OpenCode Go. Pricing is enforced at two lifecycle points: a pre-model deferral and the outbound transport guard. In `auto` mode, a supported request that reaches peak pricing waits at the pre-model hook — before OpenCode creates the provider attempt and its response-header timer — and the same session continues the same turn automatically when off-peak pricing returns, with zero provider traffic while pricing is blocked. The transport guard remains the final hard barrier immediately before OpenCode sends an HTTP request or an experimental WebSocket frame. If a request is already in flight and fails with a retryable provider/network error after peak pricing begins, the retry is stopped before it can reach the provider and the same session continues automatically at the next off-peak window. When one session must deliberately run through a peak window, `/offpeak session off` authorizes verified peak-priced inference for that session alone; every other session stays protected.
+`opencode-offpeak` is an OpenCode v2 plugin with server, TUI, and Desktop GUI entrypoints. Its default policy covers DeepSeek models through OpenCode Go. Pricing is enforced at two lifecycle points: a pre-model deferral and the outbound transport guard. In `auto` mode, a supported request that reaches peak pricing waits at the pre-model hook — before OpenCode creates the provider attempt and its response-header timer — and the same session continues the same turn automatically when off-peak pricing returns, with zero provider traffic while pricing is blocked. The transport guard remains the final hard barrier immediately before OpenCode sends an HTTP request or an experimental WebSocket frame. If a request is already in flight and fails with a retryable provider/network error after peak pricing begins, the retry is stopped before it can reach the provider and the same session continues automatically at the next off-peak window. When one session must deliberately run through a peak window, `/offpeak session off` authorizes verified peak-priced inference for that session alone; every other session stays protected.
 
-> **Compatibility:** OpenCode CLI `>=2.0.26 <2.4.0`. This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 (the minimum), 2.0.27, 2.0.30, 2.1.3, 2.2.6, and the current **2.3.0** (the live host). OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses. OpenCode 2.2 left the hooks, RPC channel, and TUI surfaces used here unchanged. OpenCode 2.3 only adds plugin surfaces (session fork, model resolve, idle, artifacts, credentials, session instructions, event type filters, and a deprecated `generate` alias); every hook, RPC channel, storage call, and TUI surface this package uses keeps its 2.2 signature. The OpenTUI 0.7/0.8 changes apply to custom renderables, which this plugin does not define. OpenCode 2.2.3 split managed-policy plugin control from `integration.use` into `plugin.use`; that affects operators who deny plugins, not this plugin's runtime contract. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with a clear error instead of failing later at runtime.
+> **Compatibility:** OpenCode CLI `>=2.0.26 <2.4.0`; the Desktop GUI entrypoint requires **OpenCode Desktop 2.3.0** (the first release with the GUI plugin SDK). This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 (the minimum), 2.0.27, 2.0.30, 2.1.3, 2.2.6, and the current **2.3.0** (the live host). OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses. OpenCode 2.2 left the hooks, RPC channel, and TUI surfaces used here unchanged. OpenCode 2.3 only adds plugin surfaces (session fork, model resolve, idle, artifacts, credentials, session instructions, event type filters, and a deprecated `generate` alias); every hook, RPC channel, storage call, and TUI surface this package uses keeps its 2.2 signature. The OpenTUI 0.7/0.8 changes apply to custom renderables, which this plugin does not define. OpenCode 2.2.3 split managed-policy plugin control from `integration.use` into `plugin.use`; that affects operators who deny plugins, not this plugin's runtime contract. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with a clear error instead of failing later at runtime.
 
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.2
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0
 ```
 
-This installs the released `v0.2.2` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes both server and TUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.3.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
+
+### Desktop GUI installation
+
+The Desktop GUI is loaded from **Desktop's own** `opencode.json(c)`, not from the remote server's configuration and not from `cli.json`. Installing the package only on the remote OpenCode server enforces pricing there, but it does not make the settings page appear in the Desktop app. To get the native Offpeak page:
+
+1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.3.0` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
+2. List the same package in Desktop's global `opencode.json(c)` on the machine running Desktop:
+
+   ```jsonc
+   {
+     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0"]
+   }
+   ```
+
+3. Set `OPENCODE_SERVER_PASSWORD` on the remote server if it is protected, and add that server in Desktop with the same password. The GUI uses the selected session's actual server client for every RPC, never an assumed local sidecar.
+4. Open **Settings > Offpeak**. The page reads and writes the Desktop default on the selected server; it never changes the CLI default.
+
+The Desktop app must be 2.3.0 or newer. The package builds its GUI from `src/gui.tsx` into `dist/gui-experimental.cjs` through the official `@opencode/plugin/gui/vite` preset.
 
 ## Use it
 
@@ -35,6 +53,11 @@ Select the provider and model first. Queueing captures the current model and wor
 /offpeak off
 /offpeak session on
 /offpeak session off
+/offpeak client
+/offpeak client cli on
+/offpeak client cli off
+/offpeak client desktop on
+/offpeak client desktop off
 /offpeak pricing
 /offpeak retry <task-id>
 /offpeak resume <task-id>
@@ -45,7 +68,9 @@ Select the provider and model first. Queueing captures the current model and wor
 - `/offpeak off` persists the disabled setting and pauses automatic starts/resumes.
 - `/offpeak session on` restores normal off-peak protection for the current session (the default).
 - `/offpeak session off` disables off-peak protection for the current session only: that session's verified peak-priced requests run immediately, and any request it already has waiting for off-peak is released. It is an explicit, session-scoped peak authorization — not a global toggle and not a bypass of `UNKNOWN` or invalid-configuration protection.
-- `/offpeak status` shows the toggle, mode, model policy, price state, request decision, next transition, queue counts, held interactive requests, sessions waiting for off-peak recovery, the current session's protection state, and any override.
+- `/offpeak client` shows the independent CLI and Desktop defaults, the current session's ownership, and the session's effective protection (including whether it is an explicit override, a client default, or fail-closed).
+- `/offpeak client cli on|off` changes only the CLI default; `/offpeak client desktop on|off` changes only the Desktop default. Both persist on the server and apply to existing sessions of that client immediately.
+- `/offpeak status` shows the toggle, mode, model policy, price state, request decision, next transition, queue counts, held interactive requests, sessions waiting for off-peak recovery, client defaults, the current session's ownership, the explicit session override, and the effective protection.
 - `/offpeak list` shows task IDs, states, stored session IDs, and the last failure.
 - `/offpeak cancel <task-id>` cancels the task and preserves its session record.
 - `/offpeak remove <task-id>` removes a terminal (`COMPLETED`, `FAILED`, or `CANCELLED`) task from the queue. Active tasks must be cancelled first; the OpenCode session is preserved.
@@ -125,6 +150,29 @@ Sometimes one session should deliberately run through a peak window while every 
 - **Status output.** `/offpeak status` reports the current session's protection, and while peak pricing is active with protection off it makes the effective behavior explicit — `Pricing: PEAK`, `Session protection: OFF`, `Requests: ALLOWED (session override)`. Pricing is never reported as off-peak when it is peak.
 - **Compaction.** With protection off, a manual or automatic compaction during peak runs immediately and leaves no pending-compaction marker; with protection on, the compact-first behavior documented above is unchanged.
 
+### Independent CLI and Desktop protection (`/offpeak client`)
+
+CLI/TUI and Desktop are separate clients of the same OpenCode server. Each has a persistent default, both start **ON**, and changing one never writes the other:
+
+```text
+/offpeak client                 →  CLI default: ON
+                                   Desktop default: OFF
+                                   This session: CLI
+                                   Effective protection: ON
+/offpeak client cli off         →  CLI default: OFF (Desktop default unchanged)
+/offpeak client desktop on      →  Desktop default: ON (CLI default unchanged)
+```
+
+- **Precedence is explicit.** Invalid configuration and `UNKNOWN` pricing always fail closed. An existing explicit `/offpeak session off` still wins for its one session. Otherwise a session reliably registered by exactly one client uses that client's default. An unregistered session, or one observed by both clients, stays protected.
+- **Identification is client-side and supported.** The server's `model.request` hook has no client identity, and this plugin never guesses from IP addresses, User-Agent strings, undocumented internals, or environment variables. The TUI extension registers its routed session through the connected server's typed RPC as soon as the session appears (and again before every `/offpeak` command); the Desktop GUI does the same with the selected session's actual `SessionRef.server.client`. Registration is idempotent and targets the server that owns the session, including a remote server.
+- **Shared sessions fail closed.** If both clients register the same session, it is stored as `ambiguous`; it remains protected even when one client's default is OFF. The last client to open the session never inherits ownership. The Desktop settings page reports the shared state. This also means a session first used in Desktop and later opened in the CLI stays shared until it is deleted; there is deliberately no heartbeat or lease that could let a stale observation expire.
+- **First-request safety.** A session that has not yet been registered is `UNKNOWN` and protected. On a brand-new Desktop draft, OpenCode does not expose a supported pre-submit hook, so the GUI cannot register the session before the draft becomes a session; if that very first request reaches verified peak pricing in the few milliseconds before registration lands, it is held (never sent unprotected) and is released immediately once the Desktop registration arrives and the Desktop default is OFF. Off-peak requests are unaffected. Headless `opencode run` sessions have no TUI/GUI extension, so they remain unknown and protected.
+- **Existing installations migrate safely.** Both defaults initialize to ON when no client document exists, so every previously protected session keeps exactly its old behavior. The state is a minimal versioned document (`opencode-offpeak/clients-v1`) with `defaults` and per-session ownership; it survives plugin reloads and server restarts. OpenCode's supported `session.deleted` event removes ownership, and bounded lazy cleanup reaps state only for sessions that are confidently gone.
+- **Queue tasks stay separate.** A queue-owned session never inherits a client default; `/offpeak run-now <task-id>` remains its task-scoped authorization. `/offpeak on|off` remains global automation and is not a client setting.
+- **Status output.** `/offpeak status` adds `Client defaults`, `Client ownership`, `Session protection (explicit)`, and `Effective protection` lines, so a client default is never confused with the explicit session override.
+
+The Desktop settings page exposes the Desktop switch, the read-only CLI default, the current session's ownership/effective protection, and an explicit error when the selected remote server is unavailable. It writes only `client: "desktop"` through that server's typed RPC.
+
 ### Timeout and retry recovery
 
 A request can start during off-peak, be accepted by the provider, cross into a peak window, and then fail with a retryable provider or network error such as `Timed out waiting for response headers`. That failure is real (the request was already sent), so the plugin's job is to make sure nothing further reaches the provider and the work is not lost. OpenCode normally retries such failures, and a retry attempt is itself a new paid request: during peak pricing it must not reach the provider, and the work must not be lost when OpenCode's retry budget runs out.
@@ -197,7 +245,7 @@ The plugin's local configuration file is:
 $OPENCODE_CONFIG_DIR/offpeak.json
 ```
 
-If `OPENCODE_CONFIG_DIR` is unset, this is `$XDG_CONFIG_HOME/opencode/offpeak.json`, or `~/.config/opencode/offpeak.json` when `XDG_CONFIG_HOME` is unset. Set `OPENCODE_OFFPEAK_CONFIG` to use another path. The first `/offpeak on` or `/offpeak off` command creates the file atomically. Queue metadata and task/session IDs use OpenCode's persistent plugin storage.
+If `OPENCODE_CONFIG_DIR` is unset, this is `$XDG_CONFIG_HOME/opencode/offpeak.json`, or `~/.config/opencode/offpeak.json` when `XDG_CONFIG_HOME` is unset. Set `OPENCODE_OFFPEAK_CONFIG` to use another path. The first `/offpeak on` or `/offpeak off` command creates the file atomically. Queue metadata, task/session IDs, explicit session overrides, and client defaults/ownership use OpenCode's persistent plugin storage.
 
 Example:
 
@@ -224,6 +272,10 @@ See [configuration](docs/configuration.md) and [pricing policies](docs/pricing-p
 - A request deferred at the pre-model hook lives in the running OpenCode server process; a plugin/server shutdown fails it closed as blocked rather than sending it under an uncertain pricing state. A retryable provider failure during peak instead records minimal recovery metadata in OpenCode plugin storage, so the same session continues at the next off-peak window even across a reload.
 - A session whose protection was explicitly switched off (`/offpeak session off`) keeps that override across reloads and restarts until it is switched back on or the session is deleted; while it is off, peak-priced dispatches in that session are real peak-rate inference and are billed accordingly.
 - `/offpeak session on|off` needs a focused session; on the home screen it refuses rather than guessing which session was meant.
+- `/offpeak client` needs no focused session for the defaults, but the per-session ownership/effective lines require one.
+- Client ownership is a two-client distinction. Two CLI instances, or two Desktop windows, are the same client; a session opened in both CLI and Desktop is shared and stays protected. There is no automatic lease expiry, so a session used once from each client remains ambiguous until it is deleted.
+- The Desktop GUI requires Desktop 2.3.0+ and its own `opencode.json(c)` entry. Installing the server package on the remote server alone does not deploy the local GUI entrypoint.
+- Headless `opencode run` has no TUI/GUI registration path and is therefore `UNKNOWN` (protected at peak). Use `/offpeak session off` from an interactive session, or run at off-peak, when headless peak inference is intended.
 - If OpenCode's own location-activity sweep interrupts a deferred session (no durable session events for 60 minutes), the plugin records the same persisted recovery and the session continues at the next allowed window; user interrupts are never converted into recoveries.
 - A session that never settles after a retryable failure (no outcome is recorded) is not continued automatically; its recovery record is dropped without sending anything rather than injecting a message into an unclear session.
 - The plugin blocks at the provider request boundary. It does not roll back a request already accepted by a provider or interrupt an already-running local tool operation.

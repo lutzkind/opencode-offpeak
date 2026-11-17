@@ -1,8 +1,9 @@
 # Roadmap
 
-## Current: 0.1.x
+## Current: 0.3.x
 
-- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.3.0 (v0.2.2).
+- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.3.0 (v0.3.0).
+- Independent persistent CLI and Desktop protection defaults, with client-side session registration, shared-session fail-closed handling, and a native Desktop settings page (`./gui-experimental`).
 - DeepSeek via OpenCode Go policy.
 - Persistent sequential queue, ON/OFF, status/list/cancel/retry/resume controls.
 - Request-boundary HTTP and experimental WebSocket guard.
@@ -15,5 +16,7 @@
 - Expand the supported OpenCode v2 range after compatibility testing against each release.
 - Improve queue inspection UI if OpenCode's current TUI API supports a stable panel surface.
 - Add safe migration tooling if the stored queue schema changes.
+- Replace the Desktop draft first-request hold with a supported pre-submit registration hook if a future GUI/TUI SDK exposes one.
+- Add an explicit ownership-reset control only if a supported lifecycle event can prove a client has closed a session; a lease or heartbeat is out of scope.
 
 No roadmap item is part of the current release unless it is listed above as current.

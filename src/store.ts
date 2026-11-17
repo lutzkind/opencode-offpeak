@@ -91,6 +91,40 @@ export interface SessionOverridesDocument {
   sessions: Record<string, SessionProtectionOverride>;
 }
 
+/**
+ * The two OpenCode clients this plugin can protect independently. A client is
+ * an interactive origin, not a transport: the same OpenCode server can serve
+ * both, and a session may be opened by both.
+ */
+export type OffpeakClient = "cli" | "desktop";
+
+/** Case-insensitive storage form; the RPC and user interface render ON/OFF. */
+export type ClientProtection = "on" | "off";
+
+export interface ClientDefaults {
+  cli: ClientProtection;
+  desktop: ClientProtection;
+}
+
+/**
+ * Which clients have been observed with a session. A session registered by
+ * exactly one client uses that client's default. A session registered by both
+ * is explicitly ambiguous and remains protected; registration never replaces
+ * the other client's observation, so the last client to register cannot win.
+ */
+export interface SessionClientOwnership {
+  clients: OffpeakClient[];
+  ambiguous: boolean;
+  updatedAt: string;
+}
+
+export interface ClientsDocument {
+  schemaVersion: 1;
+  defaults: ClientDefaults;
+  /** Keyed by OpenCode session ID; absence means no client has registered it. */
+  sessions: Record<string, SessionClientOwnership>;
+}
+
 export interface JsonStorage {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown): Promise<void>;
@@ -99,6 +133,7 @@ export interface JsonStorage {
 export const QUEUE_STORAGE_KEY = "opencode-offpeak/queue-v1";
 export const RECOVERY_STORAGE_KEY = "opencode-offpeak/recovery-v1";
 export const SESSION_OVERRIDES_STORAGE_KEY = "opencode-offpeak/session-overrides-v1";
+export const CLIENT_SETTINGS_STORAGE_KEY = "opencode-offpeak/clients-v1";
 
 export function emptyQueue(): QueueDocument {
   return { schemaVersion: 1, tasks: [] };
@@ -110,6 +145,20 @@ export function emptyRecovery(): RecoveryDocument {
 
 export function emptySessionOverrides(): SessionOverridesDocument {
   return { schemaVersion: 1, sessions: {} };
+}
+
+/**
+ * Both client defaults start ON. An installation that predates client
+ * settings therefore keeps exactly the protection it already had: every
+ * unregistered session, and every session whose client cannot be identified,
+ * remains protected.
+ */
+export function emptyClients(): ClientsDocument {
+  return {
+    schemaVersion: 1,
+    defaults: { cli: "on", desktop: "on" },
+    sessions: {},
+  };
 }
 
 export class QueueRepository {
@@ -166,6 +215,33 @@ export class SessionOverridesRepository {
 
   async save(document: SessionOverridesDocument): Promise<void> {
     await this.storage.set(SESSION_OVERRIDES_STORAGE_KEY, document as unknown as JsonValue);
+  }
+}
+
+export class ClientsRepository {
+  constructor(private readonly storage: JsonStorage) {}
+
+  async load(): Promise<ClientsDocument> {
+    const value = await this.storage.get(CLIENT_SETTINGS_STORAGE_KEY);
+    if (value === undefined) return emptyClients();
+    if (
+      !isRecord(value) ||
+      value.schemaVersion !== 1 ||
+      !isRecord(value.defaults) ||
+      !isRecord(value.sessions)
+    ) {
+      throw new Error("Stored offpeak client settings are invalid; refusing to overwrite them.");
+    }
+    const defaults = validateClientDefaults(value.defaults);
+    const sessions: Record<string, SessionClientOwnership> = {};
+    for (const [sessionID, ownership] of Object.entries(value.sessions)) {
+      sessions[sessionID] = validateClientOwnership(sessionID, ownership);
+    }
+    return { schemaVersion: 1, defaults, sessions };
+  }
+
+  async save(document: ClientsDocument): Promise<void> {
+    await this.storage.set(CLIENT_SETTINGS_STORAGE_KEY, document as unknown as JsonValue);
   }
 }
 
@@ -292,6 +368,41 @@ function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
     throw new Error(`Stored recovery entry ${index} has an invalid origin.`);
   }
   return value as unknown as RecoveryEntry;
+}
+
+function validateClientDefaults(value: Record<string, unknown>): ClientDefaults {
+  if (value.cli !== "on" && value.cli !== "off") {
+    throw new Error("Stored offpeak client defaults have an invalid CLI value.");
+  }
+  if (value.desktop !== "on" && value.desktop !== "off") {
+    throw new Error("Stored offpeak client defaults have an invalid Desktop value.");
+  }
+  return { cli: value.cli, desktop: value.desktop };
+}
+
+function validateClientOwnership(sessionID: string, value: unknown): SessionClientOwnership {
+  if (!sessionID.trim()) throw new Error("Stored client ownership has an empty session ID.");
+  if (!isRecord(value) || !Array.isArray(value.clients)) {
+    throw new Error(`Stored client ownership for ${sessionID} is not valid.`);
+  }
+  const clients: OffpeakClient[] = [];
+  for (const client of value.clients) {
+    if (client !== "cli" && client !== "desktop") {
+      throw new Error(`Stored client ownership for ${sessionID} has an invalid client.`);
+    }
+    if (!clients.includes(client)) clients.push(client);
+  }
+  if (clients.length === 0) {
+    throw new Error(`Stored client ownership for ${sessionID} has no client.`);
+  }
+  if (typeof value.updatedAt !== "string") {
+    throw new Error(`Stored client ownership for ${sessionID} has an invalid update time.`);
+  }
+  const ambiguous = clients.length > 1;
+  if (value.ambiguous !== ambiguous) {
+    throw new Error(`Stored client ownership for ${sessionID} has inconsistent ambiguity.`);
+  }
+  return { clients, ambiguous, updatedAt: value.updatedAt };
 }
 
 function validateSessionOverride(sessionID: string, value: unknown): SessionProtectionOverride {
