@@ -1,4 +1,42 @@
-# Handoff — 2026-11-16
+# Handoff — 2026-11-17
+
+## 2026-11-17 Independent CLI and Desktop protection (`v0.3.0`)
+
+**Scope.** Add persistent, independent off-peak protection defaults for OpenCode CLI/TUI and OpenCode Desktop, a native Desktop settings page, reliable client ownership without unsafe guesses, and deploy/verify the server-side release. Existing `/offpeak on|off`, `/offpeak session on|off`, queue, retry, recovery, pricing policies, and fail-closed behavior are unchanged.
+
+**Identification decision (verified, not assumed).** The installed OpenCode 2.3.0 `model.request`, `http.request`, and experimental WebSocket hooks expose `sessionID`, `agent`, `model`, `kind`, and transport data, but no client identity. There is no supported server request-context field, header, or session-creation hook that distinguishes CLI from Desktop. The plugin therefore uses supported client-side registration through typed RPC: the TUI observes `ui.router.current()`/`ui.tabs` and registers the routed session with its connected server; the GUI observes `ctx.sessions.current()` and registers with `SessionRef.server.client` (the session's actual server, remote included). Registration is additive and idempotent. One client means that client's default; both clients mark the session `ambiguous`; no registration is `UNKNOWN`. Both ambiguous and unknown sessions stay protected. No IP/User-Agent/environment guess, undocumented internals, heartbeat, lease, polling loop, second server, DB, queue, or scheduler was added.
+
+**Known API gap.** Desktop has no supported pre-submit hook for a brand-new draft, so its first peak request can race the GUI's registration. The server fails closed: the unknown request is held, never sent unprotected, and is released when Desktop registration arrives if Desktop protection is OFF. Off-peak requests are unaffected. Headless `opencode run` has no client extension and remains `UNKNOWN` (protected). This limitation is documented in README, ARCHITECTURE, DECISIONS, and troubleshooting; it is not presented as complete pre-request identification.
+
+**Implementation.** One package, one server engine, one canonical policy. `src/store.ts` adds `opencode-offpeak/clients-v1` (`defaults` both `"on"` plus per-session `clients`/`ambiguous`/`updatedAt`). `src/engine.ts` adds client defaults, registration, effective precedence, persistence, bounded cleanup, and status fields. `src/rpc.ts`/`src/server.ts` add `client`, `client-set`, and `client-register` control actions. `src/tui.ts` adds `/offpeak client [cli|desktop on|off]` and reactive session registration. `src/gui.tsx`, `src/gui/settings.tsx`, and `src/gui/connection.ts` add the native `./gui-experimental` entrypoint, built by `@opencode/plugin/gui/vite` into one `dist/gui-experimental.cjs`. The GUI imports no server/engine code. `@opencode/plugin` was raised to `2.3.0` for the GUI SDK; the declared server/TUI range remains `>=2.0.26 <2.4.0`.
+
+**Precedence.** Invalid config/`UNKNOWN` pricing fails closed; explicit `/offpeak session off` wins for that session; a single-owner session uses its client default; queue-owned sessions never inherit a client default; unknown/shared sessions stay protected. Changing one client default writes only its field and wakes existing holds through the existing signal/pump, releasing a still-waiting verified-PEAK request in place.
+
+**Tests and evidence (all local, zero paid traffic).** `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`, and `npm pack --dry-run` pass; suite **157/157**. New deterministic coverage is in `test/client-protection.test.mjs` (independent ON/OFF combinations, cross-effect isolation, explicit override precedence, migration, reload/restart persistence, deletion cleanup, unknown/shared fail-closed, held-request release, global OFF, invalid storage) and `test/gui.test.mjs` (actual packaged bundle load, one command/page, server-targeted RPC, remote error handling, no server engine in the bundle). `test/integration-client.test.mjs` runs a real OpenCode 2.3.0 server with a local fixture provider and a short simulated peak window: protected CLI sent **0** provider requests until the boundary and exactly **1** at the boundary; authorized Desktop sent exactly **1** at peak; settings survived a real server restart; deletion cleaned ownership. `test/tui-client.test.mjs` runs the real CLI TUI against an isolated server: a newly created session registered as CLI, `/offpeak client` showed the defaults, `/offpeak client desktop off` did not release the CLI request, and `/offpeak client cli off` released it with no duplicate. Packed TUI smoke passed on OpenCode **2.0.26** and **2.3.0**.
+
+**Release.** PR **#20** (`feat/independent-client-protection`) passed CI run **44066246410** on `ubuntu-latest` and `macos-latest` (head `a9a577fa...`); merge commit **`db0489cf4635b959bdc0e2b840f6b15440424ef8`**. Annotated tag **v0.3.0** object **`3268f0522b97ccf03fe3dc9cc1f285ae19808700`** → commit `db0489cf...`. Release `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.3.0` carries `opencode-offpeak-0.3.0.tgz`, **164582 bytes**, SHA-256 **`dbfd6aee8043da5bf4387d219f5e2b78370331c0e404de17c9b45405af8a9a7b`**, reproduced byte-for-byte from two clean `v0.3.0` tag archives (`npm ci` + `npm run compile` + `npm pack`); the GitHub asset digest matches.
+
+**Production server.** `/root/.config/opencode/opencode.json` now contains only `git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0` for this plugin (the `#v0.2.2` entry was removed with `opencode plugin remove`). `opencode reload` applied. `/api/plugin` reports target `#v0.3.0`, version `db0489cf...`, `features.server=true`, `features.tui=true`, `state.status="active"`. Live RPC checks set CLI OFF → Desktop ON, then CLI OFF → Desktop OFF, then CLI ON → Desktop OFF, then both ON, proving one setting never wrote the other; defaults were restored to ON and persisted across another reload. Storage readback: `opencode-offpeak/clients-v1` has `defaults: {cli:"on",desktop:"on"}` and one live CLI session association; `session-overrides-v1` is empty. Live `pricing` RPC: `opencode-go/deepseek-v4.1-flash` → `OFF_PEAK`/allowed/`deepseek-opencode-go`/`nextTransition=1794963600000`; `opencode/deepseek-v4.1-flash-free` → `UNTRACKED`/allowed. Live `/offpeak status` reports `Client defaults: CLI ON, Desktop ON`, `Client ownership: cli`, `Effective protection: ON (client-default)`, `Requests: ALLOWED`, queue/waiting/failed 0. Live `/offpeak client` reports both defaults and `This session: CLI`. A production smoke session was created with no provider prompt, used for the TUI checks, then deleted through the supported API; ownership changed from `cli` to `unknown`.
+
+**Desktop local installation (not deployed from this host).** No OpenCode Desktop app is installed or reachable in this environment, so the local GUI entrypoint was **not** deployed. It was built, packaged, loaded as the actual `dist/gui-experimental.cjs`, and its setup/RPC targeting were tested. To deploy locally, the user must list the same package in Desktop's own global `opencode.json(c)` (not `cli.json`, and not only on the remote server):
+
+```jsonc
+{
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0"]
+}
+```
+
+The server must also run `#v0.3.0` (it does). Desktop must be 2.3.0+. Then open **Settings > Offpeak**. The page selects the current session's server (or an explicit Server row), reads `client` status, and writes only `client-set {client:"desktop"}` through that server's typed RPC.
+
+**Residual limitations.**
+- Desktop first-draft peak race described above; no supported pre-submit hook exists in the installed SDK.
+- Shared sessions (observed by both clients) remain protected permanently until deletion; there is no lease expiry or automatic ownership reset.
+- Headless `opencode run` has no TUI/GUI extension and remains `UNKNOWN`/protected.
+- Two CLI instances or two Desktop windows are one client class; no per-device distinction is claimed.
+- GUI behavior is validated via the packaged bundle and shared RPC; a live Electron Desktop integration was not possible here.
+- The usual queue/session recovery limitations and the explicit OpenCode version ceiling remain unchanged.
+
+**Cleanup.** No test servers, tmux sessions, fixture providers, or temporary production sessions remain. Release build clones and the tarball are retained under `/tmp/opencode/release-v030-*` and `/tmp/opencode/opencode-offpeak-0.3.0.tgz` as non-production scratch evidence.
 
 ## 2026-11-16 OpenCode 2.3.0 compatibility (`v0.2.2`)
 
