@@ -57,7 +57,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src test vite.config.ts",
     "format": "biome format --write src test",
-    "test": "npm run compile && node --test --test-force-exit test/*.test.mjs",
+    "test": "npm run compile && node --test --test-force-exit --test-concurrency=1 test/*.test.mjs",
     "check": "npm run lint && npm run typecheck && npm test",
     "build:gui": "vite build"
   },
