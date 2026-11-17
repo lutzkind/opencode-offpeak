@@ -36,6 +36,8 @@ The server must also run `#v0.3.0` (it does). Desktop must be 2.3.0+. Then open 
 - GUI behavior is validated via the packaged bundle and shared RPC; a live Electron Desktop integration was not possible here.
 - The usual queue/session recovery limitations and the explicit OpenCode version ceiling remain unchanged.
 
+**Post-release maintenance.** Docs commit `e3fbde9` records this handoff on `main`; test-only commit `0c56ccf` serializes the test suite (`--test-concurrency=1`) so real fixture/TUI tests cannot starve deterministic timer tests. The published v0.3.0 artifact predates the serialization flag; it changes only the development test script, not runtime code or the GUI bundle.
+
 **Cleanup.** No test servers, tmux sessions, fixture providers, or temporary production sessions remain. Release build clones and the tarball are retained under `/tmp/opencode/release-v030-*` and `/tmp/opencode/opencode-offpeak-0.3.0.tgz` as non-production scratch evidence.
 
 ## 2026-11-16 OpenCode 2.3.0 compatibility (`v0.2.2`)
