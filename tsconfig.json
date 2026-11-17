@@ -10,9 +10,17 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "declaration": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "outDir": "dist",
-    "rootDir": "."
+    "rootDir": ".",
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js"
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "vite.config.ts"
+  ]
 }

@@ -1,12 +1,13 @@
 # Concepts
 
-## Three separate controls
+## Four separate controls
 
-- **Enabled toggle:** decides whether the queue starts and auto-resumes tasks. It persists across OpenCode restarts.
+- **Enabled toggle:** `/offpeak on|off` decides whether the queue starts and auto-resumes tasks. It persists across OpenCode restarts.
+- **Client defaults:** `/offpeak client cli|desktop on|off` decides peak protection for sessions reliably registered by that client. CLI and Desktop are independent and both start ON.
 - **Pricing policy:** decides whether a request for a provider/model is off-peak, peak, untracked, or unknown.
-- **Override:** explicit permission for one task to make peak-priced model requests until its 15-minute expiry.
+- **Session override:** `/offpeak session on|off` is explicit permission for one session's verified peak-priced requests; `/offpeak run-now <task-id>` is the task-scoped 15-minute equivalent.
 
-Turning the plugin OFF changes only automation. It does not change pricing evaluation or create an override.
+Turning the plugin OFF changes only automation. It does not change pricing evaluation, a client default, or a session override. A shared or unregistered session stays protected regardless of either client default.
 
 ## Modes
 

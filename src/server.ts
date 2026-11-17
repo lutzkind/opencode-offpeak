@@ -15,7 +15,12 @@ import {
   type OffpeakRpcInput,
   type OffpeakRpcOutput,
 } from "./rpc.js";
-import { QueueRepository, RecoveryRepository, SessionOverridesRepository } from "./store.js";
+import {
+  ClientsRepository,
+  QueueRepository,
+  RecoveryRepository,
+  SessionOverridesRepository,
+} from "./store.js";
 
 export default Plugin.define({
   id: "opencode-offpeak",
@@ -29,6 +34,7 @@ export default Plugin.define({
     const repository = new QueueRepository(storage);
     const recoveries = new RecoveryRepository(storage);
     const sessionOverrides = new SessionOverridesRepository(storage);
+    const clients = new ClientsRepository(storage);
     const sessions: SessionDriver = {
       create: async ({ cwd, model, taskID }) => {
         const session = await context.session.create({
@@ -87,6 +93,7 @@ export default Plugin.define({
       repository,
       recoveries,
       sessionOverrides,
+      clients,
       location: context.location?.directory ?? "",
       config,
       sessions,
@@ -267,6 +274,38 @@ export default Plugin.define({
               state: protection,
             };
           }
+          case "client": {
+            // Read-only client defaults plus the effective state of the
+            // focused session. `/offpeak client` uses this; it never guesses a
+            // client from IP, User-Agent, or an environment variable.
+            const sessionID = input.sessionID?.trim();
+            return {
+              client: await engine.clientStatus(sessionID ? { sessionID } : {}),
+            };
+          }
+          case "client-set": {
+            const client = input.client?.trim();
+            const protection = input.protection?.trim().toLowerCase();
+            if (client !== "cli" && client !== "desktop") {
+              throw new Error("Usage: /offpeak client cli|desktop on|off");
+            }
+            if (protection !== "on" && protection !== "off") {
+              throw new Error("Usage: /offpeak client cli|desktop on|off");
+            }
+            const status = await engine.setClientProtection(client, protection);
+            void engine.pruneSessionProtections().catch(() => undefined);
+            return { client: status };
+          }
+          case "client-register": {
+            const client = input.client?.trim();
+            const sessionID = input.sessionID?.trim();
+            if (client !== "cli" && client !== "desktop") {
+              throw new Error("client-register requires client=cli|desktop.");
+            }
+            if (!sessionID) throw new Error("client-register requires a sessionID.");
+            const status = await engine.registerSessionClient(sessionID, client);
+            return { client: status };
+          }
           case "queue": {
             if (!input.prompt) throw new Error("Usage: /offpeak queue <task>");
             if (!input.providerID || !input.modelID) {
@@ -316,7 +355,7 @@ export default Plugin.define({
             return { message: `Explicit 15-minute peak-price override active for ${id}.` };
           default:
             throw new Error(
-              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|session on|session off",
+              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|session on|session off|client [cli|desktop on|off]",
             );
         }
       },

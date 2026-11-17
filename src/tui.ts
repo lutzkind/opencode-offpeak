@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin/tui";
+import { createEffect, createRoot } from "solid-js";
 import { assertSupportedOpenCode } from "./compat.js";
 import { formatInTimeZone } from "./policy.js";
 import {
@@ -13,6 +14,59 @@ export default Plugin.define({
   id: "opencode-offpeak",
   setup: (context) => {
     assertSupportedOpenCode(context.app, "TUI");
+    const instanceID = crypto.randomUUID();
+    const registered = new Set<string>();
+    /**
+     * Registers a focused CLI session with the server that owns it. This is a
+     * client-side observation, not a server-side guess: the TUI talks to the
+     * connected server through its supported client, including a remote one,
+     * and the server records the CLI origin for that session. Registration is
+     * idempotent and happens as soon as a session is routed (and again on every
+     * /offpeak command), so the first prompt cannot silently inherit Desktop's
+     * setting. If the server has not finished loading its RPC methods, the
+     * session stays UNKNOWN and protected.
+     */
+    const registerSession = (sessionID: string | undefined) => {
+      if (!sessionID || registered.has(sessionID)) return;
+      registered.add(sessionID);
+      try {
+        const client = context.client.rpc(OFFPEAK_RPC);
+        void client
+          .control({
+            action: "client-register",
+            client: "cli",
+            sessionID,
+            instanceID,
+          })
+          .catch((error: unknown) => {
+            // A session the server never saw registered remains UNKNOWN and
+            // protected. A later route change or command retries naturally.
+            registered.delete(sessionID);
+            console.error("[opencode-offpeak] CLI session registration failed", error);
+          });
+      } catch (error) {
+        registered.delete(sessionID);
+        console.error("[opencode-offpeak] CLI session registration failed", error);
+      }
+    };
+    // The route and tab APIs are reactive in a Solid computation. A private
+    // root keeps the effect correct even when a host invokes setup without an
+    // ambient owner, and its disposal is part of the plugin cleanup.
+    const disposeRegistration = createRoot((dispose) => {
+      createEffect(() => {
+        const route = context.ui.router?.current?.();
+        const active = context.ui.tabs
+          ?.list?.()
+          .find((tab) => tab.active && typeof tab.sessionID === "string");
+        registerSession(
+          route?.type === "session" && typeof route.sessionID === "string"
+            ? route.sessionID
+            : active?.sessionID,
+        );
+      });
+      return dispose;
+    });
+    registerSession(currentSessionID(context));
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
@@ -22,6 +76,7 @@ export default Plugin.define({
           id: "opencode-offpeak.command",
           slash: { name: "offpeak", aliases: ["op"], arguments: true },
           run: async (input = "") => {
+            registerSession(currentSessionID(context));
             try {
               const output = await invoke(context, input);
               context.ui.toast.show({
@@ -78,6 +133,7 @@ export default Plugin.define({
       }),
     ];
     return () => {
+      disposeRegistration();
       for (const off of unsubscribe) off();
     };
   },
@@ -122,6 +178,34 @@ async function invoke(context: Plugin.Context, rawInput: string): Promise<Offpea
       sessionID,
     }) as Promise<OffpeakRpcOutput>;
   }
+  // Client-level defaults are deliberately separate from `/offpeak on|off`
+  // (global automation) and `/offpeak session on|off` (one session's explicit
+  // authorization). Changing one client's default never writes the other.
+  if (action === "client") {
+    const parts = argument.toLowerCase().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) {
+      return client.control({
+        action: "client",
+        ...(sessionID ? { sessionID } : {}),
+      }) as Promise<OffpeakRpcOutput>;
+    }
+    const [who, direction] = parts;
+    if (
+      parts.length !== 2 ||
+      (who !== "cli" && who !== "desktop") ||
+      (direction !== "on" && direction !== "off")
+    ) {
+      throw new Error(
+        "Usage: /offpeak client, /offpeak client cli on|off, or /offpeak client desktop on|off",
+      );
+    }
+    return client.control({
+      action: "client-set",
+      client: who,
+      protection: direction,
+      ...(sessionID ? { sessionID } : {}),
+    }) as Promise<OffpeakRpcOutput>;
+  }
   if (["cancel", "remove", "retry", "resume", "run-now"].includes(action)) {
     if (!argument) throw new Error(`Usage: /offpeak ${action} <task-id>`);
     return client.control({ action, id: argument }) as Promise<OffpeakRpcOutput>;
@@ -158,6 +242,49 @@ function currentSessionID(context: Plugin.Context): string | undefined {
 }
 
 function summarize(output: OffpeakRpcOutput): string {
+  if (output.client) {
+    const { defaults, session, error } = output.client;
+    const lines = [
+      "Client-level off-peak protection",
+      `CLI default: ${defaults.cli}`,
+      `Desktop default: ${defaults.desktop}`,
+    ];
+    if (session) {
+      const owner =
+        session.ownership === "cli"
+          ? "CLI"
+          : session.ownership === "desktop"
+            ? "Desktop"
+            : session.ownership === "ambiguous"
+              ? "shared (CLI + Desktop; protected)"
+              : session.ownership === "queue"
+                ? "queue task (client defaults do not apply)"
+                : "unknown (protected)";
+      const source =
+        session.source === "session-override"
+          ? "explicit /offpeak session off"
+          : session.source === "client-default"
+            ? "client default"
+            : session.source === "ambiguous"
+              ? "shared ownership; fail-closed"
+              : session.source === "queue"
+                ? "queue task; explicit task override only"
+                : "no reliable client registration; fail-closed";
+      lines.push(
+        `This session: ${owner}`,
+        `Effective protection: ${session.protection}`,
+        `Source: ${source}`,
+        `Session override: ${session.source === "session-override" ? "OFF (explicit)" : "not set"}`,
+      );
+    } else {
+      lines.push("This session: none focused");
+    }
+    if (error) lines.push(`Client settings error: ${error}`);
+    lines.push(
+      "CLI and Desktop defaults are independent; change one with /offpeak client cli|desktop on|off.",
+    );
+    return lines.join("\n");
+  }
   if (output.message) return output.message;
   if (output.tasks) {
     if (!output.tasks.length) return "Queue is empty.";
@@ -176,6 +303,13 @@ function summarize(output: OffpeakRpcOutput): string {
     automaticResume?: string;
     override?: { active?: boolean; taskID?: string; expiresAt?: string };
     sessionProtection?: string;
+    clientDefaults?: { cli?: string; desktop?: string };
+    client?: {
+      ownership?: string;
+      protection?: string;
+      source?: string;
+    };
+    effectiveProtection?: string;
     providerID?: string;
     modelID?: string;
     policyID?: string;
@@ -194,7 +328,7 @@ function summarize(output: OffpeakRpcOutput): string {
     configError?: string;
   };
   const pricing = status.pricingState ?? "UNKNOWN";
-  const sessionOverride = status.sessionProtection === "OFF" && pricing === "PEAK";
+  const sessionOverride = status.effectiveProtection === "OFF" && pricing === "PEAK";
   const next =
     status.nextTransition && status.displayTimeZone
       ? formatInTimeZone(status.nextTransition, status.displayTimeZone)
@@ -202,7 +336,9 @@ function summarize(output: OffpeakRpcOutput): string {
         ? "none (no peak window)"
         : "unknown";
   const requestDetail = sessionOverride
-    ? " (session override)"
+    ? status.client?.source === "client-default"
+      ? " (client default)"
+      : " (session override)"
     : pricing === "FLAT"
       ? " (flat all-hours pricing; never waits)"
       : pricing === "UNTRACKED"
@@ -221,7 +357,14 @@ function summarize(output: OffpeakRpcOutput): string {
     `Provider/model: ${status.providerID ?? "unknown"}/${status.modelID ?? "unknown"}`,
     `Policy: ${status.policyID ?? (pricing === "UNKNOWN" ? "none (model not in any verified policy)" : "none")}`,
     `Pricing: ${pricing}`,
-    status.sessionProtection ? `Session protection: ${status.sessionProtection}` : "",
+    status.clientDefaults
+      ? `Client defaults: CLI ${status.clientDefaults.cli ?? "ON"}, Desktop ${status.clientDefaults.desktop ?? "ON"}`
+      : "",
+    status.client ? `Client ownership: ${status.client.ownership ?? "unknown"}` : "",
+    status.sessionProtection ? `Session protection (explicit): ${status.sessionProtection}` : "",
+    status.effectiveProtection
+      ? `Effective protection: ${status.effectiveProtection}${status.client?.source ? ` (${status.client.source})` : ""}`
+      : "",
     `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}${requestDetail}`,
     `Next transition: ${next}`,
     `Queue: ${status.queued ?? 0} queued, ${status.waiting ?? 0} waiting, ${status.failed ?? 0} failed`,

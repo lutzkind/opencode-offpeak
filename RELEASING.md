@@ -2,23 +2,28 @@
 
 ## Current public distribution
 
-`v0.2.2` is complete and publicly installable from its exact GitHub tag with OpenCode CLI v2:
+`v0.3.0` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.2
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0
 ```
 
-`v0.1.0` through `v0.2.1` remain available at their own tags. `v0.2.2` is the
-canonical release: it extends the tested OpenCode range through the 2.3 line
-(`>=2.0.26 <2.4.0`), validated against the live **2.3.0** host and the minimum
-**2.0.26** host, and keeps the read-only canonical `pricing` RPC consumed by
-`opencode-free-first` `peak-only`. The validation covers the real
-packed-plugin TUI load and `/offpeak status` on both hosts, the full
-deterministic suite, the zero-paid-traffic peak hold/release fixture run, and
+`v0.1.0` through `v0.2.2` remain available at their own tags. `v0.3.0` is the
+canonical release: it adds independent persistent CLI and Desktop protection
+defaults and a native Desktop GUI entrypoint, keeps the tested server/TUI range
+`>=2.0.26 <2.4.0`, and keeps the read-only canonical `pricing` RPC consumed by
+`opencode-free-first` `peak-only`.
+
+Desktop users must also list the same tag in Desktop's own
+`opencode.json(c)`; installing it only on the remote server enforces pricing
+there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer. The validation covers the real
+packed-plugin TUI load and `/offpeak status` on both hosts, the packaged
+Desktop GUI bundle smoke test, the full deterministic suite, the
+zero-paid-traffic CLI/Desktop peak fixture run and real-TUI client test, and
 the live install. OpenCode officially accepts npm-compatible Git package
 specifications, including GitHub URLs and exact tags
 ([plugin installation docs](https://opencode.ai/v2/docs/plugins)).
-This install path loads both the server and TUI entrypoints. npm publication is
+This install path loads the server and TUI entrypoints; the same package supplies `./gui-experimental` to Desktop when Desktop lists it. npm publication is
 optional future distribution; npm login, 2FA, or registry publication is not
 required before this release can be installed or used.
 
@@ -52,7 +57,7 @@ Do not create another package version or GitHub release merely to test the optio
 For a new release:
 
 1. Update `package.json` and `CHANGELOG.md` together.
-2. Run `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`, and `npm pack --dry-run`.
+2. Run `npm ci`, `npm run lint`, `npm run typecheck`, `npm test` (which builds `dist/gui-experimental.cjs`), and `npm pack --dry-run`.
 3. Merge the reviewed change to `main` and wait for application and repository-standard CI.
 4. Create a version tag matching `package.json` and publish its GitHub release with notes and the reviewed tarball.
 5. Verify the release tag, asset digest, installation through `opencode plugin add`, and `/offpeak status` in a clean OpenCode v2 configuration.

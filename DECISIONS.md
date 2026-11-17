@@ -1,5 +1,15 @@
 # Decisions
 
+## 2026-11-17: Independent CLI and Desktop defaults with fail-closed client ownership
+
+CLI/TUI and Desktop connect to the same OpenCode server, and the user needs independent persistent protection defaults. The server remains the only pricing authority. A new minimal plugin-storage document (`opencode-offpeak/clients-v1`) stores `defaults.cli`, `defaults.desktop` (both initially `"on"`) and per-session observations. Changing one default writes only that field.
+
+There is no supported client identity in `model.request`, `http.request`, the WebSocket hooks, or any server request context. The alternatives were rejected: IP/User-Agent/environment guesses are unreliable; a server-side `session.created` guess would attribute every session to whichever client happened to be running; a new authentication service or daemon would violate the one-package/one-engine boundary. The implemented mechanism is supported client-side registration through typed RPC: the TUI registers the routed session with its connected server, and the GUI registers the routed session with `SessionRef.server.client`. Registration is additive, idempotent, and never last-writer-wins: a second client makes the session `ambiguous`, which stays protected. An unregistered session is `UNKNOWN` and protected. The explicit `/offpeak session off` override retains precedence. Queue-owned sessions never inherit a client default.
+
+The API gap is honest and bounded: Desktop has no pre-submit hook on a brand-new draft, so its first peak request can race the GUI's registration. The server fails closed for that unknown session and holds the request until registration arrives; it never sends an unprotected peak request. Headless `opencode run` has no client extension and remains `UNKNOWN`. This is documented rather than hidden behind an unreliable heuristic. No polling loop, heartbeat, lease, second database, queue, scheduler, or service was added.
+
+`@opencode/plugin` is raised from `2.0.26` to `2.3.0` because the GUI SDK and Vite preset exist only from 2.3.0. The declared runtime range stays `>=2.0.26 <2.4.0`; the server/TUI surfaces used are unchanged, and the packed plugin is still smoke-tested on the minimum host. The GUI entrypoint is one prebuilt `dist/gui-experimental.cjs` from the official `@opencode/plugin/gui/vite` preset, exported as `./gui-experimental`.
+
 ## 2026-10-09: Implement independently against OpenCode v2
 
 The package uses the installed OpenCode 2.0.26 plugin API instead of forking a prior queue, scheduler, or legacy peak-guard project. Prior projects were reviewed for scheduling, persistence, and user experience; their code is not included.

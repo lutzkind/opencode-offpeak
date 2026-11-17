@@ -14,6 +14,30 @@ On OpenCode 2.2.3 and later, a managed `plugin.use: deny` policy also prevents p
 
 This error means the TUI process is running an OpenCode build older than 2.0.26. Those releases activate TUI plugins outside the keymap provider owner, so `context.keymap.layer()` cannot register `/offpeak`. It is a host-version problem, not a plugin setting: there is no keymap provider to configure. Update OpenCode with `opencode upgrade` and restart the TUI process (a long-running TUI keeps its old code until it restarts). Current releases of this plugin check the host version at startup and report an explicit compatibility error instead.
 
+## Desktop settings page does not appear
+
+The Desktop GUI loads from Desktop's **own** global `opencode.json(c)`, not from the remote server's configuration and not from `cli.json`. Add the package there:
+
+```jsonc
+{
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0"]
+}
+```
+
+The Desktop app must be 2.3.0 or newer. Check **Settings > Extensions > Plugins** for `opencode-offpeak`: a server-part load failure also removes the GUI. A package that ships only `./tui` cannot provide a Desktop page. Installing the package only on the remote server keeps enforcement there but does not create the local settings page.
+
+## Desktop settings page says the server is unavailable
+
+The page talks to the selected session's actual server (or the server chosen in its Server row), never the Desktop sidecar by assumption. Confirm the remote server is running, that Desktop shows it as connected, and that its password matches `OPENCODE_SERVER_PASSWORD`. The page shows the server's RPC error in its footer and offers **Retry**. While it is unavailable, no setting is written and existing server-side defaults stay in force.
+
+## A session shows as shared or unknown
+
+`UNKNOWN` means no client extension has registered that session yet; it is protected. This is expected for headless `opencode run` and for a Desktop session whose first peak request raced registration. `Shared` means both the CLI and Desktop registered the session; it stays protected regardless of either client default, because the last client to open it must not silently win. Open the session in only one client or delete it to remove the shared ownership record. There is no automatic lease expiry.
+
+## `/offpeak client` works but the session is not identified
+
+The CLI extension registers only a routed session. Run the command from an open session, not the home screen, and ensure the TUI is connected to the same server that owns the session. If the server had not finished loading its RPC methods at startup, the next route change or command retries registration; until then the session is `UNKNOWN` and protected.
+
 ## Queue does not start
 
 Run `/offpeak status` and `/offpeak list`. Confirm the plugin is ON, `mode` is not `guard`, the selected model has a matching policy, and the OpenCode background server is running. Queued tasks remain in storage while disabled or in a peak window.

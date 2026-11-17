@@ -27,6 +27,38 @@ If `policies` is omitted, the built-in DeepSeek/OpenCode Go policy is used. If y
 
 The policy timezone is authoritative for pricing. Changing `displayTimeZone` does not move a pricing boundary. The running server watches the config file and reloads settings after atomic updates.
 
+## Client defaults and ownership
+
+`/offpeak client` reads the persistent CLI and Desktop defaults. `/offpeak client cli on|off` writes only `defaults.cli`; `/offpeak client desktop on|off` writes only `defaults.desktop`. Both are stored in the versioned OpenCode plugin-storage document `opencode-offpeak/clients-v1`, not in `offpeak.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "defaults": { "cli": "on", "desktop": "on" },
+  "sessions": {
+    "ses_example": {
+      "clients": ["cli"],
+      "ambiguous": false,
+      "updatedAt": "2026-11-17T00:00:00.000Z"
+    }
+  }
+}
+```
+
+The document is created on the first change. When it is absent, both defaults are ON and no session is registered, which is the safe migration path for existing installations. A session registered by both clients has `clients: ["cli", "desktop"]` and `ambiguous: true`; it remains protected even when one default is OFF. A session with no entry is `UNKNOWN` and remains protected. Queue-owned sessions never inherit a client default.
+
+The document is not editable through `offpeak.json` and does not contain prompts, credentials, or provider responses. `session.deleted` removes the entry; bounded lazy cleanup removes only sessions that a supported `session.get` reports as confidently missing. There is no heartbeat or expiry.
+
+## Precedence
+
+1. Invalid configuration and `UNKNOWN` pricing fail closed.
+2. An explicit `/offpeak session off` overrides every client default for that one session.
+3. A session registered by exactly one client uses that client's default.
+4. A queue-owned session uses the task rules and never a client default.
+5. An unregistered (`UNKNOWN`) or shared (`ambiguous`) session stays protected.
+
+`/offpeak on|off` remains global automation and queue processing; it is not a client setting and does not change either default.
+
 ## Invalid configuration
 
 Malformed JSON, unsupported schema versions, invalid IANA timezones, overlapping policy matches, or malformed schedule windows fail closed for matching provider requests. Queue processing stops if the config cannot be loaded. Fix the file and save it; the server watches for the change. A config error is shown by `/offpeak status`.

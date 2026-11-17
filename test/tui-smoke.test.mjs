@@ -122,11 +122,12 @@ test("the real OpenCode v2 TUI loads the packed plugin without keymap errors and
       "the OpenCode TUI did not finish starting",
     );
 
-    const loaded = await log();
-    assert.ok(
-      loaded.includes(`loading plugin`) && loaded.includes(packageDir),
-      "the packed package did not load as a server plugin",
-    );
+    const loaded = await waitFor(async () => {
+      const current = await log();
+      return current.includes("loading plugin") && current.includes(packageDir)
+        ? current
+        : undefined;
+    }, "the packed package did not load as a server plugin");
     assert.doesNotMatch(loaded, /Keymap\.Provider is missing/);
     assert.doesNotMatch(loaded, /plugin operation failed/);
 
