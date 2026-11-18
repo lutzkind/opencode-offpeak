@@ -1,4 +1,26 @@
-# Handoff — 2026-11-17
+# Handoff — 2026-11-18
+
+## 2026-11-18 OpenCode 2.3.2 compatibility (`v0.3.1`)
+
+**Reported state.** The live host runs **OpenCode 2.3.2** (released 2026-11-18T01:35Z; 2.3.1 at 00:17Z), installed before this pass. The plugin was pinned at `v0.3.0`, whose validation stopped at 2.3.0. The declared range `>=2.0.26 <2.4.0` already admitted 2.3.1/2.3.2, so the task was to verify the runtime contract, not widen it.
+
+**API diff (verified).** npm-packed `@opencode/plugin` 2.3.0 vs 2.3.2: `dist/effect/plugin.d.ts` and `dist/promise/plugin.d.ts` narrow `experimental.generate` to `Omit<..., "video">` (video is server-only); `session.d.ts` adds `SessionIdleBackground { kind: "codemode" }`; `package.json` raises the internal `@opencode/*` set to 2.3.2. `model.request`, `http.request`, `experimental.ws.*`, `retry`, session events, storage, `rpc.register`, and the TUI context keep their signatures. The plugin uses none of the changed surfaces.
+
+**Background compaction (new default).** 2.3.1 replaces `experimental.background_compaction` with `compaction.background` and defaults it to `true`. Source at v2.3.2: `SessionCompaction.summarize()` serves both foreground and background summaries, and both prepare through `SessionModelRequest.compaction()`, whose scope `kind` is `"compaction"`. The pre-model hold (`guardModelRequest`) and the outbound transport guard therefore cover a background summary exactly like a foreground compaction. No plugin code reads or changes compaction settings.
+
+**Implementation.** No runtime behavior change. `package.json` is `0.3.1` and `@opencode/plugin` is `2.3.2`. Documentation (README compatibility line, ARCHITECTURE, DECISIONS, ROADMAP, RELEASING, `docs/development.md`, `docs/troubleshooting.md`, new `docs/releases/v0.3.1.md`) is updated. Test changes: the compat matrix includes `2.3.2`/`v2.3.2`; the package-layout test pins SDK `2.3.2`; both real-server tests report the host's actual version instead of a hardcoded `2.3.0`; the fixture provider returns a template-shaped summary for compaction prompts; and a new real-server test covers a peak compaction hold.
+
+**Tests and evidence (local, zero paid traffic).** `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`: **158/158** in 155s on the installed 2.3.2. Real-server integration **2/2**: client defaults (25s) and peak compaction (57s: **0** provider requests at peak, exactly **1** at the boundary). Real TUI **2/2**. `npm pack --dry-run`: 66 files, 166.8 kB. Three isolated repeats of the client-defaults test passed.
+
+**Observation (not reproduced).** During one heavily loaded full-suite pass (load average ~13.5), the client-defaults test released the held work as the plugin's semantic continuation ("Continue the task in this session…") instead of the original request. Four subsequent runs (three isolated, one full suite at 158/158) passed. The assertion now prints every provider request text and `OFFPEAK_KEEP_TEMP=1` retains the server temp/log directory if it recurs. Recorded as a residual observation, not a reproduced defect.
+
+**Release.** PR **#21** (`fix/opencode-2.3.2-compat`) passed CI run **44240865729** on `ubuntu-latest` and `macos-latest` (head `6b3a85b34da960870a1d853a947b37e3eb0eae3f`); merge commit **`c320d9cda33aafde64dcaa350532344ad728a8b7`**. Annotated tag **v0.3.1** object **`352823de531948917bd6321b406787dbc93734c2`** → commit `c320d9c`. Release `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.3.1` carries `opencode-offpeak-0.3.1.tgz`, **166815 bytes**, SHA-256 **`77562dff9f1b7e648ade9a845be243461d6c5cd188f9aef31a3890eea0fccb72`**, reproduced byte-for-byte from two clean `v0.3.1` tag archives (`npm ci` + `npm run compile` + `npm pack`); the GitHub asset digest matches.
+
+**Production server.** `/root/.config/opencode/opencode.json` now pins only `git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1` (the `#v0.3.0` entry was removed with `opencode plugin remove`); that plugin line was the only configuration change. `opencode reload` applied. `/api/plugin` reports target `#v0.3.1`, version `c320d9c...`, `features.server=true`, `features.tui=true`, `state.status="active"`, with no plugin load warnings or errors after the reload. Live `pricing` RPC: `opencode-go/deepseek-v4.1-flash` → `OFF_PEAK`/allowed/`deepseek-opencode-go`/`nextTransition=1794981600000`; `opencode/deepseek-v4.1-flash-free` → `UNTRACKED`/allowed. Live status: enabled, `auto`, client defaults CLI ON/Desktop ON, OFF_PEAK, requests allowed, queue/waiting/interactive holds/recovery/compaction recovery/refusals/failed all 0. A live smoke through the installed release on the free model replied `offpeak v0.3.1 live ok`; its archived session was deleted through the supported API afterwards.
+
+**Residual limitations.** Unchanged: Desktop 2.3.0+ for the GUI entrypoint, the Desktop first-draft peak race, ambiguous/shared sessions staying protected, headless `opencode run` remaining `UNKNOWN`, the `<2.4.0` ceiling, and the plugin neither reading nor changing OpenCode's compaction settings.
+
+**Cleanup.** No test servers, tmux sessions, fixture providers, or smoke sessions remain. Release clones and the tarball are retained under `/tmp/opencode/release-v031-*` and `/tmp/opencode/opencode-offpeak-0.3.1.tgz` as non-production scratch evidence.
 
 ## 2026-11-17 Independent CLI and Desktop protection (`v0.3.0`)
 
