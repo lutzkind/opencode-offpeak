@@ -4,15 +4,15 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 
 `opencode-offpeak` is an OpenCode v2 plugin with server, TUI, and Desktop GUI entrypoints. Its default policy covers DeepSeek models through OpenCode Go. Pricing is enforced at two lifecycle points: a pre-model deferral and the outbound transport guard. In `auto` mode, a supported request that reaches peak pricing waits at the pre-model hook — before OpenCode creates the provider attempt and its response-header timer — and the same session continues the same turn automatically when off-peak pricing returns, with zero provider traffic while pricing is blocked. The transport guard remains the final hard barrier immediately before OpenCode sends an HTTP request or an experimental WebSocket frame. If a request is already in flight and fails with a retryable provider/network error after peak pricing begins, the retry is stopped before it can reach the provider and the same session continues automatically at the next off-peak window. When one session must deliberately run through a peak window, `/offpeak session off` authorizes verified peak-priced inference for that session alone; every other session stays protected.
 
-> **Compatibility:** OpenCode CLI `>=2.0.26 <2.4.0`; the Desktop GUI entrypoint requires **OpenCode Desktop 2.3.0** (the first release with the GUI plugin SDK). This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 (the minimum), 2.0.27, 2.0.30, 2.1.3, 2.2.6, and the current **2.3.0** (the live host). OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses. OpenCode 2.2 left the hooks, RPC channel, and TUI surfaces used here unchanged. OpenCode 2.3 only adds plugin surfaces (session fork, model resolve, idle, artifacts, credentials, session instructions, event type filters, and a deprecated `generate` alias); every hook, RPC channel, storage call, and TUI surface this package uses keeps its 2.2 signature. The OpenTUI 0.7/0.8 changes apply to custom renderables, which this plugin does not define. OpenCode 2.2.3 split managed-policy plugin control from `integration.use` into `plugin.use`; that affects operators who deny plugins, not this plugin's runtime contract. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with a clear error instead of failing later at runtime.
+> **Compatibility:** OpenCode CLI `>=2.0.26 <2.4.0`; the Desktop GUI entrypoint requires **OpenCode Desktop 2.3.0** (the first release with the GUI plugin SDK). This release targets the v2 plugin API shipped with OpenCode 2.0.26 and is validated against OpenCode 2.0.26 (the minimum), 2.0.27, 2.0.30, 2.1.3, 2.2.6, 2.3.0, and the current **2.3.2** (the live host). OpenCode 2.1 changed the session/compaction payload schema (`providerState` → `native`) but not the plugin hooks this package uses. OpenCode 2.2 left the hooks, RPC channel, and TUI surfaces used here unchanged. OpenCode 2.3 adds plugin surfaces (session fork, model resolve, idle, artifacts, credentials, session instructions, event type filters, and a deprecated `generate` alias); every hook, RPC channel, storage call, and TUI surface this package uses keeps its 2.2 signature. OpenCode 2.3.1 enables background compaction by default (`compaction.background`, replacing the experimental flag) and adds a `codemode` variant to the idle-background type; foreground and background compaction summaries both prepare a `compaction` model request, so the pre-model hold and the transport guard cover them unchanged. OpenCode 2.3.2 changes only `experimental.generate` (video is server-only) and prompt caching, neither of which this package uses. The OpenTUI 0.7/0.8 changes apply to custom renderables, which this plugin does not define. OpenCode 2.2.3 split managed-policy plugin control from `integration.use` into `plugin.use`; that affects operators who deny plugins, not this plugin's runtime contract. The package declares the range in `engines.opencode` and both entrypoints refuse to initialize on an unsupported host with a clear error instead of failing later at runtime.
 
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1
 ```
 
-This installs the released `v0.3.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.3.1` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -20,12 +20,12 @@ Restart OpenCode after installation. The plugin defaults to enabled, uses the cu
 
 The Desktop GUI is loaded from **Desktop's own** `opencode.json(c)`, not from the remote server's configuration and not from `cli.json`. Installing the package only on the remote OpenCode server enforces pricing there, but it does not make the settings page appear in the Desktop app. To get the native Offpeak page:
 
-1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.3.0` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
+1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.3.1` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
 2. List the same package in Desktop's global `opencode.json(c)` on the machine running Desktop:
 
    ```jsonc
    {
-     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0"]
+     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1"]
    }
    ```
 

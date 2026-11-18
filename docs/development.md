@@ -7,7 +7,7 @@
 - OpenCode Desktop 2.3.0+ for GUI runtime integration.
 - npm for install/build/pack checks.
 
-The build dependency is `@opencode/plugin@2.3.0` because the Desktop GUI SDK and its Vite preset exist from 2.3.0. The declared runtime range remains the tested server/TUI range `>=2.0.26 <2.4.0`; the hooks, RPC, storage, and TUI surfaces used by those entrypoints are unchanged from 2.0.26, and the packed plugin is still smoke-tested on the minimum host. The GUI entrypoint is one prebuilt CommonJS bundle; the server and TUI entrypoints continue to load from TypeScript source in Git installs.
+The build dependency is `@opencode/plugin@2.3.2`, the SDK of the newest validated host; the Desktop GUI SDK and its Vite preset exist from 2.3.0. The declared runtime range remains the tested server/TUI range `>=2.0.26 <2.4.0`; the hooks, RPC, storage, and TUI surfaces used by those entrypoints are unchanged from 2.0.26, and the packed plugin is still smoke-tested on the minimum host. The GUI entrypoint is one prebuilt CommonJS bundle; the server and TUI entrypoints continue to load from TypeScript source in Git installs.
 
 ## Commands
 

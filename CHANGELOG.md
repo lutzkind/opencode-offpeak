@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1 - 2026-11-18
+
+### Compatibility
+
+- **Validated on OpenCode 2.3.2.** The live host moved to 2.3.2 (2.3.1
+  and 2.3.2 shipped on 2026-11-18) inside the declared range
+  `>=2.0.26 <2.4.0`. The published `@opencode/plugin` declarations differ
+  from 2.3.0 only in `experimental.generate` (no `video`) and a
+  `codemode` variant of `SessionIdleBackground`; this package uses neither.
+  Every hook, RPC channel, storage call, and TUI surface used here keeps its
+  2.3.0 signature.
+- **Background compaction is covered.** OpenCode 2.3.1 enables
+  `compaction.background` by default. A background summary prepares the same
+  `compaction` model request as a foreground compaction, so the pre-model hold
+  and the outbound transport guard apply unchanged. A new real-server test
+  proves a compact request at peak sends zero provider requests and exactly
+  one at the boundary.
+- `@opencode/plugin` is now `2.3.2` for the build and declarations. No runtime
+  behavior changed.
+
+### Tests
+
+- The real-server integration tests now report the actual host version in
+  their names instead of a hardcoded `2.3.0`, and the fixture provider returns
+  a template-shaped summary for compaction prompts so a compaction settles in
+  one request.
+
 ## 0.3.0 - 2026-11-17
 
 ### Independent CLI and Desktop protection

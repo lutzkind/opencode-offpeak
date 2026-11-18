@@ -1,10 +1,36 @@
 import http from "node:http";
 
 /**
+ * The heading OpenCode's compaction prompt requires in the reply. A real
+ * summary must use the requested template; the fixture returns one so a
+ * compaction completes in a single request instead of triggering the nudge
+ * retry.
+ */
+const COMPACTION_PROMPT = "You MUST summarize the conversation above";
+const COMPACTION_REPLY = [
+  "## Objective",
+  "fixture compaction summary",
+  "## Work State",
+  "### Completed",
+  "fixture request summarized",
+  "### Active",
+  "none",
+  "### Blocked",
+  "none",
+  "## Next Move",
+  "none",
+  "## Relevant Files",
+  "none",
+  "## Important Context",
+  "fixture provider",
+].join("\n");
+
+/**
  * Minimal OpenAI-compatible fixture provider. It records every completion
  * request and never contacts a paid endpoint. The reply echoes the last user
  * message so tests can attribute a provider request to the session that sent
- * it.
+ * it. Compaction prompts get a template-shaped summary so they settle without
+ * a second request.
  */
 export function createFixtureProvider() {
   const requests = [];
@@ -36,9 +62,12 @@ export function createFixtureProvider() {
       model: body.model,
       stream: body.stream === true,
       text,
+      compaction: text.startsWith(COMPACTION_PROMPT),
       messages: body.messages?.length ?? 0,
     });
-    const reply = `fixture-reply:${text.slice(0, 80)}`;
+    const reply = text.startsWith(COMPACTION_PROMPT)
+      ? COMPACTION_REPLY
+      : `fixture-reply:${text.slice(0, 80)}`;
     response.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",

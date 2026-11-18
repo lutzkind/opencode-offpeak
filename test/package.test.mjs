@@ -14,7 +14,7 @@ test("package root, TUI, and Desktop GUI subpaths match the v2 plugin layout", a
   assert.equal(manifest.exports["./tui"].import, "./dist/tui.js");
   assert.ok(manifest.files.includes("index.ts"));
   assert.ok(manifest.files.includes("tui.ts"));
-  assert.equal(manifest.dependencies["@opencode/plugin"], "2.3.0");
+  assert.equal(manifest.dependencies["@opencode/plugin"], "2.3.2");
   assert.equal(manifest.exports["./gui-experimental"], "./dist/gui-experimental.cjs");
   assert.ok(manifest.files.includes("dist"));
   assert.match(await readFile(path.join(root, "index.ts"), "utf8"), /src\/server\.ts/);

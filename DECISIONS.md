@@ -1,5 +1,15 @@
 # Decisions
 
+## 2026-11-18: OpenCode 2.3.2 validation and background-compaction coverage
+
+The live host moved from OpenCode 2.3.0 to **2.3.2** (2.3.1 and 2.3.2 were published on 2026-11-18). Both versions are already inside the declared range `>=2.0.26 <2.4.0`, so no range change is involved; the question is whether any behavior this plugin relies on changed.
+
+The published `@opencode/plugin` declarations differ from 2.3.0 to 2.3.2 in only two places: `experimental.generate` loses `video` (server-only), and `SessionIdleBackground` gains a `codemode` variant. This package calls neither. `model.request`, `http.request`, the experimental WebSocket hooks, `retry`, session events, storage, RPC, and the TUI context keep their signatures.
+
+OpenCode 2.3.1 enables **background compaction by default** (`compaction.background`, replacing `experimental.background_compaction`). That is the one new behavior that touches a request kind this plugin guards. Source inspection of `SessionCompaction` at v2.3.2 shows that both the foreground and the background summary prepare their model call through `SessionModelRequest.compaction`, whose scope `kind` is `"compaction"`; therefore the pre-model hold and the outbound transport guard cover a background summary exactly like a foreground compaction, and no plugin code reads or needs to read OpenCode's compaction settings. A real OpenCode 2.3.2 fixture test now proves a compact request at peak produces zero provider requests and exactly one at the boundary.
+
+Decision: keep the runtime code unchanged, raise the build dependency to `@opencode/plugin@2.3.2`, validate the real compaction path on 2.3.2, and ship it as `v0.3.1`. Rejected alternatives: reading `compaction.background` (the plugin must not depend on OpenCode's internal scheduling), disabling background compaction for the user (a host behavior change outside the plugin's authority), and widening the version range (nothing in 2.4 exists to test).
+
 ## 2026-11-17: Independent CLI and Desktop defaults with fail-closed client ownership
 
 CLI/TUI and Desktop connect to the same OpenCode server, and the user needs independent persistent protection defaults. The server remains the only pricing authority. A new minimal plugin-storage document (`opencode-offpeak/clients-v1`) stores `defaults.cli`, `defaults.desktop` (both initially `"on"`) and per-session observations. Changing one default writes only that field.
