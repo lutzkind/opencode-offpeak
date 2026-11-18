@@ -2,17 +2,19 @@
 
 ## Current public distribution
 
-`v0.3.0` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.3.1` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1
 ```
 
-`v0.1.0` through `v0.2.2` remain available at their own tags. `v0.3.0` is the
-canonical release: it adds independent persistent CLI and Desktop protection
-defaults and a native Desktop GUI entrypoint, keeps the tested server/TUI range
-`>=2.0.26 <2.4.0`, and keeps the read-only canonical `pricing` RPC consumed by
-`opencode-free-first` `peak-only`.
+`v0.1.0` through `v0.3.0` remain available at their own tags. `v0.3.1` is the
+canonical release: it validates the runtime on OpenCode 2.3.2, covers the
+2.3.1 background-compaction default with a real-server test, keeps the tested
+server/TUI range `>=2.0.26 <2.4.0`, and keeps the read-only canonical `pricing`
+RPC consumed by `opencode-free-first` `peak-only`. `v0.3.0` added the
+independent persistent CLI and Desktop protection defaults and the native
+Desktop GUI entrypoint.
 
 Desktop users must also list the same tag in Desktop's own
 `opencode.json(c)`; installing it only on the remote server enforces pricing

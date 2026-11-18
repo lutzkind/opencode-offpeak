@@ -35,6 +35,8 @@ test("supported OpenCode versions match the tested 2.0.26–2.3.x range", () => 
     "2.3.0",
     "v2.3.0",
     "2.3.1",
+    "2.3.2",
+    "v2.3.2",
     "2.3.99",
   ]) {
     assert.equal(isSupportedOpenCodeVersion(version), true, version);
@@ -64,6 +66,7 @@ test("compatibility guard passes inside the range and fails clearly outside it",
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.1.4" }, "server"));
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.2.6" }, "TUI"));
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.3.0" }, "server"));
+  assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.3.2" }, "server"));
   assert.doesNotThrow(() => assertSupportedOpenCode({ version: "2.3.99" }, "TUI"));
   assert.throws(
     () => assertSupportedOpenCode({ version: "2.0.25" }, "TUI"),

@@ -2,7 +2,7 @@
 
 ## Current: 0.3.x
 
-- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.3.0 (v0.3.0).
+- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.3.2 (v0.3.1), including background compaction.
 - Independent persistent CLI and Desktop protection defaults, with client-side session registration, shared-session fail-closed handling, and a native Desktop settings page (`./gui-experimental`).
 - DeepSeek via OpenCode Go policy.
 - Persistent sequential queue, ON/OFF, status/list/cancel/retry/resume controls.

@@ -2,7 +2,7 @@
  * OpenCode host compatibility.
  *
  * The plugin is tested against the OpenCode v2 plugin API shipped with
- * OpenCode 2.0.26 through 2.3.0. Hosts before 2.0.26 activate TUI plugins
+ * OpenCode 2.0.26 through 2.3.2. Hosts before 2.0.26 activate TUI plugins
  * outside the Solid keymap provider owner, so `context.keymap.layer()` fails
  * with "Keymap.Provider is missing" even though the plugin follows the
  * documented API. OpenCode 2.1 changes the session/compaction payload schema
@@ -14,8 +14,13 @@
  * (`session.fork`, `experimental.model.resolve`, `experimental.idle`,
  * artifacts, credentials, session instructions, event type filters, and a
  * deprecated `generate` alias); every hook, RPC channel, storage call, and
- * TUI surface this plugin uses keeps its 2.2 signature. All three lines are
- * covered by the compatibility, packed-install, and real-TUI suites.
+ * TUI surface this plugin uses keeps its 2.2 signature. OpenCode 2.3.1
+ * enables background compaction by default; foreground and background
+ * summaries prepare the same `compaction` model request, so the pre-model
+ * hold and transport guard cover both. OpenCode 2.3.2 only narrows the
+ * plugin `experimental.generate` surface, which this plugin does not use.
+ * All three lines are covered by the compatibility, packed-install, and
+ * real-TUI suites.
  * Unsupported hosts must fail with this explicit compatibility error instead
  * of the confusing runtime failure.
  */

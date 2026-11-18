@@ -23,6 +23,16 @@ async function hasBinary(binary) {
 const skip = (await hasBinary("opencode"))
   ? false
   : "requires the OpenCode v2 CLI (opencode) on PATH";
+const hostVersion = skip
+  ? "unavailable"
+  : await exec("opencode", ["--version"]).then(
+      ({ stdout }) =>
+        stdout
+          .trim()
+          .replace(/^opencode\s+/i, "")
+          .replace(/^v/, ""),
+      () => "unknown",
+    );
 const password = `fixture-${process.pid}-${Math.random().toString(16).slice(2)}`;
 const auth = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
 
@@ -50,6 +60,59 @@ function nextMinuteWindow() {
   const end = `${String(hour).padStart(2, "0")}:${String(minuteOfHour).padStart(2, "0")}`;
   if (end === "00:00") return undefined;
   return end;
+}
+
+/**
+ * Returns the next UTC minute boundary, waiting for the following minute when
+ * less than `minimumSeconds` remain. Without that guard a slow setup can reach
+ * the policy boundary before the peak request under test is made.
+ */
+async function peakWindow(minimumSeconds = 20) {
+  const secondsLeft = 60 - new Date().getUTCSeconds();
+  if (secondsLeft < minimumSeconds) {
+    await new Promise((resolve) => setTimeout(resolve, (secondsLeft + 1) * 1000));
+  }
+  return nextMinuteWindow();
+}
+
+function fixtureOffpeakConfig(end) {
+  return {
+    ...defaultConfig({ displayTimeZone: "UTC" }),
+    policies: [
+      {
+        id: "fixture-peak",
+        providers: ["fixture"],
+        models: ["fixture-*"],
+        timeZone: "UTC",
+        blocked: [{ days: [0, 1, 2, 3, 4, 5, 6], start: "00:00", end }],
+        source: "fixture",
+        verifiedAt: "2026-01-01",
+      },
+    ],
+  };
+}
+
+function fixtureOpencodeConfig(baseURL) {
+  return {
+    $schema: "https://opencode.ai/config.json",
+    plugins: [root],
+    providers: {
+      fixture: {
+        name: "Fixture",
+        package: "@opencode/ai/providers/openai-compatible",
+        settings: { baseURL },
+        models: { "fixture-model": { name: "Fixture Model" } },
+      },
+    },
+  };
+}
+
+async function fixtureTemp() {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-integration-"));
+  const configDir = path.join(temp, "config");
+  const projectDir = path.join(temp, "project");
+  for (const dir of [configDir, projectDir]) await mkdir(dir, { recursive: true });
+  return { temp, configDir, projectDir };
 }
 
 async function startServer(rootDir, projectDir) {
@@ -119,54 +182,29 @@ async function waitForPlugin(baseUrl) {
   );
 }
 
-test("real OpenCode 2.3.0 fixture: CLI and Desktop defaults are independent at peak and both requests match", {
+test(`real OpenCode ${hostVersion} fixture: CLI and Desktop defaults are independent at peak and both requests match`, {
   skip,
   timeout: 240000,
 }, async () => {
-  const end = nextMinuteWindow();
+  const end = await peakWindow();
   if (!end) {
     // A window crossing midnight would not be a short peak window. The test is
     // deterministic for every other minute of the day.
     assert.ok(true, "skipped at the UTC midnight boundary");
     return;
   }
-  const temp = await mkdtemp(path.join(os.tmpdir(), "opencode-offpeak-integration-"));
-  const configDir = path.join(temp, "config");
-  const projectDir = path.join(temp, "project");
-  for (const dir of [configDir, projectDir]) await mkdir(dir, { recursive: true });
+  const { temp, configDir, projectDir } = await fixtureTemp();
   const fixture = createFixtureProvider();
   let server;
   try {
     const baseURL = await fixture.start();
-    const offpeak = {
-      ...defaultConfig({ displayTimeZone: "UTC" }),
-      policies: [
-        {
-          id: "fixture-peak",
-          providers: ["fixture"],
-          models: ["fixture-*"],
-          timeZone: "UTC",
-          blocked: [{ days: [0, 1, 2, 3, 4, 5, 6], start: "00:00", end }],
-          source: "fixture",
-          verifiedAt: "2026-01-01",
-        },
-      ],
-    };
-    await writeFile(path.join(configDir, "offpeak.json"), JSON.stringify(offpeak));
+    await writeFile(
+      path.join(configDir, "offpeak.json"),
+      JSON.stringify(fixtureOffpeakConfig(end)),
+    );
     await writeFile(
       path.join(configDir, "opencode.json"),
-      JSON.stringify({
-        $schema: "https://opencode.ai/config.json",
-        plugins: [root],
-        providers: {
-          fixture: {
-            name: "Fixture",
-            package: "@opencode/ai/providers/openai-compatible",
-            settings: { baseURL },
-            models: { "fixture-model": { name: "Fixture Model" } },
-          },
-        },
-      }),
+      JSON.stringify(fixtureOpencodeConfig(baseURL)),
     );
 
     server = await startServer(temp, projectDir);
@@ -245,7 +283,11 @@ test("real OpenCode 2.3.0 fixture: CLI and Desktop defaults are independent at p
       "the protected CLI request was not released at the boundary",
       90000,
     );
-    assert.match(fixture.requests[1].text, /cli-protected-request/);
+    assert.match(
+      fixture.requests[1].text,
+      /cli-protected-request/,
+      `provider requests: ${JSON.stringify(fixture.requests.map((request) => request.text.slice(0, 80)))}`,
+    );
     assert.equal(
       fixture.requests.filter((request) => /desktop-authorized-request/.test(request.text)).length,
       1,
@@ -310,6 +352,99 @@ test("real OpenCode 2.3.0 fixture: CLI and Desktop defaults are independent at p
   } finally {
     await server?.stop();
     await fixture.stop();
-    await rm(temp, { recursive: true, force: true });
+    if (process.env.OFFPEAK_KEEP_TEMP !== "1") await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test(`real OpenCode ${hostVersion} fixture: a peak compaction request is held and admitted once at the boundary`, {
+  skip,
+  timeout: 240000,
+}, async () => {
+  const end = await peakWindow();
+  if (!end) {
+    assert.ok(true, "skipped at the UTC midnight boundary");
+    return;
+  }
+  const { temp, configDir, projectDir } = await fixtureTemp();
+  const fixture = createFixtureProvider();
+  let server;
+  try {
+    const baseURL = await fixture.start();
+    await writeFile(
+      path.join(configDir, "offpeak.json"),
+      JSON.stringify(fixtureOffpeakConfig(end)),
+    );
+    await writeFile(
+      path.join(configDir, "opencode.json"),
+      JSON.stringify(fixtureOpencodeConfig(baseURL)),
+    );
+
+    server = await startServer(temp, projectDir);
+    await waitForPlugin(server.baseUrl);
+    const client = OpenCode.make({
+      baseUrl: server.baseUrl,
+      headers: { authorization: auth },
+    });
+    const rpc = () => client.rpc(OFFPEAK_RPC);
+    const model = { providerID: "fixture", id: "fixture-model" };
+    const session = await client.session.create({
+      title: "Peak compaction",
+      location: { directory: projectDir },
+      model,
+    });
+    await rpc().control({ action: "client-register", client: "cli", sessionID: session.id });
+
+    // One authorized peak prompt gives the session something to summarize.
+    await rpc().control({ action: "session-off", sessionID: session.id });
+    await client.session.prompt({ sessionID: session.id, text: "compaction-source-request" });
+    await waitFor(
+      () => fixture.requests.filter((request) => !request.compaction).length === 1,
+      "the authorized source prompt was not sent",
+      15000,
+    );
+    await rpc().control({ action: "session-on", sessionID: session.id });
+
+    const status = (
+      await rpc().control({
+        action: "status",
+        providerID: model.providerID,
+        modelID: model.id,
+        sessionID: session.id,
+      })
+    ).status;
+    assert.equal(status.pricingState, "PEAK");
+    assert.equal(status.requestsAllowed, false);
+    assert.equal(status.effectiveProtection, "ON");
+
+    // OpenCode 2.3.1 reworked compaction and enabled background summaries by
+    // default. Both paths prepare a request through the same `compaction`
+    // model hook, so a compact request at peak must stay off the wire.
+    await client.session.compact({ sessionID: session.id });
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    assert.equal(
+      fixture.requests.filter((request) => request.compaction).length,
+      0,
+      "a compaction summary reached the provider at peak",
+    );
+
+    await waitFor(
+      () => fixture.requests.filter((request) => request.compaction).length === 1,
+      "the held compaction was not admitted at the boundary",
+      90000,
+    );
+    assert.equal(
+      fixture.requests.filter((request) => request.compaction).length,
+      1,
+      "the admitted compaction was sent more than once",
+    );
+    const pluginLog = await readFile(
+      path.join(temp, "data", "opencode", "log", "opencode.log"),
+      "utf8",
+    ).catch(() => "");
+    assert.doesNotMatch(pluginLog, /failed to load plugin/);
+  } finally {
+    await server?.stop();
+    await fixture.stop();
+    if (process.env.OFFPEAK_KEEP_TEMP !== "1") await rm(temp, { recursive: true, force: true });
   }
 });
