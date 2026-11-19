@@ -3,7 +3,7 @@
 ## Four separate controls
 
 - **Enabled toggle:** `/offpeak on|off` decides whether the queue starts and auto-resumes tasks. It persists across OpenCode restarts.
-- **Client defaults:** `/offpeak client cli|desktop on|off` decides peak protection for sessions reliably registered by that client. CLI and Desktop are independent and both start ON.
+- **Client defaults:** `/offpeak client cli|desktop on|off` decides peak protection for sessions reliably registered by that client. CLI and Desktop are independent and both start ON. The Desktop settings page exposes the Desktop default and the current session's explicit override side by side.
 - **Pricing policy:** decides whether a request for a provider/model is off-peak, peak, untracked, or unknown.
 - **Session override:** `/offpeak session on|off` is explicit permission for one session's verified peak-priced requests; `/offpeak run-now <task-id>` is the task-scoped 15-minute equivalent.
 

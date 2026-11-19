@@ -20,7 +20,7 @@ The Desktop GUI loads from Desktop's **own** global `opencode.json(c)`, not from
 
 ```jsonc
 {
-  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1"]
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.2"]
 }
 ```
 

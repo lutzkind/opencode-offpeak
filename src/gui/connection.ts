@@ -126,6 +126,28 @@ export async function setDesktopProtection(
 }
 
 /**
+ * Sets the explicit per-session override through the server that owns the
+ * session, then re-reads the authoritative status. The server's session action
+ * answers with a message and state only, so the page always renders the
+ * effective protection instead of guessing it.
+ */
+export async function setSessionProtection(
+  context: GuiContextLike,
+  protection: "on" | "off",
+  preferredServerID?: string,
+  sessionID?: string,
+): Promise<OffpeakClientStatus> {
+  const server = resolveTargetServer(context, preferredServerID);
+  if (!server) throw new Error("No OpenCode server is available for Offpeak session settings.");
+  if (!sessionID) throw new Error("Open a session to change its off-peak protection.");
+  await server.client.rpc(OFFPEAK_RPC).control({
+    action: protection === "off" ? "session-off" : "session-on",
+    sessionID,
+  });
+  return readClientStatus(context, preferredServerID, sessionID);
+}
+
+/**
  * Registers a Desktop session with the server that owns it. The routed
  * session's own client is used, so a remote session is registered on its
  * remote server rather than on the Desktop's local sidecar.
@@ -175,4 +197,14 @@ export function sourceLabel(source: string | undefined): string {
 /** True only when this exact session may use verified peak-priced inference. */
 export function peakInferencePermitted(status: OffpeakClientStatus | undefined): boolean {
   return status?.session?.protection === "OFF";
+}
+
+/**
+ * True only when the session carries an explicit per-session override. This is
+ * deliberately not the same as effective protection: a client default can
+ * permit peak pricing without any override, and the override is the only state
+ * this switch owns.
+ */
+export function sessionOverrideActive(status: OffpeakClientStatus | undefined): boolean {
+  return status?.session?.source === "session-override";
 }

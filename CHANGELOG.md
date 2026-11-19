@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2 - 2026-11-19
+
+### Added
+
+- **Per-session switch in the Desktop settings page.**
+  **Settings > Offpeak > Allow peak pricing in this session** writes the same
+  explicit override as `/offpeak session off`, through the server that owns the
+  routed session. Turning it on permits verified peak-priced requests in that
+  session and immediately releases one already held for off-peak; turning it off
+  returns the session to its client default. The switch reflects the explicit
+  override only, so a Desktop or CLI default that already permits peak pricing
+  is never mistaken for a session grant. Neither client default is written.
+- `setSessionProtection()` in the GUI connection helper writes
+  `session-on`/`session-off` and re-reads the authoritative client status. The
+  server's session action returns a message and state only, so the page renders
+  the effective protection instead of guessing it.
+- `sessionOverrideActive()` distinguishes an explicit override from a client
+  default that happens to be OFF.
+
 ## 0.3.1 - 2026-11-18
 
 ### Compatibility

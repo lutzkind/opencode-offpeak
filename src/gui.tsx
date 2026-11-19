@@ -74,6 +74,12 @@ export default Plugin.define({
             description: "The current session's ownership and effective protection.",
             keywords: "offpeak session ownership shared",
           },
+          {
+            id: "session-override",
+            title: "Allow peak pricing in this session",
+            description: "Per-session override that permits verified peak-priced inference here.",
+            keywords: "offpeak session override allow peak release",
+          },
         ];
       },
       render: () => <OffpeakSettings ctx={ctx} />,
