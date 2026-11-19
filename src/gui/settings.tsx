@@ -7,7 +7,9 @@ import {
   readClientStatus,
   registerDesktopSession,
   serverOptions,
+  sessionOverrideActive,
   setDesktopProtection,
+  setSessionProtection,
   sourceLabel,
 } from "./connection.js";
 
@@ -103,6 +105,30 @@ export function OffpeakSettings(props: { ctx: Context }) {
     }
   };
 
+  const updateSession = async (allowPeak: boolean) => {
+    const sequence = ++request;
+    const sessionID = targetSessionID();
+    if (!sessionID) {
+      setError("Open a session to change its off-peak protection.");
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      const next = await setSessionProtection(
+        props.ctx,
+        allowPeak ? "off" : "on",
+        targetServerID(),
+        sessionID,
+      );
+      if (sequence === request) setStatus(next);
+    } catch (failure) {
+      if (sequence === request) setError(errorMessage(failure));
+    } finally {
+      if (sequence === request) setBusy(false);
+    }
+  };
+
   const ui = props.ctx.ui;
   return (
     <ui.SettingsLayout
@@ -184,6 +210,19 @@ export function OffpeakSettings(props: { ctx: Context }) {
                 description={sourceLabel(current().source)}
               >
                 <span>{current().protection}</span>
+              </ui.SettingsRow>
+              <ui.SettingsRow
+                id="session-override"
+                title="Allow peak pricing in this session"
+                description="Per-session override, the Desktop equivalent of /offpeak session off. On permits verified peak-priced requests in this session and releases one already waiting; off returns it to its client default. Neither the Desktop nor the CLI default changes."
+              >
+                <ui.Switch
+                  label="Allow peak pricing in this session"
+                  hideLabel
+                  checked={sessionOverrideActive(status())}
+                  disabled={busy() || current().ownership === "queue"}
+                  onChange={(checked) => void updateSession(checked)}
+                />
               </ui.SettingsRow>
               <Show when={current().ownership === "unknown"}>
                 <ui.SettingsRow

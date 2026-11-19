@@ -13,7 +13,9 @@ import {
   registerDesktopSession,
   resolveTargetServer,
   serverOptions,
+  sessionOverrideActive,
   setDesktopProtection,
+  setSessionProtection,
   sourceLabel,
 } from "../dist/gui/connection.js";
 import serverPlugin from "../dist/server.js";
@@ -124,6 +126,7 @@ test("the packaged Desktop GUI loads and registers exactly one command and setti
     assert.equal(page.id, "opencode-offpeak");
     assert.equal(typeof page.render, "function");
     assert.ok(page.entries.some((entry) => entry.id === "desktop-protection"));
+    assert.ok(page.entries.some((entry) => entry.id === "session-override"));
     const command = additions.find((entry) => entry.registry === gui.Command)?.item;
     assert.equal(command.id, "settings");
     command.run();
@@ -184,6 +187,70 @@ test("GUI RPC targets the selected session's server and the settings helpers nev
   assert.equal(peakInferencePermitted(read), true);
   assert.equal(ownershipLabel("ambiguous"), "Shared session (CLI + Desktop); protected");
   assert.match(sourceLabel("unknown"), /fail-closed/);
+});
+
+test("GUI session override targets the owning server and re-reads the authoritative status", async () => {
+  const calls = [];
+  const remote = server("remote", "Remote", calls, statusResult);
+  const local = server("sidecar", "Local", calls, statusResult);
+  const context = {
+    sessions: { current: () => ({ id: "ses_remote", server: remote }) },
+    servers: {
+      list: () => ["sidecar", "remote"],
+      get: (id) => (id === "remote" ? remote : id === "sidecar" ? local : undefined),
+    },
+    client: local.client,
+  };
+
+  const next = await setSessionProtection(context, "off", "remote", "ses_remote");
+  assert.equal(next.defaults.desktop, "OFF");
+  // The write goes to the session's own server, followed by one authoritative read.
+  assert.deepEqual(
+    calls
+      .filter((call) => call.action !== undefined)
+      .map((call) => `${call.server}:${call.action}`),
+    ["remote:session-off", "remote:client"],
+  );
+  assert.deepEqual(calls.find((call) => call.action === "session-off").input, {
+    action: "session-off",
+    sessionID: "ses_remote",
+  });
+
+  calls.length = 0;
+  await setSessionProtection(context, "on", "remote", "ses_remote");
+  assert.deepEqual(
+    calls.filter((call) => call.action !== undefined).map((call) => call.action),
+    ["session-on", "client"],
+  );
+
+  await assert.rejects(
+    () => setSessionProtection(context, "off", "remote", undefined),
+    /Open a session/,
+  );
+});
+
+test("sessionOverrideActive reflects only the explicit override, not a client default", () => {
+  const override = {
+    defaults: { cli: "ON", desktop: "ON" },
+    session: {
+      sessionID: "ses_remote",
+      ownership: "cli",
+      protection: "OFF",
+      source: "session-override",
+    },
+  };
+  const byDefault = {
+    defaults: { cli: "ON", desktop: "OFF" },
+    session: {
+      sessionID: "ses_remote",
+      ownership: "desktop",
+      protection: "OFF",
+      source: "client-default",
+    },
+  };
+  assert.equal(sessionOverrideActive(override), true);
+  assert.equal(sessionOverrideActive(byDefault), false);
+  assert.equal(sessionOverrideActive(undefined), false);
 });
 
 test("GUI settings fail clearly when the remote server is unavailable or rejects the RPC", async () => {

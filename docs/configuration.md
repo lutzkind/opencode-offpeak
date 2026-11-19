@@ -23,7 +23,7 @@ If `policies` is omitted, the built-in DeepSeek/OpenCode Go policy is used. If y
 - `displayTimeZone`: valid IANA timezone for status output; defaults to the system timezone.
 - `policies`: complete list of pricing policy definitions. See [pricing policies](pricing-policies.md).
 
-`/offpeak session on|off` does not write this file. Session-scoped off-peak protection is stored as an explicit per-session override in OpenCode plugin storage (key `opencode-offpeak/session-overrides-v1`); the default for every session is ON, and absence of an entry means protection is on. The override is deliberately not part of `offpeak.json` because it belongs to one interactive session, not to the installation: it survives reloads and restarts with the session, is removed when the session is deleted, and never changes global settings. While a session's protection is off it may dispatch verified peak-priced work at peak rates (see the README section); `UNKNOWN` models and invalid configuration still fail closed for it.
+`/offpeak session on|off` does not write this file. Session-scoped off-peak protection is stored as an explicit per-session override in OpenCode plugin storage (key `opencode-offpeak/session-overrides-v1`); the default for every session is ON, and absence of an entry means protection is on. The Desktop settings page writes the same override through **Allow peak pricing in this session**, with the same precedence and the same immediate release of a waiting request. The override is deliberately not part of `offpeak.json` because it belongs to one interactive session, not to the installation: it survives reloads and restarts with the session, is removed when the session is deleted, and never changes global settings. While a session's protection is off it may dispatch verified peak-priced work at peak rates (see the README section); `UNKNOWN` models and invalid configuration still fail closed for it.
 
 The policy timezone is authoritative for pricing. Changing `displayTimeZone` does not move a pricing boundary. The running server watches the config file and reloads settings after atomic updates.
 
@@ -46,6 +46,8 @@ The policy timezone is authoritative for pricing. Changing `displayTimeZone` doe
 ```
 
 The document is created on the first change. When it is absent, both defaults are ON and no session is registered, which is the safe migration path for existing installations. A session registered by both clients has `clients: ["cli", "desktop"]` and `ambiguous: true`; it remains protected even when one default is OFF. A session with no entry is `UNKNOWN` and remains protected. Queue-owned sessions never inherit a client default.
+
+The Desktop settings page exposes the Desktop default and the current session's explicit override. The override is the same `session-overrides-v1` entry that `/offpeak session off` writes; the page never writes `defaults.cli`.
 
 The document is not editable through `offpeak.json` and does not contain prompts, credentials, or provider responses. `session.deleted` removes the entry; bounded lazy cleanup removes only sessions that a supported `session.get` reports as confidently missing. There is no heartbeat or expiry.
 

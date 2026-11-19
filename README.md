@@ -9,10 +9,10 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.2
 ```
 
-This installs the released `v0.3.1` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.3.2` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -20,17 +20,17 @@ Restart OpenCode after installation. The plugin defaults to enabled, uses the cu
 
 The Desktop GUI is loaded from **Desktop's own** `opencode.json(c)`, not from the remote server's configuration and not from `cli.json`. Installing the package only on the remote OpenCode server enforces pricing there, but it does not make the settings page appear in the Desktop app. To get the native Offpeak page:
 
-1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.3.1` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
+1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.3.2` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
 2. List the same package in Desktop's global `opencode.json(c)` on the machine running Desktop:
 
    ```jsonc
    {
-     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.1"]
+     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.2"]
    }
    ```
 
 3. Set `OPENCODE_SERVER_PASSWORD` on the remote server if it is protected, and add that server in Desktop with the same password. The GUI uses the selected session's actual server client for every RPC, never an assumed local sidecar.
-4. Open **Settings > Offpeak**. The page reads and writes the Desktop default on the selected server; it never changes the CLI default.
+4. Open **Settings > Offpeak**. The page has two independent levels: **Desktop protection** is the persistent default for every Desktop session on that server, and **Allow peak pricing in this session** is the explicit per-session override — the Desktop equivalent of `/offpeak session off`. Turning the session override on releases a request already waiting for off-peak in that session. The page never changes the CLI default.
 
 The Desktop app must be 2.3.0 or newer. The package builds its GUI from `src/gui.tsx` into `dist/gui-experimental.cjs` through the official `@opencode/plugin/gui/vite` preset.
 
@@ -170,8 +170,9 @@ CLI/TUI and Desktop are separate clients of the same OpenCode server. Each has a
 - **Existing installations migrate safely.** Both defaults initialize to ON when no client document exists, so every previously protected session keeps exactly its old behavior. The state is a minimal versioned document (`opencode-offpeak/clients-v1`) with `defaults` and per-session ownership; it survives plugin reloads and server restarts. OpenCode's supported `session.deleted` event removes ownership, and bounded lazy cleanup reaps state only for sessions that are confidently gone.
 - **Queue tasks stay separate.** A queue-owned session never inherits a client default; `/offpeak run-now <task-id>` remains its task-scoped authorization. `/offpeak on|off` remains global automation and is not a client setting.
 - **Status output.** `/offpeak status` adds `Client defaults`, `Client ownership`, `Session protection (explicit)`, and `Effective protection` lines, so a client default is never confused with the explicit session override.
+- **Per-session control exists in both clients.** `/offpeak session on|off` in the TUI and **Allow peak pricing in this session** in Desktop write the same `session-overrides-v1` entry through the server that owns the session. Either one applies to that session only, releases a request already waiting for off-peak, and leaves both client defaults unchanged. The Desktop switch reflects the explicit override, not the effective state: a client default can permit peak pricing without any override.
 
-The Desktop settings page exposes the Desktop switch, the read-only CLI default, the current session's ownership/effective protection, and an explicit error when the selected remote server is unavailable. It writes only `client: "desktop"` through that server's typed RPC.
+The Desktop settings page exposes the Desktop default, the read-only CLI default, the current session's ownership and effective protection, and the per-session switch. It writes only `client: "desktop"` and the session override through that server's typed RPC, so it can never change the CLI default.
 
 ### Timeout and retry recovery
 

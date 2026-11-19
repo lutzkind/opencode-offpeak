@@ -4,7 +4,7 @@
 
 - `./server` owns the request guard, queue scheduler, config file, client defaults/ownership, and OpenCode plugin-storage state. It is the single authority for every pricing decision.
 - `./tui` registers `/offpeak` through the v2 keymap slash-command API, registers the routed CLI session's origin through typed RPC, and sends typed RPC calls to the connected server (including a remote server).
-- `./gui-experimental` is the Desktop GUI entrypoint (`src/gui.tsx` → one prebuilt `dist/gui-experimental.cjs`). It contributes a native settings page and a session-registration effect, and calls the selected session server's typed RPC. It does not import or initialize the server engine.
+- `./gui-experimental` is the Desktop GUI entrypoint (`src/gui.tsx` → one prebuilt `dist/gui-experimental.cjs`). It contributes a native settings page and a session-registration effect, and calls the selected session server's typed RPC. The page writes the Desktop client default and the current session's explicit override (the same `opencode-offpeak/session-overrides-v1` entry as `/offpeak session off`); it never writes the CLI default. It does not import or initialize the server engine.
 
 The plugin does not run a second agent runtime, server, daemon, database, queue, scheduler, or provider proxy. OpenCode owns the sessions, model/provider, permissions, tools, transcript, and project context.
 
