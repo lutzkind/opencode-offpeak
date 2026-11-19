@@ -1,5 +1,19 @@
 # Handoff — 2026-11-18
 
+## 2026-11-19 Desktop per-session switch (`v0.3.2`)
+
+**Trigger.** On 2026-11-19, the 06:00–10:00 UTC peak window held two interactive sessions (created 06:03:51 and 06:05:16) until the 10:00:02 boundary. The user switched **Settings > Offpeak > Desktop protection** off and the session did not resume. Live `control` RPC showed why: both sessions were `ownership: cli`, `protection: ON`, `source: client-default`, with `defaults {cli: on, desktop: off}`. The Desktop page only wrote the Desktop client default, which never applies to a CLI-owned, shared, or unregistered session.
+
+**Implementation.** `./gui-experimental` now exposes the second level the CLI already had. `src/gui/connection.ts` adds `setSessionProtection()` (writes `session-off`/`session-on` through the routed session's server, then re-reads the authoritative `client` status, because the server's session action returns message/state only) and `sessionOverrideActive()` (override detection, deliberately separate from effective protection). `src/gui/settings.tsx` adds **Allow peak pricing in this session** under Current session; it is disabled for queue-owned sessions and its state follows the explicit override, so a client default that already permits peak is never mistaken for a session grant. `src/gui.tsx` registers the new settings entry for search. Client defaults are unchanged; the CLI default remains read-only on the page.
+
+**Tests.** `test/gui.test.mjs` adds coverage for the write path (`session-off` → re-read, `session-on` → re-read), the missing-session rejection, and `sessionOverrideActive` vs a client default. The packaged-bundle test asserts the `session-override` entry. `npm run check` on the merge commit: lint, typecheck, **160 tests, 0 failures**. `npm pack` includes `dist/gui-experimental.cjs` and the new label.
+
+**Release.** PR **#22** (`feat/desktop-session-override`) passed CI run **44526384933** on `ubuntu-latest` and `macos-latest`; merge commit **`791d614d2a0d630f099b4f0b7e99c5497cf6db1f`**. Annotated tag **v0.3.2** → `791d614`. Release `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.3.2` carries `opencode-offpeak-0.3.2.tgz`, **168975 bytes**, SHA-256 **`7c15b70326c984ec1cedf04a95b0760f926e0290426342a6553342eb9edb3e54`**, digest verified through the GitHub API. `package.json`/lock are `0.3.2`; CHANGELOG, README, ARCHITECTURE, RELEASING, docs, and `docs/releases/v0.3.2.md` are updated.
+
+**Packaging finding (open).** `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.2` installs the package **without `dist/`** (verified in the OpenCode plugin cache): `exports["./gui-experimental"]` then resolves to a missing `dist/gui-experimental.cjs`. The server/TUI entrypoints are unaffected (they use the `bun` source condition). Desktop users therefore need the release tarball asset, not the bare git tag, unless the installer builds the package. The same layout applies to v0.3.0/v0.3.1. Not changed here; candidate for v0.3.3 (commit the ~10 KB bundle, or add a build step the installer actually runs).
+
+**Host state.** The live server stays pinned at `v0.3.1`; the new Desktop switch needs no server change because `session-on`/`session-off` already exist there. No reload or restart was performed during the work to avoid interrupting active sessions.
+
 ## 2026-11-18 OpenCode 2.3.2 compatibility (`v0.3.1`)
 
 **Reported state.** The live host runs **OpenCode 2.3.2** (released 2026-11-18T01:35Z; 2.3.1 at 00:17Z), installed before this pass. The plugin was pinned at `v0.3.0`, whose validation stopped at 2.3.0. The declared range `>=2.0.26 <2.4.0` already admitted 2.3.1/2.3.2, so the task was to verify the runtime contract, not widen it.
