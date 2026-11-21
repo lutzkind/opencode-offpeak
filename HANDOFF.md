@@ -1,5 +1,21 @@
 # Handoff — 2026-11-18
 
+## 2026-11-21 Desktop settings page keeps the current session (`v0.3.3`)
+
+**Trigger.** On OpenCode Desktop 2.3.2 (macOS), `Settings > Offpeak > Current session` always showed **"No session focused"** with a session tab open, so the v0.3.2 row **Allow peak pricing in this session** (and Ownership / Effective protection) never rendered. Client defaults, the Desktop switch, and read-only CLI protection worked.
+
+**Root cause (confirmed in the 2.3.2 declarations).** `@opencode/plugin/gui` defines `Sessions.current()` only while the route shows the mounted session screen: "Undefined on Home, on a draft, while the route has left the mounted screen". Opening Settings is exactly that transition, so `current()` became `undefined`. The page read only `current()`, so `targetSessionID()` was always undefined and the server returned no session block. `Sessions.list()` and `Tabs.list()` remain available: each `ShellTab` carries `session?: SessionRef` and `active`.
+
+**Implementation.** `src/gui/connection.ts` adds `openSessions()`, `rememberRoutedSession()`, and `resolveSessionTarget()`, which follows: explicit pick → mounted session → active tab → last routed session (remembered by `gui.tsx` when `current()` was defined) → a single open session. `defaultServerID()` now prefers the resolved session's server, then a single-server session set, then the Desktop's own local (`builtin`/`sidecar`) server; `resolveTargetServer()` uses the same resolution when no server is preferred. `src/gui/settings.tsx` adds a **Session** selector when more than one session is open on the selected server, follows the selected session's server when it differs, shows **No session open** only when no shell tab owns a session, and **No session open on this server** when sessions exist elsewhere. Registration uses the resolved target session.
+
+**Tests.** `test/gui.test.mjs` adds `settings resolves the routed session after the route leaves the session screen` (mounted, active tab, remembered, explicit pick, sole session, empty) and `the settings page prefers the session's server, then the local server`. Full `npm run check` on the merge commit: lint, typecheck, **162 tests, 0 failures**.
+
+**Release.** PR **#23** (`fix/desktop-settings-session`), CI run **44860409578** passed on `ubuntu-latest` and `macos-latest`; merge commit **`1a252d7a2a9d519ee509306fed9f64f6d3c888a7`**. Annotated tag **v0.3.3** → `1a252d7`; release `https://github.com/lutzkind/opencode-offpeak/releases/tag/v0.3.3` carries `opencode-offpeak-0.3.3.tgz`, **172765 bytes**, SHA-256 **`3141cbfbbc0206f0b463e08e9cd87c11cb7a6e32153249e20ae5c7693432ad73`**, digest verified through the GitHub API. Docs: CHANGELOG, README, ARCHITECTURE, RELEASING, `docs/troubleshooting.md`, `docs/releases/v0.3.3.md`.
+
+**Host state.** Live server plugin pin remains `v0.3.1`; the fix is GUI-only and needs no server change (`session-on`/`session-off` already exist). No reload or restart was performed.
+
+**Packaging (unchanged).** A bare git-tag install still omits `dist/gui-experimental.cjs`. Desktop on the Mac uses a local checkout of the tag; update it to `v0.3.3` in place and rebuild.
+
 ## 2026-11-19 Desktop per-session switch (`v0.3.2`)
 
 **Trigger.** On 2026-11-19, the 06:00–10:00 UTC peak window held two interactive sessions (created 06:03:51 and 06:05:16) until the 10:00:02 boundary. The user switched **Settings > Offpeak > Desktop protection** off and the session did not resume. Live `control` RPC showed why: both sessions were `ownership: cli`, `protection: ON`, `source: client-default`, with `defaults {cli: on, desktop: off}`. The Desktop page only wrote the Desktop client default, which never applies to a CLI-owned, shared, or unregistered session.
