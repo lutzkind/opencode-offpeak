@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.3 - 2026-11-21
+
+### Fixed
+
+- **The Offpeak settings page keeps the current session.** OpenCode clears
+  `Sessions.current()` when the route leaves the mounted session screen, which
+  is exactly what opening Settings does, so the page rendered "No session
+  focused" and the v0.3.2 per-session switch never appeared. The page now
+  resolves the session in precedence order: the explicit pick, the mounted
+  session, the active tab (`ctx.tabs.list()`), the last routed session, then a
+  single open session.
+- **A Session selector appears when the choice is ambiguous.** Open sessions on
+  the selected server are listed; picking one follows the server that owns it.
+  "No session open" is shown only when no shell tab owns a session, and "No
+  session open on this server" when sessions exist only on another server.
+- **The server default is no longer an arbitrary remote.** The page uses the
+  server that owns the resolved session, then the Desktop's own local server,
+  then a single-server session set. This removes the intermittent
+  "The Offpeak server could not be reached" state caused by selecting an
+  unrelated remote first.
+
+Client defaults, the per-session override semantics, and the server-side
+storage format are unchanged.
+
 ## 0.3.2 - 2026-11-19
 
 ### Added

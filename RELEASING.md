@@ -2,17 +2,20 @@
 
 ## Current public distribution
 
-`v0.3.2` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.3.3` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.2
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.3
 ```
 
-`v0.1.0` through `v0.3.1` remain available at their own tags. `v0.3.2` is the
-canonical release: it adds the per-session switch to the Desktop settings page
-(the same `session-overrides-v1` entry as `/offpeak session off`), keeps the
-2.3.2 validation and background-compaction coverage, the tested server/TUI
-range `>=2.0.26 <2.4.0`, and the read-only canonical `pricing` RPC consumed by
+`v0.1.0` through `v0.3.2` remain available at their own tags. `v0.3.3` is the
+canonical release: it fixes the Desktop settings page losing the current session
+when the route leaves the mounted session screen, adds a Session selector when
+several sessions are open, and defaults the server to the one that owns the
+session instead of an arbitrary remote. It keeps the v0.3.2 per-session switch
+(the same `session-overrides-v1` entry as `/offpeak session off`), the 2.3.2
+validation and background-compaction coverage, the tested server/TUI range
+`>=2.0.26 <2.4.0`, and the read-only canonical `pricing` RPC consumed by
 `opencode-free-first` `peak-only`. `v0.3.0` added the independent persistent CLI
 and Desktop protection defaults and the native Desktop GUI entrypoint.
 

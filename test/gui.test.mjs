@@ -7,10 +7,13 @@ import * as gui from "@opencode/plugin/gui";
 import { createRoot } from "solid-js";
 import {
   defaultServerID,
+  openSessions,
   ownershipLabel,
   peakInferencePermitted,
   readClientStatus,
   registerDesktopSession,
+  rememberRoutedSession,
+  resolveSessionTarget,
   resolveTargetServer,
   serverOptions,
   sessionOverrideActive,
@@ -251,6 +254,94 @@ test("sessionOverrideActive reflects only the explicit override, not a client de
   assert.equal(sessionOverrideActive(override), true);
   assert.equal(sessionOverrideActive(byDefault), false);
   assert.equal(sessionOverrideActive(undefined), false);
+});
+
+test("settings resolves the routed session after the route leaves the session screen", () => {
+  rememberRoutedSession(undefined);
+  const calls = [];
+  const remote = server("remote", "Remote", calls, statusResult);
+  const local = server("sidecar", "Local", calls, statusResult);
+  const remoteSession = { id: "ses_a", key: "remote\nses_a", pending: false, server: remote };
+  const otherSession = { id: "ses_b", key: "remote\nses_b", pending: false, server: remote };
+  const servers = {
+    list: () => ["sidecar", "remote"],
+    get: (id) => (id === "remote" ? remote : id === "sidecar" ? local : undefined),
+  };
+  const base = {
+    client: local.client,
+    servers,
+    sessions: {
+      current: () => remoteSession,
+      list: () => [otherSession, remoteSession],
+    },
+  };
+
+  // Mounted session wins.
+  assert.equal(resolveSessionTarget(base), remoteSession);
+
+  // Settings unmounts the session screen: the active tab still identifies it.
+  const byTab = {
+    ...base,
+    sessions: { current: () => undefined, list: () => [otherSession, remoteSession] },
+    tabs: { list: () => [{ key: "remote\nses_b", session: otherSession, active: true }] },
+  };
+  assert.equal(resolveSessionTarget(byTab), otherSession);
+
+  // No mounted screen and no active tab: the last routed session is remembered.
+  rememberRoutedSession(remoteSession);
+  const remembered = {
+    ...base,
+    sessions: { current: () => undefined, list: () => [otherSession, remoteSession] },
+    tabs: { list: () => [{ key: "remote\nses_b", session: otherSession, active: false }] },
+  };
+  assert.equal(resolveSessionTarget(remembered), remoteSession);
+
+  // An explicit pick wins over the remembered session.
+  assert.equal(resolveSessionTarget(remembered, "ses_b"), otherSession);
+
+  // Nothing routed, one open session: it is the only safe choice.
+  rememberRoutedSession(undefined);
+  const sole = {
+    ...base,
+    sessions: { current: () => undefined, list: () => [remoteSession] },
+    tabs: { list: () => [] },
+  };
+  assert.equal(resolveSessionTarget(sole), remoteSession);
+
+  // Nothing open at all.
+  const none = {
+    ...base,
+    sessions: { current: () => undefined, list: () => [] },
+  };
+  assert.equal(resolveSessionTarget(none), undefined);
+  assert.deepEqual(openSessions(none), []);
+  rememberRoutedSession(undefined);
+});
+
+test("the settings page prefers the session's server, then the local server", () => {
+  rememberRoutedSession(undefined);
+  const calls = [];
+  const remote = server("remote", "Remote", calls, statusResult);
+  const local = server("sidecar", "Local", calls, statusResult);
+  const servers = {
+    list: () => ["remote", "sidecar"],
+    get: (id) => (id === "remote" ? remote : id === "sidecar" ? local : undefined),
+  };
+  const noSession = {
+    client: local.client,
+    servers,
+    sessions: { current: () => undefined, list: () => [] },
+  };
+  // The Desktop's own server is always present and reachable; a remote is only
+  // used when it owns the session or the user picks it.
+  assert.equal(defaultServerID(noSession), "sidecar");
+
+  const remoteSession = { id: "ses_a", key: "remote\nses_a", pending: false, server: remote };
+  const withSession = {
+    ...noSession,
+    sessions: { current: () => undefined, list: () => [remoteSession] },
+  };
+  assert.equal(defaultServerID(withSession), "remote");
 });
 
 test("GUI settings fail clearly when the remote server is unavailable or rejects the RPC", async () => {

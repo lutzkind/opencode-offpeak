@@ -3,9 +3,11 @@ import { createEffect, createSignal, on, Show } from "solid-js";
 import type { OffpeakClientStatus as RpcClientStatus } from "../rpc.js";
 import {
   defaultServerID,
+  openSessions,
   ownershipLabel,
   readClientStatus,
   registerDesktopSession,
+  resolveSessionTarget,
   serverOptions,
   sessionOverrideActive,
   setDesktopProtection,
@@ -24,21 +26,31 @@ function errorMessage(error: unknown): string {
  */
 export function OffpeakSettings(props: { ctx: Context }) {
   const [selectedServer, setSelectedServer] = createSignal<string | undefined>(undefined);
+  const [selectedSession, setSelectedSession] = createSignal<string | undefined>(undefined);
   const [status, setStatus] = createSignal<RpcClientStatus | undefined>(undefined);
   const [error, setError] = createSignal<string | undefined>(undefined);
   const [busy, setBusy] = createSignal(false);
   let request = 0;
 
-  const session = () => props.ctx.sessions.current();
-  const targetServerID = () => selectedServer() ?? defaultServerID(props.ctx);
+  // `sessions.current()` is undefined while Settings is on screen; the helper
+  // follows the mounted session, then the active tab, then the last routed one.
+  const opened = () => openSessions(props.ctx);
+  const resolvedSession = () => resolveSessionTarget(props.ctx, selectedSession());
+  const targetServerID = () =>
+    selectedServer() ?? resolvedSession()?.server.id ?? defaultServerID(props.ctx);
   const targetServer = () => {
     const id = targetServerID();
     return id ? props.ctx.servers.get(id) : undefined;
   };
-  const targetSessionID = () => {
-    const current = session();
-    return current && current.server.id === targetServerID() ? current.id : undefined;
+  const targetSession = () => {
+    const session = resolvedSession();
+    return session && session.server.id === targetServerID() ? session : undefined;
   };
+  const targetSessionID = () => targetSession()?.id;
+  const sessionOptions = () =>
+    opened()
+      .filter((session) => session.server.id === targetServerID())
+      .map((session) => ({ value: session.id, label: session.id }));
   const options = () => serverOptions(props.ctx);
 
   const refresh = async () => {
@@ -72,7 +84,7 @@ export function OffpeakSettings(props: { ctx: Context }) {
   );
 
   const registerCurrent = async () => {
-    const current = session();
+    const current = targetSession();
     if (!current) return;
     setBusy(true);
     setError(undefined);
@@ -84,6 +96,23 @@ export function OffpeakSettings(props: { ctx: Context }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const chooseServer = (value: string) => {
+    const chosen = selectedSession();
+    if (
+      chosen &&
+      !opened().some((session) => session.id === chosen && session.server.id === value)
+    ) {
+      setSelectedSession(undefined);
+    }
+    setSelectedServer(value);
+  };
+
+  const chooseSession = (value: string) => {
+    setSelectedSession(value);
+    const chosen = opened().find((session) => session.id === value);
+    if (chosen && chosen.server.id !== selectedServer()) setSelectedServer(undefined);
   };
 
   const updateDesktop = async (enabled: boolean) => {
@@ -158,7 +187,7 @@ export function OffpeakSettings(props: { ctx: Context }) {
               label="Server"
               options={options()}
               value={targetServerID()}
-              onChange={(value) => setSelectedServer(value)}
+              onChange={(value) => chooseServer(value)}
             />
           </ui.SettingsRow>
         </Show>
@@ -185,69 +214,105 @@ export function OffpeakSettings(props: { ctx: Context }) {
       </ui.SettingsSection>
 
       <ui.SettingsSection title="Current session">
-        <Show
-          when={status()?.session}
-          fallback={
-            <ui.SettingsRow
-              id="no-session"
-              title="No session focused"
-              description="Open a session to see its client ownership and effective protection."
+        <Show when={sessionOptions().length > 1}>
+          <ui.SettingsRow
+            id="session"
+            title="Session"
+            description="The page follows the session you were viewing whenever it is still open. Pick another open session on this server to inspect or change it."
+          >
+            <ui.Select
+              label="Session"
+              options={sessionOptions()}
+              value={targetSessionID()}
+              onChange={(value) => chooseSession(value)}
             />
+          </ui.SettingsRow>
+        </Show>
+        <Show
+          when={targetSession()}
+          fallback={
+            <Show
+              when={opened().length > 0}
+              fallback={
+                <ui.SettingsRow
+                  id="no-session"
+                  title="No session open"
+                  description="Open a session to see its client ownership and effective protection."
+                />
+              }
+            >
+              <ui.SettingsRow
+                id="no-session-on-server"
+                title="No session open on this server"
+                description="Pick another server above, or open a session on this server, then return here."
+              />
+            </Show>
           }
         >
-          {(current) => (
-            <>
+          <Show
+            when={status()?.session}
+            fallback={
               <ui.SettingsRow
-                id="ownership"
-                title="Ownership"
-                description="A session opened by both clients is shared and always protected."
-              >
-                <span>{ownershipLabel(current().ownership)}</span>
-              </ui.SettingsRow>
-              <ui.SettingsRow
-                id="effective-protection"
-                title="Effective protection"
-                description={sourceLabel(current().source)}
-              >
-                <span>{current().protection}</span>
-              </ui.SettingsRow>
-              <ui.SettingsRow
-                id="session-override"
-                title="Allow peak pricing in this session"
-                description="Per-session override, the Desktop equivalent of /offpeak session off. On permits verified peak-priced requests in this session and releases one already waiting; off returns it to its client default. Neither the Desktop nor the CLI default changes."
-              >
-                <ui.Switch
-                  label="Allow peak pricing in this session"
-                  hideLabel
-                  checked={sessionOverrideActive(status())}
-                  disabled={busy() || current().ownership === "queue"}
-                  onChange={(checked) => void updateSession(checked)}
-                />
-              </ui.SettingsRow>
-              <Show when={current().ownership === "unknown"}>
+                id="session-loading"
+                title="Session status"
+                description="The Offpeak server has not answered for this session yet."
+              />
+            }
+          >
+            {(current) => (
+              <>
                 <ui.SettingsRow
-                  id="register-session"
-                  title="Register this session"
-                  description="The server has not seen a Desktop registration for this session. Retry the supported session observation."
+                  id="ownership"
+                  title="Ownership"
+                  description="A session opened by both clients is shared and always protected."
                 >
-                  <ui.Button
-                    variant="neutral"
-                    onClick={() => void registerCurrent()}
-                    disabled={busy()}
-                  >
-                    Register
-                  </ui.Button>
+                  <span>{ownershipLabel(current().ownership)}</span>
                 </ui.SettingsRow>
-              </Show>
-              <ui.SettingsRow
-                id="peak-permitted"
-                title="Peak-priced inference"
-                description="Permission applies only to verified peak pricing. UNKNOWN pricing and invalid configuration always fail closed."
-              >
-                <span>{current().protection === "OFF" ? "Permitted" : "Blocked"}</span>
-              </ui.SettingsRow>
-            </>
-          )}
+                <ui.SettingsRow
+                  id="effective-protection"
+                  title="Effective protection"
+                  description={sourceLabel(current().source)}
+                >
+                  <span>{current().protection}</span>
+                </ui.SettingsRow>
+                <ui.SettingsRow
+                  id="session-override"
+                  title="Allow peak pricing in this session"
+                  description="Per-session override, the Desktop equivalent of /offpeak session off. On permits verified peak-priced requests in this session and releases one already waiting; off returns it to its client default. Neither the Desktop nor the CLI default changes."
+                >
+                  <ui.Switch
+                    label="Allow peak pricing in this session"
+                    hideLabel
+                    checked={sessionOverrideActive(status())}
+                    disabled={busy() || current().ownership === "queue"}
+                    onChange={(checked) => void updateSession(checked)}
+                  />
+                </ui.SettingsRow>
+                <Show when={current().ownership === "unknown"}>
+                  <ui.SettingsRow
+                    id="register-session"
+                    title="Register this session"
+                    description="The server has not seen a Desktop registration for this session. Retry the supported session observation."
+                  >
+                    <ui.Button
+                      variant="neutral"
+                      onClick={() => void registerCurrent()}
+                      disabled={busy()}
+                    >
+                      Register
+                    </ui.Button>
+                  </ui.SettingsRow>
+                </Show>
+                <ui.SettingsRow
+                  id="peak-permitted"
+                  title="Peak-priced inference"
+                  description="Permission applies only to verified peak pricing. UNKNOWN pricing and invalid configuration always fail closed."
+                >
+                  <span>{current().protection === "OFF" ? "Permitted" : "Blocked"}</span>
+                </ui.SettingsRow>
+              </>
+            )}
+          </Show>
         </Show>
       </ui.SettingsSection>
 

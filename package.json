@@ -1,6 +1,6 @@
 {
   "name": "opencode-offpeak",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Queue OpenCode agent tasks, guard peak pricing, and configure independent CLI and Desktop protection.",
   "author": "Lutz Kind",
   "license": "MIT",
