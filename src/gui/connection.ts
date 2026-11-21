@@ -34,15 +34,70 @@ export interface GuiSessionLike {
   server: GuiServerLike;
 }
 
+export interface GuiTabLike {
+  key?: string;
+  session?: GuiSessionLike | undefined;
+  active: boolean;
+}
+
 export interface GuiContextLike {
   client: GuiOpenCodeClientLike;
   sessions: {
     current(): GuiSessionLike | undefined;
+    list?(): readonly GuiSessionLike[];
+  };
+  tabs?: {
+    list(): readonly GuiTabLike[];
   };
   servers: {
     list(): readonly string[];
     get(id: string): GuiServerLike | undefined;
   };
+}
+
+/**
+ * The session the user was last viewing. `Sessions.current()` goes undefined as
+ * soon as the route leaves the mounted session screen -- which is exactly what
+ * opening Settings does -- so the page remembers the last routed session and
+ * looks it up among the open tabs while Settings is on screen.
+ */
+let lastRoutedKey: string | undefined;
+
+/** Records the routed session; call with `undefined` only to clear test state. */
+export function rememberRoutedSession(session: GuiSessionLike | undefined): void {
+  lastRoutedKey = session?.key;
+}
+
+/** Every non-pending session an open shell tab owns, across all servers. */
+export function openSessions(context: GuiContextLike): GuiSessionLike[] {
+  return (context.sessions.list?.() ?? []).filter((session) => !session.pending);
+}
+
+/**
+ * The session the page should follow, in precedence order: the explicit pick,
+ * the mounted session, the active tab, the last routed session, and finally a
+ * single open session. Undefined only when there is no safe single choice.
+ */
+export function resolveSessionTarget(
+  context: GuiContextLike,
+  selectedSessionID?: string,
+): GuiSessionLike | undefined {
+  const opened = openSessions(context);
+  if (selectedSessionID) {
+    const chosen = opened.find((session) => session.id === selectedSessionID);
+    if (chosen) return chosen;
+  }
+  const routed = context.sessions.current();
+  if (routed && !routed.pending) return routed;
+  const tabbed = context.tabs
+    ?.list()
+    .find((tab) => tab.active && tab.session !== undefined && !tab.session.pending)?.session;
+  if (tabbed) return tabbed;
+  if (lastRoutedKey) {
+    const remembered = opened.find((session) => session.key === lastRoutedKey);
+    if (remembered) return remembered;
+  }
+  return opened.length === 1 ? opened[0] : undefined;
 }
 
 /**
@@ -61,21 +116,29 @@ export function resolveTargetServer(
     const preferred = context.servers.get(preferredServerID);
     if (preferred) return preferred;
   }
-  return context.sessions.current()?.server;
+  return resolveSessionTarget(context)?.server;
 }
 
-/** The server selected on first render: current session, then a remote, then sidecar. */
+/**
+ * The server selected on first render. The routed/remembered session's own
+ * server wins; otherwise the Desktop's local server, which is always present
+ * and reachable; a remote is only an explicit choice. A single-server session
+ * set is still used when no session has been routed yet.
+ */
 export function defaultServerID(context: GuiContextLike): string | undefined {
-  const current = context.sessions.current()?.server.id;
-  if (current) return current;
+  const session = resolveSessionTarget(context);
+  if (session) return session.server.id;
+  const opened = openSessions(context);
+  const onlyServer = opened[0]?.server.id;
+  if (onlyServer && opened.every((candidate) => candidate.server.id === onlyServer)) {
+    return onlyServer;
+  }
   const listed = context.servers.list();
-  const remote = listed.find((id) => {
+  const local = listed.find((id) => {
     const server = context.servers.get(id);
-    return server !== undefined && server.builtin !== true && server.id !== "sidecar";
+    return server !== undefined && (server.builtin === true || server.id === "sidecar");
   });
-  if (remote) return remote;
-  if (listed.includes("sidecar")) return "sidecar";
-  return listed[0];
+  return local ?? listed[0];
 }
 
 export function serverOptions(context: GuiContextLike): Array<{ value: string; label: string }> {

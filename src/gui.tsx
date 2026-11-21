@@ -1,5 +1,5 @@
 import { Command, createKeyed, Plugin, SettingsPage } from "@opencode/plugin/gui";
-import { registerDesktopSession } from "./gui/connection.js";
+import { registerDesktopSession, rememberRoutedSession } from "./gui/connection.js";
 import { OffpeakSettings } from "./gui/settings.js";
 
 /**
@@ -24,6 +24,10 @@ export default Plugin.define({
       () => {
         const current = ctx.sessions.current();
         if (!current || current.pending) return;
+        // Settings unmounts the session screen and clears `sessions.current()`;
+        // remembering the key here keeps the settings page pointed at the
+        // session the user was viewing.
+        rememberRoutedSession(current);
         const client = current.server.client;
         let sessions = registered.get(client as object);
         if (!sessions) {
