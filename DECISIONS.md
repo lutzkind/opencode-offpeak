@@ -1,5 +1,24 @@
 # Decisions
 
+## 2026-11-23: OpenCode 2.4.1 validation (v0.4.4)
+
+OpenCode **2.4.1** was published at 15:57Z, after the 2.4.0 compatibility work
+had started. The declared range `>=2.0.26 <2.5.0` already admitted the patch,
+so the question was whether 2.4.1 changed a surface this plugin relies on.
+
+The `@opencode/plugin` 2.4.0 → 2.4.1 diff touches three files: the Effect and
+Promise plugin contexts add `experimental.automation.{create,list,delete}`, the
+Promise adapter wires those endpoints, and the OpenTUI peer floor returns to
+0.8.0. `model.request`, `http.request`, the experimental WebSocket hooks,
+`retry`, session events, storage, RPC, and the TUI/GUI surfaces used here keep
+their 2.4.0 signatures. No runtime code change is required.
+
+Decision: keep the range, raise the build dependency to `@opencode/plugin@2.4.1`,
+run the complete suite on the real 2.4.1 CLI/TUI, and ship the validation as
+`v0.4.4`. Rejected alternatives: silently treating 2.4.1 as covered by the
+2.4.0 release (the range allows it, but the release notes would overstate what
+was tested) and widening beyond `<2.5.0` (nothing in 2.5 exists to test).
+
 ## 2026-11-23: Re-check a refused hold after guard awaits
 
 A macOS CI run exposed a narrow race in the hold loop. `cancelHold` marks a

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.4 - 2026-11-23
+
+### Fixed
+
+- **OpenCode 2.4.1 validation.** The newest 2.4 patch was published during
+  the 2.4.0 compatibility pass. The verified range `>=2.0.26 <2.5.0` already
+  admitted it; this release records the actual validation and builds against
+  the installed `@opencode/plugin@2.4.1` SDK.
+- The 2.4.1 SDK diff is additive only: `experimental.automation.create/list/delete`
+  and the OpenTUI peer floor returning to 0.8.0. `model.request`,
+  `http.request`, the WebSocket hooks, `retry`, session events, storage, RPC,
+  and the TUI/GUI surfaces used here are unchanged.
+- Full suite on OpenCode **2.4.1**: **176 tests, 0 failures**, including the
+  real fixture and packed real-TUI checks; 2.4.0 and 2.3.2 remain covered.
+
 ## 0.4.3 - 2026-11-23
 
 ### Fixed
