@@ -1,5 +1,21 @@
 # Decisions
 
+## 2026-11-23: Re-check a refused hold after guard awaits
+
+A macOS CI run exposed a narrow race in the hold loop. `cancelHold` marks a
+parked request `refused` synchronously, but the loop could already be awaiting
+`config.read()`. If the user's protection-off wake-up arrived before that read
+settled, the loop continued into the override commit path and overwrote the
+refused state with `committed`, resurrecting a request the caller had cancelled.
+
+Decision: re-check the refused state after the in-loop config read and before
+any commit, arming the transport refusal exactly once. The initial check stays.
+This preserves the existing invariant without a second state machine, timer,
+lock, or task adoption. A deterministic test gates the in-loop read, cancels
+the hold, switches protection off, then releases the read and proves one
+consumable refusal and zero provider prompts. This is a correctness fix only;
+pricing policy, queue semantics, and storage are unchanged.
+
 ## 2026-11-23: OpenCode 2.4.0 compatibility (v0.4.3)
 
 OpenCode **2.4.0** was published on 2026-11-23T09:22Z. The live Desktop SSH

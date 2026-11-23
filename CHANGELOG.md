@@ -22,8 +22,14 @@
   actual `stage=setup` completion for `opencode-offpeak`; the runtime behavior
   is unchanged, and an early `/offpeak` typed before registration simply needs
   to be entered again. Troubleshooting documents this window.
+- **A cancelled hold can no longer be revived by a concurrent protection-off
+  wake-up.** The hold loop re-checks its refused state after awaiting config,
+  before any commit path. A cancellation that lands during that read now arms
+  exactly one transport refusal instead of committing the request. A
+  deterministic regression test holds the in-loop read open while the cancel
+  and the protection-off wake-up interleave; it fails on the old loop.
 
-Full suite: **175 tests, 0 failures**, plus the real 2.4.0 fixture and TUI
+Full suite: **176 tests, 0 failures**, plus the real 2.4.0 fixture and TUI
 checks. Desktop 2.3.0+ remains the GUI requirement.
 
 ## 0.4.2 - 2026-11-23
