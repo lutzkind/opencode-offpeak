@@ -20,7 +20,7 @@ The Desktop GUI loads from Desktop's **own** global `opencode.json(c)`, not from
 
 ```jsonc
 {
-  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.3.3"]
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.0"]
 }
 ```
 
@@ -28,7 +28,7 @@ The Desktop app must be 2.3.0 or newer. Check **Settings > Extensions > Plugins*
 
 ## Desktop shows "No session open" with a session tab open
 
-This was a v0.3.2 defect: OpenCode clears `Sessions.current()` when the route leaves the mounted session screen, and opening Settings does exactly that, so the page lost the session and hid the per-session switch. Update Desktop's plugin entry to `v0.3.3` or newer, rebuild a local-directory install, and restart Desktop. The page now follows the mounted session, the active tab, or the last routed session, and lists a **Session** selector when several sessions are open on the selected server. "No session open" appears only when no shell tab owns a session.
+This was a v0.3.2 defect: OpenCode clears `Sessions.current()` when the route leaves the mounted session screen, and opening Settings does exactly that, so the page lost the session and hid the per-session switch. Update Desktop's plugin entry to `v0.4.0` or newer, rebuild a local-directory install, and restart Desktop. The page follows the mounted session, the active tab, or the last routed session, and lists a **Chat** selector when several sessions are open on the selected server. "No session open" appears only when no shell tab owns a session.
 
 ## Desktop settings page says the server is unavailable
 
@@ -38,9 +38,9 @@ The page talks to the selected session's actual server (or the server chosen in 
 
 `UNKNOWN` means no client extension has registered that session yet; it is protected. This is expected for headless `opencode run` and for a Desktop session whose first peak request raced registration. `Shared` means both the CLI and Desktop registered the session; it stays protected regardless of either client default, because the last client to open it must not silently win. Open the session in only one client or delete it to remove the shared ownership record. There is no automatic lease expiry.
 
-## `/offpeak client` works but the session is not identified
+## `/offpeak status` shows the chat as unidentified
 
-The CLI extension registers only a routed session. Run the command from an open session, not the home screen, and ensure the TUI is connected to the same server that owns the session. If the server had not finished loading its RPC methods at startup, the next route change or command retries registration; until then the session is `UNKNOWN` and protected.
+The CLI extension registers only a routed session. `Protection for this chat` can still explicitly disable protection for an unknown chat, but the ownership line remains `unknown` until registration lands. Run the command from an open session, not the home screen, and ensure the TUI is connected to the same server that owns the session. If the server had not finished loading its RPC methods at startup, the next route change or command retries registration; until then the session is `UNKNOWN` and protected.
 
 ## Queue does not start
 
@@ -54,7 +54,7 @@ If you intentionally accept peak pricing for a queued task, turn the plugin ON a
 
 ## One session should run through peak
 
-Use `/offpeak session off` in that session. It disables off-peak protection for the current interactive session only: its verified peak-priced requests run immediately (including compaction, title, and generate work), and a request it already has waiting for off-peak wakes on the spot — no `continue` message and no re-sent prompt. Every other session and every queue task stays protected. `/offpeak session on` restores the default. There is no timer: the override persists across reloads and restarts until you change it or the session is deleted. Run the command from an open session; on the home screen it refuses because no session is focused. `UNKNOWN` models and an invalid configuration still fail closed even for an overridden session, and `OFF_PEAK`/`FLAT`/`UNTRACKED` behavior is unchanged. `/offpeak status` shows `Session protection: ON|OFF` and, while peak is active with protection off, `Requests: ALLOWED (session override)`.
+Use `/offpeak protection chat off` in that chat (the legacy `/offpeak session off` alias is equivalent). It disables off-peak protection for the current interactive chat only: its verified peak-priced requests run immediately (including compaction, title, and generate work), and a request it already has waiting for off-peak wakes on the spot — no `continue` message and no re-sent prompt. Every other chat and every queue task stays protected. `/offpeak protection chat on` removes the bypass and makes the chat follow its interface global default again. There is no timer: the override persists across reloads and restarts until you change it or the session is deleted. Run the command from an open chat; on the home screen it refuses because no session is focused. `UNKNOWN` models and an invalid configuration still fail closed even for an overridden chat, and `OFF_PEAK`/`FLAT`/`UNTRACKED` behavior is unchanged. `/offpeak status` shows `Protection for this chat` and, while peak is active with protection off, `Requests: ALLOWED (chat override)`.
 
 ## Interactive message waits at peak
 

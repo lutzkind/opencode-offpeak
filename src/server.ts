@@ -272,6 +272,9 @@ export default Plugin.define({
                   ? "Session off-peak protection disabled. This session may use verified peak-priced inference."
                   : "Session off-peak protection enabled. Peak-priced requests will wait for off-peak.",
               state: protection,
+              // The shared command layer renders the authoritative effective
+              // state and confirms the interface global was not modified.
+              client: await engine.clientStatus({ sessionID }),
             };
           }
           case "client": {
@@ -287,14 +290,17 @@ export default Plugin.define({
             const client = input.client?.trim();
             const protection = input.protection?.trim().toLowerCase();
             if (client !== "cli" && client !== "desktop") {
-              throw new Error("Usage: /offpeak client cli|desktop on|off");
+              throw new Error("Usage: /offpeak protection global on|off");
             }
             if (protection !== "on" && protection !== "off") {
-              throw new Error("Usage: /offpeak client cli|desktop on|off");
+              throw new Error("Usage: /offpeak protection global on|off");
             }
-            const status = await engine.setClientProtection(client, protection);
+            await engine.setClientProtection(client, protection);
             void engine.pruneSessionProtections().catch(() => undefined);
-            return { client: status };
+            // Return the public state of the same session, when supplied, so
+            // the writer sees the effective result instead of guessing it.
+            const sessionID = input.sessionID?.trim();
+            return { client: await engine.clientStatus(sessionID ? { sessionID } : {}) };
           }
           case "client-register": {
             const client = input.client?.trim();
@@ -355,7 +361,7 @@ export default Plugin.define({
             return { message: `Explicit 15-minute peak-price override active for ${id}.` };
           default:
             throw new Error(
-              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|session on|session off|client [cli|desktop on|off]",
+              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|protection global on|off|protection chat on|off|session on|off|client [cli|desktop on|off]",
             );
         }
       },

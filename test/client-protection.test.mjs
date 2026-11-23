@@ -74,6 +74,7 @@ async function harness(options = {}) {
   await writeFile(configPath, JSON.stringify(policy));
   const storage = options.storage ?? new MemoryStorage();
   const sessions = options.sessions ?? new FakeSessions();
+  const clock = new FixedClock(options.now ?? PEAK);
   const engine = new OffpeakEngine({
     repository: new QueueRepository(storage),
     recoveries: new RecoveryRepository(storage),
@@ -82,7 +83,7 @@ async function harness(options = {}) {
     location: "test-location",
     config: new ConfigRepository({ configPath }),
     sessions,
-    clock: new FixedClock(options.now ?? PEAK),
+    clock,
     id: () => "task-test",
   });
   await engine.start();
@@ -90,6 +91,7 @@ async function harness(options = {}) {
     root,
     storage,
     sessions,
+    clock,
     engine,
     async close() {
       await engine.dispose();
@@ -348,6 +350,58 @@ test("a held request releases when its client default becomes OFF and re-protect
     const next = guarded(h.engine, "live-session");
     await h.engine.setClientProtection("desktop", "on");
     assert.equal(await pending(next), "pending");
+  } finally {
+    await h.close();
+  }
+});
+
+test("switching global and chat protection never drops, reorders, or duplicates queued work", async () => {
+  const h = await harness();
+  try {
+    h.sessions.get = async () => ({ outcome: "succeeded" });
+    await h.engine.setEnabled(false);
+    const task = await h.engine.queue({
+      prompt: "queued across protection changes",
+      cwd: "/fixture",
+      model,
+    });
+    await h.engine.registerSessionClient("queue-session", "cli");
+    await h.engine.setSessionProtection("queue-session", "off");
+
+    // Global changes and an unrelated session override leave the queued task
+    // exactly where it was: the same ID, the same state, one record.
+    await h.engine.setClientProtection("cli", "off");
+    await h.engine.setClientProtection("desktop", "off");
+    let tasks = await h.engine.list();
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, task.id);
+    assert.equal(tasks[0].state, "QUEUED");
+
+    // At peak, even both interfaces OFF and the override cannot adopt a queue
+    // task; it waits through the existing queue path instead of running twice.
+    await h.engine.setEnabled(true);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    tasks = await h.engine.list();
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, task.id);
+    assert.equal(tasks[0].state, "WAITING_OFFPEAK");
+    assert.equal(h.sessions.prompts.length, 0);
+
+    // Off-peak wakes the same task once through the existing pump.
+    h.clock.value = Date.parse("2026-10-12T23:59:30Z");
+    await h.engine.setSessionProtection("queue-session", "on");
+    const end = Date.now() + 2000;
+    while (Date.now() < end) {
+      const current = (await h.engine.list())[0];
+      if (current?.state === "COMPLETED") break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    tasks = await h.engine.list();
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, task.id);
+    assert.equal(tasks[0].state, "COMPLETED");
+    assert.equal(h.sessions.prompts.length, 1);
+    assert.equal(h.sessions.prompts[0].text, "queued across protection changes");
   } finally {
     await h.close();
   }

@@ -445,17 +445,7 @@ export function evaluatePricing(
   }
 }
 
-export function formatInTimeZone(epochMs: number, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(epochMs);
-}
+export { formatInTimeZone } from "./format.js";
 
 /**
  * Compact hold deadline such as `17:00 Asia/Bangkok`, with a local date prefix
