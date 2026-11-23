@@ -2,14 +2,14 @@
 
 ## Current public distribution
 
-`v0.4.0` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.4.1` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1
 ```
 
-`v0.1.0` through `v0.3.3` remain available at their own tags. `v0.4.0` is the
-canonical release: it adds the shared canonical `/offpeak protection global` and
+`v0.1.0` through `v0.4.0` remain available at their own tags. `v0.4.1` is the
+canonical release: it keeps the v0.4.0 features and fixes cross-location default synchronization. v0.4.0 added the shared canonical `/offpeak protection global` and
 `/offpeak protection chat` commands, registers `/offpeak` as a native Desktop
 composer slash command through the installed 2.3.2 GUI API, exposes exactly the
 Desktop Protection and Protection for this chat controls, and shows actual

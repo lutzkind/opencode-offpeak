@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.1 - 2026-11-23
+
+### Fixed
+
+- **Global defaults stay authoritative across OpenCode locations.** OpenCode
+  can load the server plugin once per project/location in the same process.
+  Each location had its own engine with an in-memory snapshot of the shared
+  `opencode-offpeak/clients-v1` document, so a stale location could persist its
+  old defaults during session registration and revert a setting changed in
+  another location (observed live: Desktop Protection reverted to OFF after a
+  CLI session loaded in a different directory).
+- Client-default and ownership writes now read the latest stored document under
+  a process-wide lock and apply only the changed field/session; they never write
+  a whole stale snapshot. Every protection decision, status read, and client
+  status read refreshes the document first. An unreadable document still fails
+  closed: both defaults become ON, ownership is cleared, and writes are refused.
+- Added a deterministic two-engine test that starts a second location before the
+  first changes a default, proves the change is visible to the second engine's
+  very next guard, and proves a later stale registration does not overwrite the
+  newer value. Full suite: **175 tests, 0 failures**.
+
 ## 0.4.0 - 2026-11-23
 
 ### Independent protection controls

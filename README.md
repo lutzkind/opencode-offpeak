@@ -9,10 +9,10 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1
 ```
 
-This installs the released `v0.4.0` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.4.1` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -20,12 +20,12 @@ Restart OpenCode after installation. The plugin defaults to enabled, uses the cu
 
 The Desktop GUI is loaded from **Desktop's own** `opencode.json(c)`, not from the remote server's configuration and not from `cli.json`. Installing the package only on the remote OpenCode server enforces pricing there, but it does not make the settings page appear in the Desktop app. To get the native Offpeak page:
 
-1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.4.0` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
+1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.4.1` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
 2. List the same package in Desktop's global `opencode.json(c)` on the machine running Desktop:
 
    ```jsonc
    {
-     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.0"]
+     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1"]
    }
    ```
 
@@ -178,6 +178,7 @@ In Desktop chat:
 - **Identification is client-side and supported.** The server's `model.request` hook has no client identity, and this plugin never guesses from IP addresses, User-Agent strings, undocumented internals, or environment variables. The TUI extension registers its routed session through the connected server's typed RPC as soon as the session appears (and again before every `/offpeak` command); the Desktop GUI does the same with the selected session's actual `SessionRef.server.client`. Registration is idempotent and targets the server that owns the session, including a remote server.
 - **Shared sessions fail closed.** If both clients register the same session, it is stored as `ambiguous`; it remains protected even when one client's default is OFF. The last client to open the session never inherits ownership. The Desktop settings page reports the shared state. This also means a session first used in Desktop and later opened in the CLI stays shared until it is deleted; there is deliberately no heartbeat or lease that could let a stale observation expire.
 - **First-request safety.** A session that has not yet been registered is `UNKNOWN` and protected. On a brand-new Desktop draft, OpenCode does not expose a supported pre-submit hook, so the GUI cannot register the session before the draft becomes a session; if that very first request reaches verified peak pricing in the few milliseconds before registration lands, it is held (never sent unprotected) and is released immediately once the Desktop registration arrives and the Desktop default is OFF. Off-peak requests are unaffected. Headless `opencode run` sessions have no TUI/GUI extension, so they remain unknown and protected.
+- **One global document across locations.** OpenCode can load the plugin for several project directories in one server process. Writes read the latest stored client document and change only the intended field/session, so a stale location cannot revert another location's setting; each protection decision refreshes the document first. A storage read error fails closed to both defaults ON and refuses writes.
 - **Existing installations migrate safely.** Both defaults initialize to ON when no client document exists, so every previously protected session keeps exactly its old behavior. The state is a minimal versioned document (`opencode-offpeak/clients-v1`) with `defaults` and per-session ownership; it survives plugin reloads and server restarts. OpenCode's supported `session.deleted` event removes ownership, and bounded lazy cleanup reaps state only for sessions that are confidently gone.
 - **Queue tasks stay separate.** A queue-owned session never inherits a client default; `/offpeak run-now <task-id>` remains its task-scoped authorization. `/offpeak on|off` remains global automation and is not a client setting.
 - **Status output.** `/offpeak status` adds `CLI global protection`, `Desktop global protection`, `Client ownership`, `Protection for this chat`, `Session protection (explicit)`, and `Effective protection` lines, so a global default is never confused with an explicit chat override.
