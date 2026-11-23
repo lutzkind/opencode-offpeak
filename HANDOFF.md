@@ -1,5 +1,54 @@
 # Handoff — 2026-11-18
 
+## 2026-11-23 Independent protection controls, Desktop commands, and real chat names (`v0.4.0` → `v0.4.2`)
+
+**Scope.** Add interface-scoped global protection commands, a per-chat override control in CLI and Desktop, native Desktop composer slash commands, accurate Desktop chat titles/project names, and non-chat Desktop hold/resume feedback — without changing pricing policy, model selection, the queue schema, or adding a service/database/scheduler.
+
+**Preflight (verified).** The canonical checkout is `/root/opencode-offpeak`; live host is OpenCode **2.3.2** with `@opencode/plugin@2.3.2`. The installed GUI SDK supports `Command.slash` natively and `ServerRef.data.session/project` exposes canonical titles/project IDs; `Sessions.current()` still clears while Settings is open, so the v0.3.3 resolution path remains. Live server was pinned to `v0.3.1` at start. Existing `clients-v1` (independent CLI/Desktop defaults) and `session-overrides-v1` (explicit chat bypass) were reused unchanged. Work fits the approved architecture.
+
+**Implementation.**
+- `src/commands.ts` is the one `/offpeak` grammar/executor shared by TUI and Desktop. Canonical forms are `/offpeak protection global on|off` (writes only the calling surface's `cli`/`desktop` field), `/offpeak protection chat on|off` (writes/clears the actual session override), and `/offpeak status` (both globals, chat source/override, effective state, queue). Existing `/offpeak client` and `/offpeak session` forms remain aliases over the same state. `src/format.ts` holds the tiny display formatter so the GUI bundle does not import policy data.
+- `src/tui.ts` now passes `surface: "cli"` and the routed session to the shared command implementation.
+- `src/gui.tsx` registers `/offpeak` through the installed GUI SDK's `Command.slash`, passes `surface: "desktop"`, and subscribes to `rpc.opencode-offpeak.hold`/`resume` for Desktop toasts. It does not create an engine or duplicate command/protection logic.
+- `src/gui/settings.tsx` exposes exactly **Desktop Protection** and **Protection for this chat**. It shows read-only CLI Protection, real chat title/project/shortened ID, full session ID, ownership, and effective protection. The chat switch is checked when protection is effective; its description says whether the chat follows the interface/global default or is explicitly bypassed.
+- `src/gui/connection.ts` resolves titles from `server.data.session.get(id).title`, then project name/canonical directory basename, then `Untitled session`, plus a shortened ID. A session absent from the synced store is loaded once via the supported session API; renames/moves follow OpenCode's reactive store. No title database or poll.
+- `src/server.ts` now returns authoritative client status with session actions and with `client-set` (when a session is supplied), and documents the canonical protection commands in usage errors.
+- **v0.4.1:** OpenCode can load the server plugin once per project/location. Each engine had a stale in-memory copy of the shared `clients-v1` document, so a session registration in another location could revert a global default (live-observed Desktop OFF). Writes now read the latest document under a process-wide lock and apply only the changed default/session delta; every guard, `clientStatus`, and `status` refreshes first. Read failure still means both defaults ON, ownership cleared, writes refused.
+- **v0.4.2:** committed `dist/gui-experimental.cjs` (the only committed build artifact) and changed `.gitignore` so a bare git-tag install includes Desktop's GUI; CI rebuilds it and fails on drift.
+
+**Tests and CI (all local, zero paid traffic).**
+- `npm ci`, `npm run lint`, `npm run typecheck`, `npm test`, `npm pack --dry-run`: **175 tests, 0 failures** on the final merge commit.
+- New tests cover shared command parsing/output, interface-scoped global writes, per-chat on/off, status feedback, packaged-bundle command registration/slash metadata, hold/resume toasts, real/untitled/renamed titles, one-shot metadata sync, full-ID access, queue changes with waiting work, and the two-location stale-engine regression.
+- Real OpenCode 2.3.2 fixture tests remain green: protected request **0** provider requests before the boundary and exactly **1** at it; peak compaction **0** before and **1** after.
+- CI: PR **#24** run **45125019359** (ubuntu/macos pass); PR **#25** run **45153150539** (pass); PR **#26** run **45154766959** (pass).
+
+**Releases.**
+- PR **#24** merge commit **`5b19243f2b4dc05dabfbb28dd628d38647393894`**; annotated tag **v0.4.0** object `a1180ccfcf179190be661e0004f75bf2e27e45dd` → `5b19243`. Release asset `opencode-offpeak-0.4.0.tgz`, **192617 bytes**, SHA-256 **`51b03bdd2ffecf3c507db4376b78ec10df73a01539c4b1b321981eba3eebfd8f`**.
+- PR **#25** merge commit **`23a0341e1139856f31019abd4932b9252a4ded5a`**; annotated tag **v0.4.1** object `6fd2eda083e1805368e37f92473b00398ba6d2af` → `23a0341`. Release asset `opencode-offpeak-0.4.1.tgz`, **195684 bytes**, SHA-256 **`f40d3b58b2fa5b452a13d5f3090fb95c1f5c67a3bb78d74a8449fce369efc5d7`**.
+- PR **#26** merge commit **`3f0bf65920bfcc964cb5f9b8feec2e4d86419b38`**; annotated tag **v0.4.2** object `df95db17374d3fbd7d9f380bcfaf4e62c49c710c` → `3f0bf65`. Release asset `opencode-offpeak-0.4.2.tgz`, **196316 bytes**, SHA-256 **`abfe5dd200b03f299859175a709ac8de71deb9fd80e542cbdeb0aedc12ab4401`**. Committed/tarball GUI bundle SHA-256 **`94f514debf4d070ffa3bdec5a314e56c470e1fd2c0c08da38751547dd6e1ab1d`**. Both v0.4.0–v0.4.2 tarballs were reproduced byte-for-byte from two clean tag clones; GitHub asset digests match.
+
+**Deployment and live verification (final: `v0.4.2`).**
+- `/root/.config/opencode/opencode.json` pins exactly `git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2`; `opencode plugin list` reports version `3f0bf65`; `opencode reload` applied.
+- `/api/plugin`: target `#v0.4.2`, version `3f0bf659...`, `features {server:true,tui:true,gui:true}`, `state.status="active"`. The installed git-tag cache now contains `dist/gui-experimental.cjs`; the actual installed bundle was loaded with the real `@opencode/plugin/gui@2.3.2` SDK and registered one settings page plus the `/offpeak` slash command (`arguments:true`) and entries **Desktop Protection**, **CLI Protection**, **Protection for this chat**, **Chat title**, **Effective protection**.
+- Live RPC independence: CLI ON / Desktop OFF → `desktop on` gave CLI ON / Desktop ON → `cli off` gave CLI OFF / Desktop ON → `cli on` gave both ON. No command changed the other interface.
+- Live per-chat override: a temporary session was registered as CLI, `session-off` returned `source=session-override`, `protection=OFF`, effective OFF at PEAK with both globals still ON; `session-on` returned `source=client-default`, protection ON. The session was deleted through the supported API; `session-overrides-v1` is empty.
+- Live cross-location regression: a session was created in `/tmp/opencode/offpeak-live-crossloc` to boot that location's engine; Desktop was set OFF; a registration routed to that stale location preserved CLI ON / Desktop OFF; a cross-location `client` read showed Desktop OFF; Desktop was restored ON.
+- Real CLI TUI (live server, temporary session): `/offpeak status` showed `CLI global protection: ON`, `Desktop global protection: ON`, `Protection for this chat: follows the CLI global (ON)`, effective ON, queue 0/0/0; `/offpeak protection global on` showed both globals and `(not modified)` for Desktop; `/offpeak protection chat off` showed explicit OFF with both globals `(not modified)` and effective OFF; `/offpeak protection chat on` restored follow-global and effective ON. All temporary sessions were deleted; tmux servers were killed.
+- Final live status: enabled, `auto`, CLI ON/Desktop ON, **OFF_PEAK**, requests allowed, queue/waiting/interactive/recovery/failed all 0. Live `pricing`: `opencode-go/deepseek-v4.1-flash` → `OFF_PEAK`/allowed/`deepseek-opencode-go`; `opencode/deepseek-v4.1-flash-free` → `UNTRACKED`/allowed. No plugin load/error warnings in the recent log.
+
+**Desktop limitation.** No OpenCode Desktop/Electron application is installed on this host. Desktop behavior is verified through the actual installed git-tag package's `gui-experimental.cjs` (features.gui=true) with the real 2.3.2 GUI SDK, the packaged-bundle tests, and the shared RPC contract — not by driving a live Desktop window. The user's Desktop machine must list `#v0.4.2` in its own `opencode.json(c)` and run Desktop 2.3.0+. The macOS Desktop install also needs the updated local checkout/tarball; the host cannot perform that remote step.
+
+**Residual limitations (unchanged unless noted).**
+- Desktop's first prompt in a brand-new draft can race registration; the server still holds the unknown peak request and releases it when registration arrives. No supported pre-submit hook exists.
+- A session opened by both clients stays `ambiguous` and protected unless an explicit chat override is set.
+- Headless `opencode run` remains `UNKNOWN`/protected.
+- `chat on` means "follow the interface global"; it cannot force ON against a globally OFF interface. There is no explicit ON override by design.
+- The Desktop chat list covers sessions open as shell tabs; it is not a separate history browser.
+- The OpenCode version ceiling remains `>=2.0.26 <2.4.0`.
+
+**Cleanup.** Temporary verification sessions were deleted through the supported API; no test servers, tmux sessions, or fixture providers remain running. Build clones/tarballs and captured pane evidence are retained under `/tmp/opencode/release-v04*`, `/tmp/opencode/v04*-*.txt`, and `/tmp/opencode/offpeak-*` as non-production scratch.
+
+
 ## 2026-11-21 Desktop settings page keeps the current session (`v0.3.3`)
 
 **Trigger.** On OpenCode Desktop 2.3.2 (macOS), `Settings > Offpeak > Current session` always showed **"No session focused"** with a session tab open, so the v0.3.2 row **Allow peak pricing in this session** (and Ownership / Effective protection) never rendered. Client defaults, the Desktop switch, and read-only CLI protection worked.
