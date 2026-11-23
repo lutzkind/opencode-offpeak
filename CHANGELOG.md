@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.2 - 2026-11-23
+
+### Fixed
+
+- **The Desktop GUI bundle is present in a git-tag install.** The documented
+  `opencode plugin add git+...#vX.Y.Z` path installed the package without
+  `dist/` because that directory was gitignored, so Desktop's
+  `exports["./gui-experimental"]` resolved to a missing file. The built
+  `dist/gui-experimental.cjs` is now committed (and remains the only committed
+  build artifact); server/TUI continue to use the `bun` source condition. CI
+  rebuilds the bundle and fails if the committed file differs, preventing drift.
+- The release tarball still contains the same bundle; its SHA-256 matches the
+  committed file. Full suite: **175 tests, 0 failures**.
+
 ## 0.4.1 - 2026-11-23
 
 ### Fixed

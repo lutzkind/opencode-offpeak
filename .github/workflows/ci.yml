@@ -21,6 +21,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run compile
+      - run: git diff --exit-code -- dist/gui-experimental.cjs
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
