@@ -1,5 +1,53 @@
 # Handoff — 2026-11-18
 
+## 2026-11-23 OpenCode 2.4 compatibility (`v0.4.3`) and 2.4.1 validation (`v0.4.4`)
+
+**Trigger.** OpenCode **2.4.0** was published 2026-11-23T09:22Z. The live Desktop SSH server started 2.4.0 and `opencode-offpeak` v0.4.2, whose ceiling was `<2.4.0`, refused to load: the log recorded `opencode-offpeak requires OpenCode >=2.0.26 <2.4.0; this server host runs 2.4.0`, so peak-price protection was absent. OpenCode **2.4.1** was published at 15:57Z during the pass (macOS 12 SQLite fix, config-only providers, unread `/btw`, additive plugin automation hooks).
+
+**Preflight.** Canonical checkout `/root/opencode-offpeak`; live host service was 2.4.0 when the failure was confirmed, and the host CLI was still 2.3.2. The work is `IMPLEMENTATION WITHIN APPROVED ARCHITECTURE`: no policy, schema, queue, service, database, or scheduler change.
+
+**API review (published `@opencode/plugin` declarations).**
+- 2.3.2 → 2.4.0: no change to `model.request`, `http.request`, the experimental WebSocket hooks, `retry`, session events, storage, RPC, `context.app.version`, or `context.keymap.layer()`. Additions: `session.job.list`, video generation, tool metadata/codemode, OAuth revoke, GUI icons, browser handles, composer send/delivery, OpenTUI `>=0.9.4`.
+- 2.4.0 → 2.4.1: only `experimental.automation.{create,list,delete}` and the OpenTUI peer floor returning to `>=0.8.0`. No surface used by this plugin changed.
+- 2.4 restores asynchronous plugin loading. The TUI can paint before its TUI plugin registers; an unregistered session remains `UNKNOWN`/protected once the server plugin is loaded, and the TUI re-registers on the next route change or command.
+
+**Implementation.**
+- `v0.4.3`: verified range widened to `>=2.0.26 <2.5.0`; build dependency `@opencode/plugin@2.4.0`; compat matrix accepts 2.4.x and rejects 2.5.0; docs/ranges updated; release note added.
+- Real-TUI smoke test now runs with `--log-level debug` and waits for the actual `plugin operation completed ... stage=setup ... plugin=opencode-offpeak` line before typing `/offpeak`. This adapts the test to 2.4's async loading, not the runtime behavior.
+- A macOS CI failure exposed a real hold-loop race: `cancelHold` could mark a hold refused while the loop was awaiting `config.read()`, and a concurrent protection-off wake-up then overwrote `refused` with `committed`, resurrecting a cancelled request. The loop now re-checks the refused state after that read and before any commit, arming exactly one transport refusal. A deterministic gated-read regression test fails on the old loop.
+- `v0.4.4`: build dependency `@opencode/plugin@2.4.1`; docs and release notes record real 2.4.1 validation. Runtime code is identical to v0.4.3.
+
+**Tests and CI (zero paid traffic).**
+- On OpenCode **2.4.1** (host CLI): `npm run lint`, `npm run typecheck`, `npm pack --dry-run`, and `npm test` — **176 tests, 0 failures**, including the real fixture and packed real-TUI checks.
+- On OpenCode **2.4.0** (Desktop SSH binary): full suite **176/176**.
+- On OpenCode **2.3.2**: full suite **176/176** after the race fix (a first pre-fix run hit the known load-sensitive engine test; rerun passed).
+- PR **#27** (`fix/opencode-2.4.0-compat`) CI run **45219367942**: Ubuntu and macOS pass.
+- PR **#28** (`fix/opencode-2.4.1-compat`) CI run **45223278419**: Ubuntu and macOS pass.
+
+**Releases.**
+- **v0.4.3** tag object `b3e29dfd0acb8f0510c6ade60a243d26c17608fa` → commit `c74afcae18dabe9934411bcfa21496ed16890631`; asset `opencode-offpeak-0.4.3.tgz`, **199569 bytes**, SHA-256 `be044597c80bd0a5ee62d6cf810299046a5286a3710d96c62f9a2663cffca71d`; reproduced byte-for-byte from two clean tag archives.
+- **v0.4.4** tag object `79806025b7da07a3376ed91535e18af236213970` → commit `aacceef1d134fc419e26a7d7c36b4b90c1b9d0cb`; asset `opencode-offpeak-0.4.4.tgz`, **200480 bytes**, SHA-256 `d2e47d9694bcc8b3647f27e8d0f2ac92f1da7251a913bf1eecabe0c9e89b71ab`; reproduced byte-for-byte from two clean tag archives.
+- GitHub asset digests match both tarballs. Exact-tag install `git+.../opencode-offpeak.git#v0.4.4` was verified in an isolated 2.4.0 TUI: server, TUI, and `dist/gui-experimental.cjs` present, `/offpeak status` OK.
+
+**Deployment and live verification (final).**
+- Host CLI upgraded in place from **2.3.2** to **2.4.1** with `opencode upgrade 2.4.1`; the wrapper `/root/cli-persistence/bin/opencode` is unchanged.
+- `/root/.config/opencode/opencode.json` now pins exactly `git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.4`; backups `opencode.json.bak-*-pre-v0.4.3` and `-pre-v0.4.4` were created.
+- A server restart at 17:05:06Z brought the live service to OpenCode **2.4.1** (`/root/.opencode/bin/opencode serve --service`, PID 1147130). Logs show v0.4.4 loading with no failure; `opencode plugin list` reports version `aacceef`.
+- Live RPC `status` (opencode-go/deepseek-v4.1-flash): enabled, auto, CLI ON/Desktop ON, **OFF_PEAK**, requests allowed, next transition `1795482000000`, queue/waiting/failed 0.
+- Live TUI on 2.4.1: `/offpeak status` rendered `Plugin: ENABLED`, `Pricing: OFF_PEAK`, both globals ON, `Requests: ALLOWED`, queue 0/0/0.
+- No `opencode-offpeak` load warning after the 17:05 restart. The 14 historical guard failures in the log all predate v0.4.3.
+
+**Residual limitations.**
+- The Desktop application's own GUI bundle must list `#v0.4.4` in its local `opencode.json(c)`; this host cannot update the remote macOS install. Desktop 2.3.0+ remains required.
+- No OpenCode Desktop/Electron window is available on this host; GUI behavior is verified through the packaged bundle and the installed 2.4.1 GUI SDK.
+- On 2.4, `/offpeak` typed in the first seconds after a TUI launch can precede TUI plugin registration; retype after reconciliation. The server enforcement is unaffected.
+- The version ceiling remains `>=2.0.26 <2.5.0`; 2.5.0 is rejected until tested.
+- `opencode-free-first` remains pinned at v0.4.0 and is untouched; no dependency or import was added.
+
+**Cleanup.** Temporary verification/config directories under `/tmp/opencode/offpeak-*`, `/tmp/opencode/release-v043*`, `/tmp/opencode/release-v044*`, and `/tmp/opencode/sdk-diff` are non-production scratch. All test tmux sessions were killed; no test server remains.
+
+**Shared handoff.** `/root/mcp-shared/chatgpt/opencode-offpeak/opencode-2.4-compat-2026-11-23/HANDOFF.md` (manifest, verification summary, and mount checksum in that directory).
+
 ## 2026-11-23 Independent protection controls, Desktop commands, and real chat names (`v0.4.0` → `v0.4.2`)
 
 **Scope.** Add interface-scoped global protection commands, a per-chat override control in CLI and Desktop, native Desktop composer slash commands, accurate Desktop chat titles/project names, and non-chat Desktop hold/resume feedback — without changing pricing policy, model selection, the queue schema, or adding a service/database/scheduler.
