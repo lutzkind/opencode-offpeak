@@ -14,7 +14,7 @@ test("package root, TUI, and Desktop GUI subpaths match the v2 plugin layout", a
   assert.equal(manifest.exports["./tui"].import, "./dist/tui.js");
   assert.ok(manifest.files.includes("index.ts"));
   assert.ok(manifest.files.includes("tui.ts"));
-  assert.equal(manifest.dependencies["@opencode/plugin"], "2.4.0");
+  assert.equal(manifest.dependencies["@opencode/plugin"], "2.4.1");
   assert.equal(manifest.exports["./gui-experimental"], "./dist/gui-experimental.cjs");
   assert.ok(manifest.files.includes("dist"));
   // The GUI bundle is committed because the git-tag installer does not run a

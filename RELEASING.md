@@ -2,17 +2,19 @@
 
 ## Current public distribution
 
-`v0.4.3` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.4.4` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.3
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.4
 ```
 
-`v0.1.0` through `v0.4.2` remain available at their own tags. `v0.4.3` is the
-canonical release: it keeps every v0.4.x feature and widens the verified
-server/TUI range to `>=2.0.26 <2.5.0` after validating OpenCode 2.4.0. The
-Desktop GUI entrypoint is built and validated against the installed 2.4.0 GUI
-API. It keeps the shared canonical `/offpeak protection global` and
+`v0.1.0` through `v0.4.3` remain available at their own tags. `v0.4.4` is the
+canonical release: it keeps every v0.4.x feature and records the verified
+server/TUI range `>=2.0.26 <2.5.0` against both OpenCode 2.4.0 and the current
+2.4.1. The 2.4.1 SDK adds only plugin automation hooks and lowers the OpenTUI
+peer floor; every surface this package uses is unchanged. The Desktop GUI
+entrypoint is built and validated against the installed 2.4.1 GUI API. It
+keeps the shared canonical `/offpeak protection global` and
 `/offpeak protection chat` commands, the native Desktop composer slash command,
 the two independent persistent client defaults, the explicit
 `session-overrides-v1` chat override, background-compaction coverage, the
@@ -21,7 +23,7 @@ and the committed `dist/gui-experimental.cjs` bundle for bare git-tag installs.
 
 Desktop users must also list the same tag in Desktop's own
 `opencode.json(c)`; installing it only on the remote server enforces pricing
-there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer; this release validates its slash command and title APIs against 2.4.0. The validation covers the real
+there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer; this release validates its slash command and title APIs against 2.4.1. The validation covers the real
 packed-plugin TUI load and `/offpeak status` on both hosts, the packaged
 Desktop GUI bundle smoke test, the full deterministic suite, the
 zero-paid-traffic CLI/Desktop peak fixture run and real-TUI client test, and

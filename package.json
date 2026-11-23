@@ -1,6 +1,6 @@
 {
   "name": "opencode-offpeak",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Queue OpenCode agent tasks, guard peak pricing, and configure independent CLI and Desktop protection.",
   "author": "Lutz Kind",
   "license": "MIT",
@@ -85,7 +85,7 @@
   },
   "homepage": "https://github.com/lutzkind/opencode-offpeak#readme",
   "dependencies": {
-    "@opencode/plugin": "2.4.0"
+    "@opencode/plugin": "2.4.1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",

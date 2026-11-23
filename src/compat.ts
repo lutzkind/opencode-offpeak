@@ -23,8 +23,10 @@
  * declarations, and composer delivery modes; the only TUI context addition
  * is `job.list`, the model and transport request hooks are unchanged, and
  * this plugin registers no renderer affected by the OpenTUI 0.9.4 change.
- * All four lines are covered by the compatibility, packed-install, and
- * real-TUI suites.
+ * OpenCode 2.4.1 adds plugin automation create/list/delete hooks and lowers
+ * the OpenTUI peer floor again; neither is used here, and every surface this
+ * plugin calls keeps its 2.4.0 signature. All four lines are covered by the
+ * compatibility, packed-install, and real-TUI suites.
  * Unsupported hosts must fail with this explicit compatibility error instead
  * of the confusing runtime failure.
  */
