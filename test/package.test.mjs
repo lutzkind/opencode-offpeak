@@ -17,6 +17,9 @@ test("package root, TUI, and Desktop GUI subpaths match the v2 plugin layout", a
   assert.equal(manifest.dependencies["@opencode/plugin"], "2.3.2");
   assert.equal(manifest.exports["./gui-experimental"], "./dist/gui-experimental.cjs");
   assert.ok(manifest.files.includes("dist"));
+  // The GUI bundle is committed because the git-tag installer does not run a
+  // build; a bare tag install must still resolve Desktop's ./gui-experimental.
+  await access(path.join(root, "dist", "gui-experimental.cjs"));
   assert.match(await readFile(path.join(root, "index.ts"), "utf8"), /src\/server\.ts/);
   assert.match(await readFile(path.join(root, "tui.ts"), "utf8"), /src\/tui\.ts/);
 

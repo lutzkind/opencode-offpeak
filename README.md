@@ -9,10 +9,10 @@ Queue OpenCode agent tasks, block paid model requests during expensive pricing w
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2
 ```
 
-This installs the released `v0.4.1` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
+This installs the released `v0.4.2` directly from its GitHub tag using [OpenCode v2's supported npm-compatible Git package syntax](https://opencode.ai/v2/docs/plugins). The release includes server, TUI, and Desktop GUI entrypoints. npm publication is optional future distribution; it is not required to install or use this release.
 
 Restart OpenCode after installation. The plugin defaults to enabled, uses the current system timezone for display, and enforces the built-in DeepSeek/OpenCode Go policy without extra setup.
 
@@ -20,12 +20,12 @@ Restart OpenCode after installation. The plugin defaults to enabled, uses the cu
 
 The Desktop GUI is loaded from **Desktop's own** `opencode.json(c)`, not from the remote server's configuration and not from `cli.json`. Installing the package only on the remote OpenCode server enforces pricing there, but it does not make the settings page appear in the Desktop app. To get the native Offpeak page:
 
-1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.4.1` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
+1. Keep the server package installed on the OpenCode server that runs your sessions (the `opencode plugin add ...#v0.4.2` command above). That server remains the single authority for pricing, defaults, ownership, and enforcement.
 2. List the same package in Desktop's global `opencode.json(c)` on the machine running Desktop:
 
    ```jsonc
    {
-     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1"]
+     "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2"]
    }
    ```
 

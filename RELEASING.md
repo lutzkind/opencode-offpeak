@@ -2,14 +2,14 @@
 
 ## Current public distribution
 
-`v0.4.1` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.4.2` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2
 ```
 
-`v0.1.0` through `v0.4.0` remain available at their own tags. `v0.4.1` is the
-canonical release: it keeps the v0.4.0 features and fixes cross-location default synchronization. v0.4.0 added the shared canonical `/offpeak protection global` and
+`v0.1.0` through `v0.4.1` remain available at their own tags. `v0.4.2` is the
+canonical release: it keeps the v0.4.0 features, the v0.4.1 cross-location fix, and makes the committed Desktop GUI bundle available through a bare git-tag install. v0.4.0 added the shared canonical `/offpeak protection global` and
 `/offpeak protection chat` commands, registers `/offpeak` as a native Desktop
 composer slash command through the installed 2.3.2 GUI API, exposes exactly the
 Desktop Protection and Protection for this chat controls, and shows actual
@@ -63,7 +63,8 @@ For a new release:
 
 1. Update `package.json` and `CHANGELOG.md` together.
 2. Run `npm ci`, `npm run lint`, `npm run typecheck`, `npm test` (which builds `dist/gui-experimental.cjs`), and `npm pack --dry-run`.
-3. Merge the reviewed change to `main` and wait for application and repository-standard CI.
-4. Create a version tag matching `package.json` and publish its GitHub release with notes and the reviewed tarball.
-5. Verify the release tag, asset digest, installation through `opencode plugin add`, and `/offpeak status` in a clean OpenCode v2 configuration.
-6. If npm distribution has deliberately been bootstrapped, verify the trusted OIDC workflow and npm registry readback separately.
+3. Rebuild `dist/gui-experimental.cjs`, verify `git diff --exit-code -- dist/gui-experimental.cjs` after `npm run compile`, then commit the changed bundle with the source; CI enforces this.
+4. Merge the reviewed change to `main` and wait for application and repository-standard CI.
+5. Create a version tag matching `package.json` and publish its GitHub release with notes and the reviewed tarball.
+6. Verify the release tag, asset digest, installation through `opencode plugin add`, and `/offpeak status` in a clean OpenCode v2 configuration. For Desktop, verify `dist/gui-experimental.cjs` is present in the installed tag too.
+7. If npm distribution has deliberately been bootstrapped, verify the trusted OIDC workflow and npm registry readback separately.

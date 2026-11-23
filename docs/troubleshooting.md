@@ -20,7 +20,7 @@ The Desktop GUI loads from Desktop's **own** global `opencode.json(c)`, not from
 
 ```jsonc
 {
-  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.1"]
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2"]
 }
 ```
 
@@ -28,7 +28,7 @@ The Desktop app must be 2.3.0 or newer. Check **Settings > Extensions > Plugins*
 
 ## Desktop shows "No session open" with a session tab open
 
-This was a v0.3.2 defect: OpenCode clears `Sessions.current()` when the route leaves the mounted session screen, and opening Settings does exactly that, so the page lost the session and hid the per-session switch. Update Desktop's plugin entry to `v0.4.1` or newer, rebuild a local-directory install, and restart Desktop. The page follows the mounted session, the active tab, or the last routed session, and lists a **Chat** selector when several sessions are open on the selected server. "No session open" appears only when no shell tab owns a session.
+This was a v0.3.2 defect: OpenCode clears `Sessions.current()` when the route leaves the mounted session screen, and opening Settings does exactly that, so the page lost the session and hid the per-session switch. Update Desktop's plugin entry to `v0.4.2` or newer, rebuild a local-directory install, and restart Desktop. The page follows the mounted session, the active tab, or the last routed session, and lists a **Chat** selector when several sessions are open on the selected server. "No session open" appears only when no shell tab owns a session.
 
 ## Desktop settings page says the server is unavailable
 
