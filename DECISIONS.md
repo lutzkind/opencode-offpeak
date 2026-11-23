@@ -1,5 +1,11 @@
 # Decisions
 
+## 2026-11-23: One global client document across per-location plugin engines
+
+Live verification showed Desktop Protection reverting to OFF after CLI sessions loaded in a different directory. OpenCode can load the server plugin once per project/location in the same process; each engine had its own in-memory snapshot of the shared `clients-v1` document. A stale location then persisted its old defaults while registering a session.
+
+Decision: keep one global document and make every writer a read-merge-write under a process-wide mutex, applying only the changed default field or one session ownership entry. Every protection decision, `clientStatus`, and `status` refreshes the stored document before evaluating authorization. A failed read resets to the safe ON defaults, clears ownership, and refuses writes; it never infers a bypass. Rejected alternatives: a second service or database (violates the one-package boundary), a heartbeat/lease (cannot guarantee correctness), and per-location documents (the settings are explicitly global). This changes no storage schema and no pricing policy.
+
 ## 2026-11-23: Interface-scoped protection commands, native Desktop slash commands, and canonical chat titles
 
 The v0.3.x client defaults already persisted independently, but the command names (`client`, `session`) did not express which level the user was changing, and the Desktop page exposed the override as an inverted "allow peak" switch. The requested model is two controls per interface: a global default and a chat-level bypass. The implementation keeps the existing `clients-v1` and `session-overrides-v1` documents and adds no database, queue, scheduler, service, or policy engine.

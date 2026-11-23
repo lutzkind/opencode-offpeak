@@ -273,6 +273,36 @@ test("existing installations migrate with both defaults ON and existing override
   }
 });
 
+test("independent defaults survive a second location's stale engine", async () => {
+  const storage = new MemoryStorage();
+  const first = await harness({ storage });
+  const second = await harness({ storage });
+  try {
+    // `second` loaded both defaults ON before `first` changed Desktop.
+    await first.engine.setClientProtection("desktop", "off");
+    await second.engine.registerSessionClient("desktop-session", "desktop");
+    let document = storage.values.get(CLIENT_SETTINGS_STORAGE_KEY);
+    assert.deepEqual(document.defaults, { cli: "on", desktop: "off" });
+    assert.equal(await guarded(second.engine, "desktop-session"), "allowed");
+
+    // A global change in one location is visible to the other location's very
+    // next request, without a reload or a second shared service.
+    await first.engine.setClientProtection("desktop", "on");
+    assert.equal(await pending(guarded(second.engine, "desktop-session")), "pending");
+
+    // A stale write from the second location preserves the first location's
+    // newer Desktop value.
+    await second.engine.setClientProtection("cli", "off");
+    document = storage.values.get(CLIENT_SETTINGS_STORAGE_KEY);
+    assert.deepEqual(document.defaults, { cli: "off", desktop: "on" });
+    const status = await first.engine.clientStatus();
+    assert.deepEqual(status.defaults, { cli: "OFF", desktop: "ON" });
+  } finally {
+    await first.close();
+    await second.close();
+  }
+});
+
 test("defaults and ownership survive a plugin reload and a server restart", async () => {
   const storage = new MemoryStorage();
   const first = await harness({ storage });

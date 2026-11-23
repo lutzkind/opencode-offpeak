@@ -214,6 +214,16 @@ const TITLE_RECOVERY_ORIGIN = "pending-title" as const;
 /** The semantic "this session still needs its held compaction" marker. */
 const COMPACTION_RECOVERY_ORIGIN = "pending-compaction" as const;
 
+/**
+ * OpenCode can load one plugin setup per location/directory in the same server
+ * process. Every location gets its own engine, but the client defaults and
+ * session ownership are one global document. This process-wide lock plus the
+ * read-merge-write below keeps a stale location from overwriting another
+ * location's newer setting (for example, Desktop Protection reverting when a
+ * CLI session registers in a different project).
+ */
+const CLIENT_SETTINGS_WRITE_LOCK = new Mutex();
+
 export interface RetryFailureInput {
   sessionID: string;
   providerID: string;
@@ -562,6 +572,7 @@ export class OffpeakEngine {
    * protection. Read-only: it never creates or changes ownership.
    */
   async clientStatus(current?: { sessionID?: string }): Promise<ClientStatus> {
+    await this.#refreshClientSettings();
     const sessionID = current?.sessionID?.trim();
     const task = sessionID ? await this.#taskForSession(sessionID) : undefined;
     const session =
@@ -590,12 +601,12 @@ export class OffpeakEngine {
     if (protection !== "on" && protection !== "off") {
       throw new Error("Client protection must be on or off.");
     }
-    const next: ClientDefaults = { ...this.#clientDefaults, [client]: protection };
-    if (next.cli === this.#clientDefaults.cli && next.desktop === this.#clientDefaults.desktop) {
-      return this.clientStatus();
-    }
-    await this.#persistClients({ defaults: next });
-    this.#clientDefaults = next;
+    const result = await this.#mutateClients((document) => {
+      if (document.defaults[client] === protection) return false;
+      document.defaults = { ...document.defaults, [client]: protection };
+      return true;
+    });
+    if (!result.changed) return this.clientStatus();
     // A changed default must take effect for existing sessions immediately:
     // wake held requests and recovery delivery through the same signal used by
     // every other configuration change. No timer and no polling are added.
@@ -615,19 +626,24 @@ export class OffpeakEngine {
     if (!id) throw new Error("A session ID is required for client registration.");
     this.#assertClient(client);
     this.#assertClientSettingsWritable();
-    const existing = this.#clientSessions.get(id);
-    if (existing?.clients.includes(client)) return this.clientStatus({ sessionID: id });
-    const clients: OffpeakClient[] = [...(existing?.clients ?? []), client];
-    const ownership: SessionClientOwnership = {
-      clients,
-      ambiguous: clients.length > 1,
-      updatedAt: new Date(this.#clock.now()).toISOString(),
-    };
-    await this.#persistClients({
-      sessions: new Map([...this.#clientSessions, [id, ownership]]),
+    let ownership: SessionClientOwnership | undefined;
+    const result = await this.#mutateClients((document) => {
+      const existing = document.sessions[id];
+      if (existing?.clients.includes(client)) {
+        ownership = existing;
+        return false;
+      }
+      const clients: OffpeakClient[] = [...(existing?.clients ?? []), client];
+      ownership = {
+        clients,
+        ambiguous: clients.length > 1,
+        updatedAt: new Date(this.#clock.now()).toISOString(),
+      };
+      document.sessions[id] = ownership;
+      return true;
     });
-    this.#clientSessions.set(id, ownership);
-    if (ownership.ambiguous) {
+    if (!result.changed) return this.clientStatus({ sessionID: id });
+    if (ownership?.ambiguous) {
       // A session opened by both clients must not inherit the client that
       // happened to register last. Keep it protected and wake any hold so it
       // re-evaluates under the ambiguous state.
@@ -649,12 +665,15 @@ export class OffpeakEngine {
    */
   async forgetSession(sessionID: string): Promise<void> {
     const overrideRemoved = this.#sessionProtections.delete(sessionID);
-    const ownershipRemoved = this.#clientSessions.delete(sessionID);
-    if (!overrideRemoved && !ownershipRemoved) return;
-    await Promise.all([
-      overrideRemoved ? this.#persistSessionProtections() : Promise.resolve(),
-      ownershipRemoved ? this.#persistClients({}) : Promise.resolve(),
-    ]);
+    const ownership = this.#clientSettingsLoaded
+      ? await this.#mutateClients((document) => {
+          if (!(sessionID in document.sessions)) return false;
+          delete document.sessions[sessionID];
+          return true;
+        })
+      : { changed: false };
+    if (!overrideRemoved && !ownership.changed) return;
+    if (overrideRemoved) await this.#persistSessionProtections();
   }
 
   /**
@@ -665,7 +684,7 @@ export class OffpeakEngine {
   async pruneSessionProtections(): Promise<void> {
     if (this.#sessionProtections.size === 0 && this.#clientSessions.size === 0) return;
     let overridesChanged = false;
-    let ownershipChanged = false;
+    const reaped = new Set<string>();
     for (const sessionID of [
       ...new Set([...this.#sessionProtections.keys(), ...this.#clientSessions.keys()]),
     ]) {
@@ -675,14 +694,23 @@ export class OffpeakEngine {
         // Only a confident not-found may reap state; a transient error means
         // the session may still exist and its state must be kept.
         if (!isSessionNotFound(error)) continue;
+        reaped.add(sessionID);
         if (this.#sessionProtections.delete(sessionID)) overridesChanged = true;
-        if (this.#clientSessions.delete(sessionID)) ownershipChanged = true;
       }
     }
-    await Promise.all([
-      overridesChanged ? this.#persistSessionProtections() : Promise.resolve(),
-      ownershipChanged ? this.#persistClients({}) : Promise.resolve(),
-    ]);
+    if (reaped.size > 0 && this.#clientSettingsLoaded) {
+      await this.#mutateClients((document) => {
+        let changed = false;
+        for (const sessionID of reaped) {
+          if (sessionID in document.sessions) {
+            delete document.sessions[sessionID];
+            changed = true;
+          }
+        }
+        return changed;
+      });
+    }
+    if (overridesChanged) await this.#persistSessionProtections();
   }
 
   async queue(input: { prompt: string; cwd: string; model: TaskModel }): Promise<OffpeakTask> {
@@ -840,6 +868,7 @@ export class OffpeakEngine {
     modelID?: string;
     sessionID?: string;
   }): Promise<EngineStatus> {
+    await this.#refreshClientSettings();
     if (current?.sessionID !== undefined) await this.#pruneSessionOverride(current.sessionID);
     const settings = await this.#config.read();
     const tasks = await this.list();
@@ -991,6 +1020,10 @@ export class OffpeakEngine {
     input: GuardInput,
     deferralOrigin: RecoveryOrigin | undefined,
   ): Promise<void> {
+    // Another OpenCode location may have changed a global default. Re-read it
+    // before the authorization decision; an unreadable document falls back to
+    // protected, never to an inferred bypass.
+    await this.#refreshClientSettings();
     const task = await this.#taskForSession(input.sessionID);
     const first = await this.#config.read();
     if (!first.config)
@@ -1523,14 +1556,7 @@ export class OffpeakEngine {
     await this.#lock.run(() => repo.save(document));
   }
 
-  async #loadClientSettings(): Promise<void> {
-    const repo = this.#clientsRepo;
-    if (!repo) {
-      this.#clientSettingsLoaded = true;
-      this.#clientSettingsError = undefined;
-      return;
-    }
-    const document = await repo.load();
+  #applyClientDocument(document: ClientsDocument): void {
     this.#clientDefaults = { ...document.defaults };
     this.#clientSessions.clear();
     for (const [sessionID, ownership] of Object.entries(document.sessions)) {
@@ -1540,33 +1566,14 @@ export class OffpeakEngine {
         updatedAt: ownership.updatedAt,
       });
     }
-    this.#clientSettingsLoaded = true;
-    this.#clientSettingsError = undefined;
   }
 
-  /**
-   * Persists the full minimal document, replacing only the part the caller
-   * changed. The write happens before the in-memory value changes, so a
-   * failed storage write can never leave this process authorizing peak
-   * inference that a restart would forget.
-   */
-  async #persistClients(update: {
-    defaults?: ClientDefaults;
-    sessions?: Map<string, SessionClientOwnership>;
-  }): Promise<void> {
-    if (!this.#clientSettingsLoaded) return;
-    const repo = this.#clientsRepo;
-    const defaults = update.defaults ?? this.#clientDefaults;
-    const sessions = update.sessions ?? this.#clientSessions;
-    if (!repo) {
-      this.#clientSettingsError = undefined;
-      return;
-    }
-    const document: ClientsDocument = {
+  #clientDocument(): ClientsDocument {
+    return {
       schemaVersion: 1,
-      defaults: { ...defaults },
+      defaults: { ...this.#clientDefaults },
       sessions: Object.fromEntries(
-        [...sessions.entries()].map(([sessionID, ownership]) => [
+        [...this.#clientSessions.entries()].map(([sessionID, ownership]) => [
           sessionID,
           {
             clients: [...ownership.clients],
@@ -1576,8 +1583,85 @@ export class OffpeakEngine {
         ]),
       ),
     };
-    await this.#lock.run(() => repo.save(document));
+  }
+
+  async #loadClientSettings(): Promise<void> {
+    const repo = this.#clientsRepo;
+    if (!repo) {
+      this.#clientSettingsLoaded = true;
+      this.#clientSettingsError = undefined;
+      return;
+    }
+    this.#applyClientDocument(await repo.load());
+    this.#clientSettingsLoaded = true;
     this.#clientSettingsError = undefined;
+  }
+
+  /**
+   * Re-reads the global client document before a protection decision. Each
+   * OpenCode location has its own engine, so a setting changed through another
+   * location must be visible to this one's guard immediately. A failed read is
+   * fail-closed: both defaults become ON, ownership is cleared, and writes stay
+   * refused until the storage becomes readable again.
+   */
+  async #refreshClientSettings(): Promise<void> {
+    const repo = this.#clientsRepo;
+    if (!repo) return;
+    try {
+      this.#applyClientDocument(await repo.load());
+      this.#clientSettingsLoaded = true;
+      this.#clientSettingsError = undefined;
+    } catch (error) {
+      this.#clientDefaults = { cli: "on", desktop: "on" };
+      this.#clientSessions.clear();
+      this.#clientSettingsLoaded = false;
+      this.#clientSettingsError =
+        error instanceof Error ? error.message : "Stored client settings are unavailable.";
+    }
+  }
+
+  /**
+   * Applies one delta to the latest stored document under a process-wide lock.
+   * The caller never writes a whole stale snapshot: another location's newer
+   * defaults or session ownership are preserved. The write completes before
+   * this engine's memory changes, so a failed write cannot leave this process
+   * authorizing peak inference that a restart would forget.
+   */
+  async #mutateClients(
+    mutate: (document: ClientsDocument) => boolean,
+  ): Promise<{ document: ClientsDocument; changed: boolean }> {
+    if (!this.#clientSettingsLoaded) {
+      throw new Error(
+        this.#clientSettingsError ??
+          "Stored offpeak client settings are unavailable; refusing to change protection.",
+      );
+    }
+    const repo = this.#clientsRepo;
+    if (!repo) {
+      const document = this.#clientDocument();
+      const changed = mutate(document);
+      this.#applyClientDocument(document);
+      this.#clientSettingsError = undefined;
+      return { document, changed };
+    }
+    return CLIENT_SETTINGS_WRITE_LOCK.run(async () => {
+      let document: ClientsDocument;
+      try {
+        document = await repo.load();
+      } catch (error) {
+        this.#clientDefaults = { cli: "on", desktop: "on" };
+        this.#clientSessions.clear();
+        this.#clientSettingsLoaded = false;
+        this.#clientSettingsError =
+          error instanceof Error ? error.message : "Stored client settings are unavailable.";
+        throw error;
+      }
+      const changed = mutate(document);
+      if (changed) await repo.save(document);
+      this.#applyClientDocument(document);
+      this.#clientSettingsError = undefined;
+      return { document, changed };
+    });
   }
 
   #assertClientSettingsWritable(): void {
