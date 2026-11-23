@@ -2,7 +2,9 @@
 
 ## `/offpeak` is not recognized
 
-Confirm the installed CLI is within `>=2.0.26 <2.4.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.2.2`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+Confirm the installed CLI is within `>=2.0.26 <2.5.0`, install with `opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.3`, then restart OpenCode. Check `opencode plugin list` and the OpenCode server logs. The server entrypoint provides RPC while the TUI entrypoint registers the slash command.
+
+OpenCode 2.4 loads plugins asynchronously again, so a TUI opened moments ago can paint the prompt before its plugins have registered. If `/offpeak` is not recognized in the first seconds after launch, wait for plugin reconciliation and type it again; no restart is needed.
 
 ## `opencode-offpeak requires OpenCode ...` after an OpenCode upgrade
 
@@ -20,7 +22,7 @@ The Desktop GUI loads from Desktop's **own** global `opencode.json(c)`, not from
 
 ```jsonc
 {
-  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2"]
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.3"]
 }
 ```
 
@@ -28,7 +30,7 @@ The Desktop app must be 2.3.0 or newer. Check **Settings > Extensions > Plugins*
 
 ## Desktop shows "No session open" with a session tab open
 
-This was a v0.3.2 defect: OpenCode clears `Sessions.current()` when the route leaves the mounted session screen, and opening Settings does exactly that, so the page lost the session and hid the per-session switch. Update Desktop's plugin entry to `v0.4.2` or newer, rebuild a local-directory install, and restart Desktop. The page follows the mounted session, the active tab, or the last routed session, and lists a **Chat** selector when several sessions are open on the selected server. "No session open" appears only when no shell tab owns a session.
+This was a v0.3.2 defect: OpenCode clears `Sessions.current()` when the route leaves the mounted session screen, and opening Settings does exactly that, so the page lost the session and hid the per-session switch. Update Desktop's plugin entry to `v0.4.3` or newer, rebuild a local-directory install, and restart Desktop. The page follows the mounted session, the active tab, or the last routed session, and lists a **Chat** selector when several sessions are open on the selected server. "No session open" appears only when no shell tab owns a session.
 
 ## Desktop settings page says the server is unavailable
 
@@ -60,7 +62,7 @@ Use `/offpeak protection chat off` in that chat (the legacy `/offpeak session of
 
 In `auto` mode, a supported interactive request sent during a peak window is deferred at OpenCode's pre-model hook — before any provider attempt (and its response-header timeout) starts — instead of being discarded or timing out, and the same session proceeds automatically when off-peak returns; no second message is needed. `/offpeak status` shows it under `Interactive` while it waits. In `queue` or `guard` mode, and while the plugin is OFF, interactive peak requests are blocked immediately by the transport guard. If a deferred request fails closed because the plugin or server shut down, resend it after the server is back.
 
-While the request is held, the TUI keeps its normal animated "working" indicator even though nothing has been sent to the provider. OpenCode 2.0.26–2.3.2 reports a session as either `idle` or `running` and exposes no "waiting" state to plugins (the hold happens inside the request hook, before any provider attempt), so the indicator cannot be switched off without ending the turn; the hold toast (transient, about 15 seconds) and `/offpeak status` (persistent) are the authoritative waiting signals. The indicator stops when the execution settles: at the off-peak release it flows straight into the real request, and after a user cancel, a service shutdown/reload, or OpenCode's 60-minute inactivity sweep the session goes idle — except after a user cancel, the persisted deferral continues the same session at the next allowed window.
+While the request is held, the TUI keeps its normal animated "working" indicator even though nothing has been sent to the provider. OpenCode 2.0.26–2.4.0 reports a session as either `idle` or `running` and exposes no "waiting" state to plugins (the hold happens inside the request hook, before any provider attempt), so the indicator cannot be switched off without ending the turn; the hold toast (transient, about 15 seconds) and `/offpeak status` (persistent) are the authoritative waiting signals. The indicator stops when the execution settles: at the off-peak release it flows straight into the real request, and after a user cancel, a service shutdown/reload, or OpenCode's 60-minute inactivity sweep the session goes idle — except after a user cancel, the persisted deferral continues the same session at the next allowed window.
 
 ## Manual compaction during peak
 

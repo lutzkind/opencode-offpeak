@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.3 - 2026-11-23
+
+### Fixed
+
+- **OpenCode 2.4.0 hosts load the plugin again.** OpenCode 2.4.0 was released
+  on 2026-11-23 and the `>=2.0.26 <2.4.0` guard rejected it at startup, so the
+  Desktop 2.4.0 server unloaded `opencode-offpeak` entirely. The verified range
+  is now `>=2.0.26 <2.5.0`, validated against the real **2.4.0** CLI/TUI and
+  the installed `@opencode/plugin@2.4.0` SDK.
+- The 2.4.0 SDK keeps `model.request`, `http.request`, the experimental
+  WebSocket hooks, `retry`, session events, storage, RPC, and
+  `context.keymap.layer()` unchanged. Its additions are background jobs
+  (`job.list`), video generation, automations, opt-in GUI icon declarations,
+  and composer delivery modes; the plugin uses none of the changed renderer
+  surfaces, so no runtime code change was required.
+- The build dependency is raised to `@opencode/plugin@2.4.0`; the package
+  builds, typechecks, and passes the full suite against that SDK.
+- OpenCode 2.4 restores asynchronous plugin loading, so the TUI can paint
+  before its TUI plugin registers. The real-TUI smoke test now waits for the
+  actual `stage=setup` completion for `opencode-offpeak`; the runtime behavior
+  is unchanged, and an early `/offpeak` typed before registration simply needs
+  to be entered again. Troubleshooting documents this window.
+
+Full suite: **175 tests, 0 failures**, plus the real 2.4.0 fixture and TUI
+checks. Desktop 2.3.0+ remains the GUI requirement.
+
 ## 0.4.2 - 2026-11-23
 
 ### Fixed

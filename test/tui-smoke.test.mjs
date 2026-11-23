@@ -97,7 +97,7 @@ test("the real OpenCode v2 TUI loads the packed plugin without keymap errors and
       "42",
       "-c",
       projectDir,
-      `${env} ${opencodeBin} --standalone`,
+      `${env} ${opencodeBin} --standalone --log-level debug`,
     ]);
 
     const logPath = path.join(dataDir, "opencode", "log", "opencode.log");
@@ -130,6 +130,22 @@ test("the real OpenCode v2 TUI loads the packed plugin without keymap errors and
     }, "the packed package did not load as a server plugin");
     assert.doesNotMatch(loaded, /Keymap\.Provider is missing/);
     assert.doesNotMatch(loaded, /plugin operation failed/);
+
+    // OpenCode 2.4 restores asynchronous plugin loading: the UI can paint and
+    // accept input before the TUI half has registered `/offpeak`. Wait for the
+    // actual setup completion rather than typing into a shell that does not
+    // know the command yet.
+    await waitFor(async () => {
+      const current = await log();
+      return current
+        .split("\n")
+        .some(
+          (line) =>
+            line.includes("plugin operation completed") &&
+            line.includes("stage=setup") &&
+            line.includes("plugin=opencode-offpeak"),
+        );
+    }, "the packed TUI plugin did not finish setup");
 
     await tmux(socket, ["send-keys", "-t", session, "-l", "/offpeak status"]);
     await new Promise((resolve) => setTimeout(resolve, 1500));

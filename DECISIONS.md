@@ -1,5 +1,37 @@
 # Decisions
 
+## 2026-11-23: OpenCode 2.4.0 compatibility (v0.4.3)
+
+OpenCode **2.4.0** was published on 2026-11-23T09:22Z. The live Desktop SSH
+server started 2.4.0 and the plugin was pinned at `v0.4.2`, whose verified
+range ended at `<2.4.0`; the server logged the guard error and unloaded the
+plugin, so no peak-price protection existed on that host. As with the previous
+ceiling failures (`<2.1.0`, `<2.2.0`, `<2.3.0`), the failure was the guard, not
+a removed runtime contract.
+
+The published `@opencode/plugin` 2.4.0 declarations were compared with 2.3.2.
+`model.request`, `http.request`, the experimental WebSocket hooks, `retry`,
+session events, storage, RPC, `context.app.version`, and the TUI context used
+by this plugin keep their signatures. The differences are additive:
+`session.job.list`, video generation (including a `video` idle-background
+variant), tool `execute` metadata/codemode fields, OAuth `revoke`, GUI icon
+declarations, a `browser.experimental` open/close handle, composer `send` and
+`delivery`, and an OpenTUI `>=0.9.4` peer floor. The plugin defines no custom
+renderable or code-block renderer, so the renderer callback change does not
+apply. OpenCode 2.4 also restores asynchronous plugin loading; a first request
+can arrive before the server plugin's RPC registration, which the existing
+fail-closed `UNKNOWN`/protected rule already covers once the plugin is loaded,
+and the TUI re-registers on the next route change or command.
+
+Decision: raise the verified range to `>=2.0.26 <2.5.0` only after the packed
+plugin loads in the real 2.4.0 TUI, `/offpeak status` works, the deterministic
+and real fixture suites pass, and a protected request still produces zero
+provider requests before the boundary and exactly one at it. Raise the build
+dependency to `@opencode/plugin@2.4.0`. Rejected alternatives: dropping the
+ceiling (the documented policy is an explicit verified ceiling widened per
+release), treating 2.4.0 as a warning-only host (fails open on a contract that
+was not tested), and changing runtime code without a demonstrated need.
+
 ## 2026-11-23: One global client document across per-location plugin engines
 
 Live verification showed Desktop Protection reverting to OFF after CLI sessions loaded in a different directory. OpenCode can load the server plugin once per project/location in the same process; each engine had its own in-memory snapshot of the shared `clients-v1` document. A stale location then persisted its old defaults while registering a session.

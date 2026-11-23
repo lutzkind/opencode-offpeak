@@ -589,7 +589,7 @@ test("both entrypoints reject unsupported OpenCode hosts with an actionable erro
       },
       rpc: { register: async () => ({ dispose: async () => undefined }) },
     });
-  }, /requires OpenCode >=2\.0\.26 <2\.4\.0; this server host runs 2\.0\.18\. Use an OpenCode release inside that range/);
+  }, /requires OpenCode >=2\.0\.26 <2\.5\.0; this server host runs 2\.0\.18\. Use an OpenCode release inside that range/);
   await assert.rejects(async () => {
     await tuiPlugin.setup({
       app: oldHost,
@@ -601,7 +601,7 @@ test("both entrypoints reject unsupported OpenCode hosts with an actionable erro
         toast: { show: () => undefined },
       },
     });
-  }, /requires OpenCode >=2\.0\.26 <2\.4\.0; this TUI host runs 2\.0\.18\. Use an OpenCode release inside that range/);
+  }, /requires OpenCode >=2\.0\.26 <2\.5\.0; this TUI host runs 2\.0\.18\. Use an OpenCode release inside that range/);
   await assert.rejects(async () => {
     await tuiPlugin.setup({
       app: undefined,
