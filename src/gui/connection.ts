@@ -1,3 +1,4 @@
+import { runOffpeakCommand } from "../commands.js";
 import {
   OFFPEAK_RPC,
   type OffpeakClientStatus,
@@ -18,6 +19,35 @@ export interface GuiOpenCodeClientLike {
   rpc(definition: typeof OFFPEAK_RPC): GuiRpcClient;
 }
 
+/** The canonical session metadata the Desktop app already synced from its server. */
+export interface GuiSessionInfoLike {
+  title?: string;
+  projectID?: string;
+  location?: { directory?: string };
+}
+
+/** A project row from the Desktop's canonical project store. */
+export interface GuiProjectInfoLike {
+  name?: string;
+  canonical?: string;
+  worktree?: string;
+}
+
+/**
+ * The small reactive slice of `ServerRef.data` this plugin reads. It is a
+ * structural type so the title logic is testable without the Desktop runtime.
+ */
+export interface GuiServerDataLike {
+  session: {
+    get(sessionID: string): GuiSessionInfoLike | undefined;
+    sync?(sessionID: string): Promise<void>;
+    missing?(sessionID: string): boolean;
+  };
+  project: {
+    get(projectID: string): GuiProjectInfoLike | undefined;
+  };
+}
+
 export interface GuiServerLike {
   id: string;
   name: string;
@@ -25,6 +55,8 @@ export interface GuiServerLike {
   client: GuiOpenCodeClientLike;
   connected?: boolean;
   builtin?: boolean;
+  /** The server's synced sessions and projects. Present on the real Desktop SDK. */
+  data?: GuiServerDataLike;
 }
 
 export interface GuiSessionLike {
@@ -32,6 +64,8 @@ export interface GuiSessionLike {
   key?: string;
   pending?: boolean;
   server: GuiServerLike;
+  /** The session's workspace, when the Desktop has resolved it. */
+  location?: { directory?: string } | undefined;
 }
 
 export interface GuiTabLike {
@@ -49,6 +83,17 @@ export interface GuiContextLike {
   tabs?: {
     list(): readonly GuiTabLike[];
   };
+  screen?:
+    | {
+        current():
+          | {
+              composer?: {
+                model(): { providerID: string; modelID: string } | undefined;
+              };
+            }
+          | undefined;
+      }
+    | undefined;
   servers: {
     list(): readonly string[];
     get(id: string): GuiServerLike | undefined;
@@ -270,4 +315,117 @@ export function peakInferencePermitted(status: OffpeakClientStatus | undefined):
  */
 export function sessionOverrideActive(status: OffpeakClientStatus | undefined): boolean {
   return status?.session?.source === "session-override";
+}
+
+/**
+ * The Desktop-side metadata requests already attempted, keyed by the server's
+ * reactive data store. A session is synced at most once per store; later title
+ * or project changes arrive through OpenCode's own event updates, so no poll or
+ * repeated per-session call is needed.
+ */
+const metadataLoads = new WeakMap<object, Set<string>>();
+
+function basename(directory: string | undefined): string | undefined {
+  const trimmed = directory?.trim().replace(/[\\/]+$/, "");
+  if (!trimmed) return undefined;
+  const parts = trimmed.split(/[\\/]/);
+  const name = parts[parts.length - 1];
+  return name || undefined;
+}
+
+/**
+ * Resolves the actual OpenCode session title. `Untitled session` is a display
+ * fallback only; it is never stored and never replaces a real title.
+ */
+export function sessionTitle(session: GuiSessionLike): string {
+  const title = session.server.data?.session.get(session.id)?.title?.trim();
+  return title || "Untitled session";
+}
+
+/** The project/repository name from canonical session metadata, when known. */
+export function sessionProjectName(session: GuiSessionLike): string | undefined {
+  const data = session.server.data;
+  const info = data?.session.get(session.id);
+  const project = info?.projectID ? data?.project.get(info.projectID) : undefined;
+  return (
+    project?.name?.trim() ||
+    basename(project?.worktree) ||
+    basename(project?.canonical) ||
+    basename(info?.location?.directory) ||
+    basename(session.location?.directory)
+  );
+}
+
+/** A shortened but still recognizable session ID for list rows. */
+export function shortSessionID(sessionID: string): string {
+  const id = sessionID.trim();
+  if (id.length <= 16) return id;
+  return `${id.slice(0, 12)}…${id.slice(-4)}`;
+}
+
+/**
+ * The Desktop session-list label: the real title first, then the project, then
+ * the shortened ID. The full ID remains available separately for diagnostics.
+ */
+export function sessionDisplayName(session: GuiSessionLike): string {
+  const title = sessionTitle(session);
+  const project = sessionProjectName(session);
+  const detail = project ? `${title} — ${project}` : title;
+  return `${detail} (${shortSessionID(session.id)})`;
+}
+
+/**
+ * Loads canonical session metadata once when a session is not in the Desktop's
+ * synced store. This resolves titles for sessions opened before this plugin
+ * loaded; a failure leaves the untitled fallback and does not break settings.
+ */
+export function ensureSessionMetadata(session: GuiSessionLike): void {
+  const data = session.server.data;
+  if (!data?.session.sync) return;
+  if (data.session.get(session.id) || data.session.missing?.(session.id)) return;
+  let attempted = metadataLoads.get(data);
+  if (!attempted) {
+    attempted = new Set<string>();
+    metadataLoads.set(data, attempted);
+  }
+  if (attempted.has(session.id)) return;
+  attempted.add(session.id);
+  void data.session.sync(session.id).catch(() => {
+    // The fallback label remains; a later plugin load can retry.
+    attempted?.delete(session.id);
+  });
+}
+
+/** The routed session's workspace directory, from canonical synced metadata. */
+export function sessionDirectory(session: GuiSessionLike | undefined): string | undefined {
+  if (!session) return undefined;
+  return (
+    session.location?.directory || session.server.data?.session.get(session.id)?.location?.directory
+  );
+}
+
+/**
+ * Runs the shared Offpeak command implementation with the Desktop surface and
+ * the routed chat's identity. The Desktop can only change its own global
+ * default through `protection global`; the server-side command layer maps it
+ * to `client-set { client: "desktop" }`.
+ */
+export async function runDesktopOffpeakCommand(
+  context: GuiContextLike,
+  rawInput: string,
+): Promise<string> {
+  const session = resolveSessionTarget(context);
+  const server = session?.server ?? resolveTargetServer(context);
+  if (!server) {
+    throw new Error("No OpenCode server is available for Offpeak commands.");
+  }
+  const model = context.screen?.current?.()?.composer?.model();
+  const cwd = sessionDirectory(session);
+  const result = await runOffpeakCommand(server.client.rpc(OFFPEAK_RPC), rawInput, {
+    surface: "desktop",
+    ...(session ? { sessionID: session.id } : {}),
+    ...(model ? { providerID: model.providerID, modelID: model.modelID } : {}),
+    ...(cwd ? { cwd } : {}),
+  });
+  return result.text;
 }

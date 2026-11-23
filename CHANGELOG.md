@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.0 - 2026-11-23
+
+### Independent protection controls
+
+- **Canonical two-level commands.** `/offpeak protection global on|off`
+  changes only the global default of the interface that runs it
+  (`client: "cli"` in the TUI, `client: "desktop"` in Desktop).
+  `/offpeak protection chat on|off` changes only the current OpenCode session's
+  explicit override; `on` restores the session to following that interface's
+  global default. `/offpeak status` reports both global defaults, the current
+  chat's source, the effective protection, and queue state. The existing
+  `/offpeak session` and `/offpeak client` forms remain supported aliases over
+  the same persisted state.
+- **Desktop slash commands.** The Desktop GUI entrypoint now registers
+  `/offpeak` as a native composer slash command through the installed
+  `@opencode/plugin/gui` `Command.slash` API. It calls the same shared command
+  implementation as the TUI with the Desktop surface and the routed chat's
+  session identity; there is no duplicate handler or second protection engine.
+- **Two-level Desktop UI.** **Settings > Offpeak** now exposes exactly
+  **Desktop Protection** and **Protection for this chat**. The chat switch is
+  checked when protection is effective and shows whether the chat follows the
+  relevant global default or has an explicit bypass. The CLI default is
+  read-only on this page and a Desktop action never writes it.
+- **Real Desktop session names.** The chat selector and current-chat rows use
+  the canonical OpenCode session title, then the project/repository name, then
+  a shortened session ID. The full ID remains visible for troubleshooting.
+  Titles follow OpenCode rename events; sessions that were not in the synced
+  store are loaded once through the supported session API. Untitled sessions
+  show a fallback, never an invented title.
+- **Bypass feedback in Desktop.** The GUI subscribes to the existing
+  `rpc.opencode-offpeak.hold` and `rpc.opencode-offpeak.resume` events and shows
+  the same non-chat toasts as the TUI.
+
+### Queue and safety invariants
+
+- Changing either global default or a chat override wakes existing holds
+  through the existing signal and releases a still-waiting verified-peak
+  request in place. It never re-sends a request, never duplicates execution,
+  never drops or reorders a queue record, and never adopts a queue-owned
+  session. Queue tasks keep their task-scoped `/offpeak run-now` authorization.
+- Invalid or unreadable client settings still fail closed and refuse writes;
+  no bypass is inferred from a storage or API error.
+
+### Compatibility and tests
+
+- Validated against OpenCode **2.3.2** and `@opencode/plugin@2.3.2`; the tested
+  CLI range remains `>=2.0.26 <2.4.0` and the Desktop GUI requires 2.3.0+.
+- Added deterministic coverage for the shared command grammar, interface-scoped
+  global writes, per-chat overrides, status/feedback text, Desktop slash
+  commands, hold/resume toasts, real/untitled/renamed session labels, metadata
+  loading, and queue changes with waiting work. Full suite: **174 tests, 0
+  failures**.
+
 ## 0.3.3 - 2026-11-21
 
 ### Fixed

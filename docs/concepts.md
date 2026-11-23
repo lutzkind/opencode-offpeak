@@ -3,11 +3,11 @@
 ## Four separate controls
 
 - **Enabled toggle:** `/offpeak on|off` decides whether the queue starts and auto-resumes tasks. It persists across OpenCode restarts.
-- **Client defaults:** `/offpeak client cli|desktop on|off` decides peak protection for sessions reliably registered by that client. CLI and Desktop are independent and both start ON. The Desktop settings page exposes the Desktop default and the current session's explicit override side by side.
+- **Global protection defaults:** `/offpeak protection global on|off` decides peak protection for chats reliably registered by the interface that runs it. CLI and Desktop are independent and both start ON. The Desktop settings page exposes **Desktop Protection** and the read-only CLI value side by side.
 - **Pricing policy:** decides whether a request for a provider/model is off-peak, peak, untracked, or unknown.
-- **Session override:** `/offpeak session on|off` is explicit permission for one session's verified peak-priced requests; `/offpeak run-now <task-id>` is the task-scoped 15-minute equivalent.
+- **Chat override:** `/offpeak protection chat on|off` is explicit bypass permission for one OpenCode session's verified peak-priced requests; `/offpeak run-now <task-id>` is the task-scoped 15-minute equivalent. `/offpeak session on|off` remains an alias.
 
-Turning the plugin OFF changes only automation. It does not change pricing evaluation, a client default, or a session override. A shared or unregistered session stays protected regardless of either client default.
+Turning the plugin OFF changes only automation. It does not change pricing evaluation, a global default, or a chat override. A shared or unregistered chat stays protected regardless of either global default.
 
 ## Modes
 

@@ -4,9 +4,11 @@ import Module from "node:module";
 import path from "node:path";
 import test from "node:test";
 import * as gui from "@opencode/plugin/gui";
+import * as solid from "solid-js";
 import { createRoot } from "solid-js";
 import {
   defaultServerID,
+  ensureSessionMetadata,
   openSessions,
   ownershipLabel,
   peakInferencePermitted,
@@ -15,10 +17,16 @@ import {
   rememberRoutedSession,
   resolveSessionTarget,
   resolveTargetServer,
+  runDesktopOffpeakCommand,
   serverOptions,
+  sessionDirectory,
+  sessionDisplayName,
   sessionOverrideActive,
+  sessionProjectName,
+  sessionTitle,
   setDesktopProtection,
   setSessionProtection,
+  shortSessionID,
   sourceLabel,
 } from "../dist/gui/connection.js";
 import serverPlugin from "../dist/server.js";
@@ -46,6 +54,7 @@ async function loadBundle() {
   const original = Module._load;
   Module._load = function (request, ...rest) {
     if (request === "@opencode/plugin/gui") return gui;
+    if (request === "solid-js") return solid;
     if (request === "solid-js/web") return web;
     return original.call(this, request, ...rest);
   };
@@ -65,6 +74,7 @@ function fakeClient(name, calls, result) {
         control(input) {
           calls.push({ server: name, action: input.action, input });
           if (result instanceof Error) return Promise.reject(result);
+          if (typeof result === "function") return Promise.resolve(result(input));
           return Promise.resolve(result);
         },
       };
@@ -72,7 +82,7 @@ function fakeClient(name, calls, result) {
   };
 }
 
-function server(id, name, calls, result) {
+function server(id, name, calls, result, data) {
   return {
     id,
     name,
@@ -80,6 +90,7 @@ function server(id, name, calls, result) {
     client: fakeClient(id, calls, result),
     connected: true,
     builtin: id === "sidecar",
+    ...(data ? { data } : {}),
   };
 }
 
@@ -95,7 +106,7 @@ const statusResult = {
   },
 };
 
-test("the packaged Desktop GUI loads and registers exactly one command and settings page", async () => {
+test("the packaged Desktop GUI loads and registers the settings page plus one slash command", async () => {
   const bundle = await loadBundle();
   assert.equal(typeof bundle.default?.setup, "function");
   const calls = [];
@@ -128,12 +139,29 @@ test("the packaged Desktop GUI loads and registers exactly one command and setti
     assert.ok(page);
     assert.equal(page.id, "opencode-offpeak");
     assert.equal(typeof page.render, "function");
-    assert.ok(page.entries.some((entry) => entry.id === "desktop-protection"));
-    assert.ok(page.entries.some((entry) => entry.id === "session-override"));
-    const command = additions.find((entry) => entry.registry === gui.Command)?.item;
-    assert.equal(command.id, "settings");
-    command.run();
+    const bundleSource = await readFile(bundlePath, "utf8");
+    assert.match(bundleSource, /Desktop Protection/);
+    assert.match(bundleSource, /Protection for this chat/);
+    assert.match(bundleSource, /Untitled session/);
+    assert.equal(
+      page.entries.find((entry) => entry.id === "desktop-protection")?.title,
+      "Desktop Protection",
+    );
+    assert.equal(
+      page.entries.find((entry) => entry.id === "chat-protection")?.title,
+      "Protection for this chat",
+    );
+    const commands = additions
+      .filter((entry) => entry.registry === gui.Command)
+      .map((entry) => entry.item);
+    const settingsCommand = commands.find((entry) => entry.id === "settings");
+    assert.ok(settingsCommand);
+    settingsCommand.run();
     assert.deepEqual(calls.at(-1), { settings: "opencode-offpeak" });
+    const slashCommand = commands.find((entry) => entry.slash?.name === "offpeak");
+    assert.ok(slashCommand);
+    assert.equal(slashCommand.slash.arguments, true);
+    assert.equal(slashCommand.section, "session");
     // Registration targets the routed session's remote server, never the
     // Desktop sidecar that loaded the GUI.
     assert.deepEqual(
@@ -141,8 +169,8 @@ test("the packaged Desktop GUI loads and registers exactly one command and setti
       ["remote"],
     );
     assert.equal(calls.find((call) => call.action === "client-register").input.client, "desktop");
-    // One command and one settings page: no duplicate registration.
-    assert.equal(additions.filter((entry) => entry.registry === gui.Command).length, 1);
+    // One settings page and exactly one slash command: no duplicate handler.
+    assert.equal(additions.filter((entry) => entry.registry === gui.Command).length, 2);
     assert.equal(additions.filter((entry) => entry.registry === gui.SettingsPage).length, 1);
   } finally {
     dispose();
@@ -363,6 +391,282 @@ test("GUI settings fail clearly when the remote server is unavailable or rejects
     client: remote.client,
   };
   await assert.rejects(() => readClientStatus(empty, undefined, undefined), /No OpenCode server/);
+});
+
+test("Desktop session labels use actual titles, project names, and shortened IDs", () => {
+  const calls = [];
+  const infos = {
+    ses_abcdefghijklmnop: {
+      title: "Fix the login flow",
+      projectID: "prj_payments",
+      location: { directory: "/work/payments/subdir" },
+    },
+    ses_untitled: { projectID: "prj_unknown", location: { directory: "/work/plain" } },
+  };
+  const projects = {
+    prj_payments: { name: "Payments", canonical: "/work/payments" },
+    prj_other: { canonical: "/work/other-repo" },
+  };
+  const syncs = [];
+  const data = {
+    session: {
+      get: (id) => infos[id],
+      missing: (id) => infos[id] === undefined && id === "ses_missing",
+      sync: async (id) => {
+        syncs.push(id);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        infos[id] = { title: "Loaded from the server", projectID: "prj_payments" };
+      },
+    },
+    project: { get: (id) => projects[id] },
+  };
+  const remote = server("remote", "Remote", calls, statusResult, data);
+  const session = {
+    id: "ses_abcdefghijklmnop",
+    key: "remote\nses_abcdefghijklmnop",
+    pending: false,
+    server: remote,
+  };
+  assert.equal(sessionTitle(session), "Fix the login flow");
+  assert.equal(sessionProjectName(session), "Payments");
+  assert.match(
+    sessionDisplayName(session),
+    /^Fix the login flow — Payments \(ses_abcdefgh…mnop\)$/,
+  );
+  assert.equal(shortSessionID(session.id), "ses_abcdefgh…mnop");
+  assert.equal(session.id, "ses_abcdefghijklmnop");
+  assert.equal(sessionDirectory(session), "/work/payments/subdir");
+
+  // OpenCode's rename event updates the reactive store; the computed label
+  // follows it instead of caching a title of its own.
+  infos[session.id].title = "Renamed login flow";
+  assert.match(sessionDisplayName(session), /^Renamed login flow — Payments/);
+
+  // A genuinely untitled session gets a fallback label, never an invented title.
+  const untitled = { ...session, id: "ses_untitled" };
+  assert.equal(sessionTitle(untitled), "Untitled session");
+  assert.equal(sessionProjectName(untitled), "plain");
+  assert.match(sessionDisplayName(untitled), /^Untitled session — plain/);
+
+  // Project metadata may be unavailable; the canonical directory basename is
+  // still a truthful secondary label.
+  const projectless = {
+    ...session,
+    id: "ses_projectless",
+  };
+  infos.ses_projectless = { title: "No project row", location: { directory: "/work/other-repo" } };
+  assert.equal(sessionProjectName(projectless), "other-repo");
+
+  const foreign = { ...session, id: "ses_foreign" };
+  ensureSessionMetadata(foreign);
+  ensureSessionMetadata(foreign);
+  assert.equal(syncs.length, 1);
+  assert.equal(syncs[0], "ses_foreign");
+  assert.equal(sessionTitle(foreign), "Untitled session");
+  // The sync is asynchronous and the store updates; a later render sees it.
+  return new Promise((resolve) => setTimeout(resolve, 0)).then(() => {
+    assert.equal(sessionTitle(foreign), "Loaded from the server");
+    ensureSessionMetadata(foreign);
+    assert.equal(syncs.length, 1, "a loaded session is never re-fetched");
+    const missing = { ...session, id: "ses_missing" };
+    ensureSessionMetadata(missing);
+    assert.equal(syncs.length, 1, "a confidently missing session is not fetched");
+  });
+});
+
+test("Desktop chat slash commands use the shared handler and the Desktop surface", async () => {
+  const bundle = await loadBundle();
+  const calls = [];
+  const toasts = [];
+  const remote = server("remote", "Remote", calls, (input) => {
+    if (input.action === "client-register") {
+      return {
+        client: {
+          defaults: { cli: "ON", desktop: "ON" },
+          session: {
+            sessionID: "ses_remote",
+            ownership: "desktop",
+            protection: "ON",
+            source: "client-default",
+          },
+        },
+      };
+    }
+    if (input.action === "client-set") {
+      return {
+        client: {
+          defaults: { cli: "ON", desktop: input.protection === "off" ? "OFF" : "ON" },
+          session: {
+            sessionID: "ses_remote",
+            ownership: "desktop",
+            protection: input.protection === "off" ? "OFF" : "ON",
+            source: "client-default",
+          },
+        },
+      };
+    }
+    if (input.action === "session-off" || input.action === "session-on") {
+      return {
+        message:
+          input.action === "session-off"
+            ? "Session off-peak protection disabled."
+            : "Session off-peak protection enabled.",
+        client: {
+          defaults: { cli: "ON", desktop: "ON" },
+          session: {
+            sessionID: "ses_remote",
+            ownership: "desktop",
+            protection: input.action === "session-off" ? "OFF" : "ON",
+            source: input.action === "session-off" ? "session-override" : "client-default",
+          },
+        },
+      };
+    }
+    return {
+      status: {
+        enabled: true,
+        mode: "auto",
+        pricingState: "PEAK",
+        clientDefaults: { cli: "ON", desktop: "OFF" },
+        client: { ownership: "desktop", protection: "OFF", source: "client-default" },
+        effectiveProtection: "OFF",
+        requestsAllowed: true,
+        queued: 0,
+        waiting: 0,
+        failed: 0,
+      },
+    };
+  });
+  const session = { id: "ses_remote", key: "remote\nses_remote", pending: false, server: remote };
+  const additions = [];
+  const context = {
+    id: "opencode-offpeak",
+    sessions: { current: () => session, list: () => [session] },
+    servers: { list: () => ["remote"], get: () => remote },
+    client: remote.client,
+    screen: {
+      current: () => ({
+        composer: {
+          model: () => ({ providerID: "opencode-go", modelID: "deepseek-v4.1-flash" }),
+        },
+      }),
+    },
+    toast: { show: (options) => toasts.push(options) },
+    add(registry, item) {
+      additions.push({ registry, item: typeof item === "function" ? item() : item });
+      return () => undefined;
+    },
+    layout: { settings: () => undefined },
+    ui: {},
+  };
+  const dispose = createRoot((disposeRoot) => {
+    bundle.default.setup(context);
+    return disposeRoot;
+  });
+  try {
+    const command = additions.find(
+      (entry) => entry.registry === gui.Command && entry.item.slash?.name === "offpeak",
+    )?.item;
+    assert.ok(command);
+    await command.run("protection global off");
+    assert.deepEqual(calls.filter((call) => call.action === "client-set").at(-1).input, {
+      action: "client-set",
+      client: "desktop",
+      protection: "off",
+      sessionID: "ses_remote",
+    });
+    assert.match(toasts.at(-1).description, /^Desktop global protection: OFF$/m);
+    assert.match(toasts.at(-1).description, /CLI global protection: ON \(not modified\)/);
+
+    await command.run("protection chat off");
+    assert.deepEqual(calls.filter((call) => call.action === "session-off").at(-1).input, {
+      action: "session-off",
+      sessionID: "ses_remote",
+    });
+    assert.match(toasts.at(-1).description, /Protection for this chat: OFF \(explicit override/);
+    assert.match(toasts.at(-1).description, /Desktop global protection: ON \(not modified\)/);
+
+    await command.run("status");
+    assert.deepEqual(calls.filter((call) => call.action === "status").at(-1).input, {
+      action: "status",
+      sessionID: "ses_remote",
+      providerID: "opencode-go",
+      modelID: "deepseek-v4.1-flash",
+    });
+    assert.match(toasts.at(-1).description, /CLI global protection: ON/);
+    assert.match(toasts.at(-1).description, /Desktop global protection: OFF/);
+
+    // The helper rejects when no Desktop server can be resolved.
+    await assert.rejects(
+      () =>
+        runDesktopOffpeakCommand(
+          {
+            sessions: { current: () => undefined },
+            servers: { list: () => [], get: () => undefined },
+          },
+          "status",
+        ),
+      /No OpenCode server/,
+    );
+  } finally {
+    dispose();
+  }
+});
+
+test("Desktop shows the server's hold and resume events as non-chat toasts", async () => {
+  const bundle = await loadBundle();
+  const handlers = new Map();
+  const toasts = [];
+  const data = {
+    session: { get: () => ({ title: "Held chat", projectID: "prj" }) },
+    project: { get: () => ({ name: "Fixture" }) },
+    on(type, handler) {
+      handlers.set(type, handler);
+      return () => handlers.delete(type);
+    },
+  };
+  const calls = [];
+  const remote = server("remote", "Remote", calls, statusResult, data);
+  const session = { id: "ses_remote", key: "remote\nses_remote", pending: false, server: remote };
+  const additions = [];
+  const context = {
+    id: "opencode-offpeak",
+    sessions: { current: () => session, list: () => [session] },
+    servers: { list: () => ["remote"], get: () => remote },
+    client: remote.client,
+    toast: { show: (options) => toasts.push(options) },
+    add(registry, item) {
+      additions.push({ registry, item: typeof item === "function" ? item() : item });
+      return () => undefined;
+    },
+    layout: { settings: () => undefined },
+    ui: {},
+  };
+  const dispose = createRoot((disposeRoot) => {
+    bundle.default.setup(context);
+    return disposeRoot;
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual([...handlers.keys()].sort(), [
+      "rpc.opencode-offpeak.hold",
+      "rpc.opencode-offpeak.resume",
+    ]);
+    handlers.get("rpc.opencode-offpeak.hold")({
+      data: { sessionID: "ses_remote", display: "04:00 UTC" },
+    });
+    assert.match(toasts.at(-1).description, /request held until 04:00 UTC/);
+    handlers.get("rpc.opencode-offpeak.hold")({ data: {} });
+    assert.equal(toasts.length, 1);
+    handlers.get("rpc.opencode-offpeak.resume")({
+      data: { sessionID: "ses_remote", kind: "override" },
+    });
+    assert.match(toasts.at(-1).description, /Protection is OFF for this chat/);
+    assert.equal(toasts.at(-1).variant, "success");
+  } finally {
+    dispose();
+  }
+  assert.equal(handlers.size, 0, "subscriptions are removed with the plugin");
 });
 
 test("server, TUI, and GUI entrypoints load together without duplicate server initialization", async () => {

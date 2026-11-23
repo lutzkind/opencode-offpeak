@@ -369,7 +369,7 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     await rpcHandlers.control({ action: "client-set", client: "desktop", protection: "on" });
     await assert.rejects(
       rpcHandlers.control({ action: "client-set", client: "mobile", protection: "off" }),
-      /Usage: \/offpeak client/,
+      /Usage: \/offpeak protection global/,
     );
     await assert.rejects(
       rpcHandlers.control({ action: "client-register", client: "desktop" }),
@@ -534,6 +534,27 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.match(toasts.at(-1).message, /Usage: \/offpeak client/);
     await command.run("/offpeak client desktop on");
     assert.match(toasts.at(-1).message, /Desktop default: ON/);
+
+    // Canonical independent commands: global is interface-scoped, chat is the
+    // explicit override for this one session, and status reports both levels.
+    await command.run("/offpeak protection global off");
+    assert.match(toasts.at(-1).message, /CLI global protection: OFF/);
+    assert.match(toasts.at(-1).message, /Desktop global protection: ON \(not modified\)/);
+    await command.run("/offpeak protection chat off");
+    assert.match(toasts.at(-1).message, /Protection for this chat: OFF \(explicit override/);
+    assert.match(toasts.at(-1).message, /CLI global protection: OFF \(not modified\)/);
+    await command.run("/offpeak status");
+    assert.match(toasts.at(-1).message, /CLI global protection: OFF/);
+    assert.match(toasts.at(-1).message, /Desktop global protection: ON/);
+    assert.match(toasts.at(-1).message, /Protection for this chat: OFF \(explicit override/);
+    assert.match(toasts.at(-1).message, /Queue: /);
+    await command.run("/offpeak protection chat on");
+    assert.match(toasts.at(-1).message, /Protection for this chat: follows the CLI global \(OFF\)/);
+    await command.run("/offpeak protection global on");
+    assert.match(toasts.at(-1).message, /CLI global protection: ON/);
+    assert.match(toasts.at(-1).message, /Desktop global protection: ON \(not modified\)/);
+    await command.run("/offpeak protection global sometimes");
+    assert.match(toasts.at(-1).message, /Usage: \/offpeak protection/);
     // Without a focused session the command refuses instead of guessing.
     tuiContext.ui.router.current = () => ({ type: "home" });
     await command.run("/offpeak session off");

@@ -1,5 +1,17 @@
 # Decisions
 
+## 2026-11-23: Interface-scoped protection commands, native Desktop slash commands, and canonical chat titles
+
+The v0.3.x client defaults already persisted independently, but the command names (`client`, `session`) did not express which level the user was changing, and the Desktop page exposed the override as an inverted "allow peak" switch. The requested model is two controls per interface: a global default and a chat-level bypass. The implementation keeps the existing `clients-v1` and `session-overrides-v1` documents and adds no database, queue, scheduler, service, or policy engine.
+
+Canonical commands are `/offpeak protection global on|off` and `/offpeak protection chat on|off`. The command module passes the calling surface (`cli` or `desktop`); a global command therefore writes only that interface's field and cannot modify the other interface. `chat on` removes the session override so the chat follows its relevant global default; it does not invent an explicit ON override, so a global OFF remains effective. The old `/offpeak client` and `/offpeak session` forms remain aliases over the same state for compatibility with v0.3.x users and tests.
+
+Desktop slash commands use the installed `@opencode/plugin@2.3.2` `Command.slash` field, the officially supported composer slash registration. The same `src/commands.ts` parser/executor is shared by the TUI and GUI; the GUI supplies the Desktop surface and the routed session identity. No UI injection, synthetic key handling, or duplicate command handler was added. The GUI also subscribes to the existing `rpc.opencode-offpeak.hold`/`resume` events (typed as `${"rpc."}${string}` in the installed client) for the same non-chat feedback the TUI provides.
+
+The Desktop chat list previously showed raw session IDs because `SessionRef` carries only `id`, `key`, `server`, and location. The actual title and project ID live in the server's canonical synced `data` store. The page reads `server.data.session.get(id).title` and `server.data.project.get(projectID)` reactively, syncs a session once through the supported session API when it is missing from that store, and falls back to **Untitled session** plus a shortened ID. Renames are handled by OpenCode's own `session.renamed` store update. No separate title database, poll, or repeated per-session fetch was introduced.
+
+Queue semantics are unchanged and now explicitly tested: global and chat changes wake existing interactive holds through the existing signal/pump, while queue-owned tasks never inherit either setting. A queue task keeps its record, state, order, and task-scoped `/offpeak run-now` authorization; it is never adopted, restarted, duplicated, or dropped by a protection change. Client-setting load/write errors continue to fail closed and refuse writes.
+
 ## 2026-11-18: OpenCode 2.3.2 validation and background-compaction coverage
 
 The live host moved from OpenCode 2.3.0 to **2.3.2** (2.3.1 and 2.3.2 were published on 2026-11-18). Both versions are already inside the declared range `>=2.0.26 <2.4.0`, so no range change is involved; the question is whether any behavior this plugin relies on changed.
