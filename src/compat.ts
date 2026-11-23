@@ -2,7 +2,7 @@
  * OpenCode host compatibility.
  *
  * The plugin is tested against the OpenCode v2 plugin API shipped with
- * OpenCode 2.0.26 through 2.3.2. Hosts before 2.0.26 activate TUI plugins
+ * OpenCode 2.0.26 through 2.4.0. Hosts before 2.0.26 activate TUI plugins
  * outside the Solid keymap provider owner, so `context.keymap.layer()` fails
  * with "Keymap.Provider is missing" even though the plugin follows the
  * documented API. OpenCode 2.1 changes the session/compaction payload schema
@@ -19,12 +19,16 @@
  * summaries prepare the same `compaction` model request, so the pre-model
  * hold and transport guard cover both. OpenCode 2.3.2 only narrows the
  * plugin `experimental.generate` surface, which this plugin does not use.
- * All three lines are covered by the compatibility, packed-install, and
+ * OpenCode 2.4 adds background-job and video surfaces, automations, GUI icon
+ * declarations, and composer delivery modes; the only TUI context addition
+ * is `job.list`, the model and transport request hooks are unchanged, and
+ * this plugin registers no renderer affected by the OpenTUI 0.9.4 change.
+ * All four lines are covered by the compatibility, packed-install, and
  * real-TUI suites.
  * Unsupported hosts must fail with this explicit compatibility error instead
  * of the confusing runtime failure.
  */
-export const SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.4.0";
+export const SUPPORTED_OPENCODE_RANGE = ">=2.0.26 <2.5.0";
 
 const VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/;
 
@@ -37,7 +41,7 @@ export function isSupportedOpenCodeVersion(version: string): boolean {
   const patch = Number(match[3]);
   if (major !== 2) return false;
   if (minor === 0) return patch >= 26;
-  return minor === 1 || minor === 2 || minor === 3;
+  return minor === 1 || minor === 2 || minor === 3 || minor === 4;
 }
 
 /**

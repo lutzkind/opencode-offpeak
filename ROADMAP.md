@@ -2,7 +2,7 @@
 
 ## Current: 0.4.x
 
-- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.3.2, including background compaction.
+- OpenCode CLI v2.0.26 API adapter; compatibility extended through 2.4.0, including background compaction.
 - Independent persistent CLI and Desktop protection defaults, with client-side session registration, shared-session fail-closed handling, and a native Desktop settings page (`./gui-experimental`).
 - Canonical two-level commands shared by CLI and Desktop: `/offpeak protection global on|off`, `/offpeak protection chat on|off`, and `/offpeak status`. Desktop registers `/offpeak` through the installed GUI SDK's supported composer slash field.
 - Desktop chat list uses actual OpenCode titles, project/repository names, and shortened session IDs, with the full ID available for troubleshooting.

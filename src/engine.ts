@@ -1117,6 +1117,16 @@ export class OffpeakEngine {
     const hold = task === undefined ? this.#beginHold(input) : undefined;
     this.#trackActiveHold(input.sessionID);
     const abortEpoch = this.#holdAborts.get(input.sessionID) ?? 0;
+    // A caller can cancel the hold while this loop is awaiting config or
+    // client-settings state. Re-check after every await that can interleave,
+    // before any path commits, so a refused hold is never resurrected by a
+    // concurrent protection-off wake-up.
+    const refuseCancelledHold = async (): Promise<boolean> => {
+      if (hold === undefined || hold.state !== "refused") return false;
+      this.#armRefusal(hold);
+      if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
+      return true;
+    };
     try {
       while (!this.#disposed) {
         if ((this.#holdAborts.get(input.sessionID) ?? 0) !== abortEpoch) {
@@ -1130,13 +1140,10 @@ export class OffpeakEngine {
         // without contacting the provider. That keeps OpenCode's own retry
         // machinery in charge: it can retry the same execution on another route,
         // so no session interruption is needed to cancel the hold.
-        if (hold !== undefined && hold.state === "refused") {
-          this.#armRefusal(hold);
-          if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
-          return;
-        }
+        if (await refuseCancelledHold()) return;
         const signalVersion = this.#signal.version();
         const settings = await this.#config.read();
+        if (await refuseCancelledHold()) return;
         if (!settings.config)
           throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${settings.error}`);
         const decision = evaluatePricing(

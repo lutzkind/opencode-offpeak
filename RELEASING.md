@@ -2,26 +2,26 @@
 
 ## Current public distribution
 
-`v0.4.2` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.4.3` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.2
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.3
 ```
 
-`v0.1.0` through `v0.4.1` remain available at their own tags. `v0.4.2` is the
-canonical release: it keeps the v0.4.0 features, the v0.4.1 cross-location fix, and makes the committed Desktop GUI bundle available through a bare git-tag install. v0.4.0 added the shared canonical `/offpeak protection global` and
-`/offpeak protection chat` commands, registers `/offpeak` as a native Desktop
-composer slash command through the installed 2.3.2 GUI API, exposes exactly the
-Desktop Protection and Protection for this chat controls, and shows actual
-OpenCode chat titles with project names and shortened IDs. It keeps the two
-independent persistent client defaults, the explicit `session-overrides-v1`
-chat override, the 2.3.2 validation and background-compaction coverage, the
-tested server/TUI range `>=2.0.26 <2.4.0`, and the read-only canonical `pricing`
-RPC consumed by `opencode-free-first` `peak-only`.
+`v0.1.0` through `v0.4.2` remain available at their own tags. `v0.4.3` is the
+canonical release: it keeps every v0.4.x feature and widens the verified
+server/TUI range to `>=2.0.26 <2.5.0` after validating OpenCode 2.4.0. The
+Desktop GUI entrypoint is built and validated against the installed 2.4.0 GUI
+API. It keeps the shared canonical `/offpeak protection global` and
+`/offpeak protection chat` commands, the native Desktop composer slash command,
+the two independent persistent client defaults, the explicit
+`session-overrides-v1` chat override, background-compaction coverage, the
+read-only canonical `pricing` RPC consumed by `opencode-free-first` `peak-only`,
+and the committed `dist/gui-experimental.cjs` bundle for bare git-tag installs.
 
 Desktop users must also list the same tag in Desktop's own
 `opencode.json(c)`; installing it only on the remote server enforces pricing
-there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer; this release validates its slash command and title APIs against 2.3.2. The validation covers the real
+there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer; this release validates its slash command and title APIs against 2.4.0. The validation covers the real
 packed-plugin TUI load and `/offpeak status` on both hosts, the packaged
 Desktop GUI bundle smoke test, the full deterministic suite, the
 zero-paid-traffic CLI/Desktop peak fixture run and real-TUI client test, and

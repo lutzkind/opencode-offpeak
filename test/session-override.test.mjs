@@ -369,6 +369,52 @@ test("an already cancelled/refused hold is not resurrected by session off", asyn
   }
 });
 
+test("a cancellation during a guard config read cannot be revived by session off", async () => {
+  const h = await harness(PEAK);
+  const sessionID = "session-cancel-race";
+  const originalRead = h.config.read.bind(h.config);
+  let reads = 0;
+  let releaseGate;
+  let enteredRead;
+  const gate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+  const entered = new Promise((resolve) => {
+    enteredRead = resolve;
+  });
+  // The guard reads settings once before parking and again inside the hold
+  // loop. Hold that second read so the cancellation and the protection-off
+  // wake-up can interleave exactly as they did in the failing CI run.
+  h.config.read = async () => {
+    reads += 1;
+    if (reads === 2) {
+      enteredRead();
+      await gate;
+    }
+    return originalRead();
+  };
+  try {
+    const held = h.engine
+      .guardModelRequest({ sessionID, ...selectedModel, kind: "primary", transport: "model" })
+      .then(() => "returned");
+    await entered;
+    const cancelled = await h.engine.cancelHold({ sessionID, reason: "obsolete" });
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(cancelled.state, "refused");
+    // This wake-up would commit the request in the old loop; the hold must
+    // instead stay refused and arm a transport refusal exactly once.
+    await h.engine.setSessionProtection(sessionID, "off");
+    releaseGate();
+    assert.equal(await held, "returned");
+    assert.equal(h.engine.consumeRefusal({ sessionID, ...selectedModel, kind: "primary" }), true);
+    assert.equal(h.engine.consumeRefusal({ sessionID, ...selectedModel, kind: "primary" }), false);
+    assert.equal(h.sessions.prompts.length, 0);
+  } finally {
+    releaseGate();
+    await h.close();
+  }
+});
+
 test("session off allows and session on restores compaction, title, and generate requests alike", async () => {
   const h = await harness(PEAK);
   const sessionID = "session-native";
