@@ -48,6 +48,8 @@
 
 **Cleanup.** Temporary verification sessions were deleted through the supported API; no test servers, tmux sessions, or fixture providers remain running. Build clones/tarballs and captured pane evidence are retained under `/tmp/opencode/release-v04*`, `/tmp/opencode/v04*-*.txt`, and `/tmp/opencode/offpeak-*` as non-production scratch.
 
+**Shared handoff.** `/root/mcp-shared/chatgpt/opencode-offpeak/independent-protection-controls-2026-11-23/HANDOFF.md` (manifest, verification summary, live/CI/release evidence, and shared-mount checksums in that directory).
+
 
 ## 2026-11-21 Desktop settings page keeps the current session (`v0.3.3`)
 
