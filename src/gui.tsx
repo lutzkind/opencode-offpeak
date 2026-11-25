@@ -161,34 +161,29 @@ export default Plugin.define({
       get entries() {
         return [
           {
-            id: "desktop-protection",
-            title: "Desktop Protection",
-            description: "Enable or disable peak-price protection for Desktop chats by default.",
-            keywords: "offpeak peak pricing desktop protection",
-          },
-          {
             id: "cli-protection",
             title: "CLI Protection",
-            description: "Read the separate CLI default; change it from the CLI.",
+            description: "Protect CLI chats by default; each chat can override it.",
             keywords: "offpeak peak pricing cli protection",
           },
           {
+            id: "desktop-protection",
+            title: "Desktop Protection",
+            description: "Protect Desktop chats by default; each chat can override it.",
+            keywords: "offpeak peak pricing desktop protection",
+          },
+          {
             id: "chat-protection",
-            title: "Protection for this chat",
-            description: "Disable verified peak-priced inference for this chat only.",
-            keywords: "offpeak chat session override protection",
+            title: "Off-peak protection for this chat",
+            description:
+              "Follow the client global, always protect, or allow peak pricing for this chat.",
+            keywords: "offpeak chat session override protect peak",
           },
           {
-            id: "session-title",
-            title: "Chat title",
-            description: "The actual OpenCode title, project, and session ID of this chat.",
-            keywords: "offpeak session title project id",
-          },
-          {
-            id: "effective-protection",
-            title: "Effective protection",
-            description: "The current chat's ownership and effective protection.",
-            keywords: "offpeak session ownership shared",
+            id: "effective",
+            title: "Effective now",
+            description: "Whether this chat's verified peak-priced requests run or wait.",
+            keywords: "offpeak session effective protection",
           },
         ];
       },

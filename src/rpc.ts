@@ -150,9 +150,11 @@ export interface OffpeakRpcInput {
 
 export interface OffpeakClientSessionStatus {
   sessionID: string;
-  ownership: "cli" | "desktop" | "ambiguous" | "unknown" | "queue";
+  ownership: "cli" | "desktop" | "unknown";
   protection: "ON" | "OFF";
-  source: "session-override" | "client-default" | "ambiguous" | "unknown" | "queue";
+  source: "session-override" | "client-default" | "unknown";
+  /** The explicit chat setting, when one is stored. */
+  override?: "on" | "off";
 }
 
 export interface OffpeakClientStatus {

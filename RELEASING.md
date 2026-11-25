@@ -2,24 +2,20 @@
 
 ## Current public distribution
 
-`v0.4.4` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.5.0` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.4.4
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.0
 ```
 
-`v0.1.0` through `v0.4.3` remain available at their own tags. `v0.4.4` is the
-canonical release: it keeps every v0.4.x feature and records the verified
-server/TUI range `>=2.0.26 <2.5.0` against both OpenCode 2.4.0 and the current
-2.4.1. The 2.4.1 SDK adds only plugin automation hooks and lowers the OpenTUI
-peer floor; every surface this package uses is unchanged. The Desktop GUI
-entrypoint is built and validated against the installed 2.4.1 GUI API. It
-keeps the shared canonical `/offpeak protection global` and
-`/offpeak protection chat` commands, the native Desktop composer slash command,
-the two independent persistent client defaults, the explicit
-`session-overrides-v1` chat override, background-compaction coverage, the
-read-only canonical `pricing` RPC consumed by `opencode-free-first` `peak-only`,
-and the committed `dist/gui-experimental.cjs` bundle for bare git-tag installs.
+`v0.1.0` through `v0.4.4` remain available at their own tags. `v0.5.0` is the
+canonical release: two independent persistent client globals (CLI and Desktop),
+one per-chat override (`on` / `off` / follow-global), no queue and no execution
+modes. It keeps the native Desktop composer slash command, the committed
+`dist/gui-experimental.cjs` bundle for bare git-tag installs, background
+compaction and title recovery, and the read-only canonical `pricing` RPC
+consumed by `opencode-free-first` `peak-only`. The verified server/TUI range is
+`>=2.0.26 <2.5.0` and is validated through OpenCode 2.4.1.
 
 Desktop users must also list the same tag in Desktop's own
 `opencode.json(c)`; installing it only on the remote server enforces pricing

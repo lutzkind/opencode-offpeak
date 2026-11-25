@@ -1,26 +1,67 @@
 # Concepts
 
-## Four separate controls
+## Two globals, one chat choice
 
-- **Enabled toggle:** `/offpeak on|off` decides whether the queue starts and auto-resumes tasks. It persists across OpenCode restarts.
-- **Global protection defaults:** `/offpeak protection global on|off` decides peak protection for chats reliably registered by the interface that runs it. CLI and Desktop are independent and both start ON. The Desktop settings page exposes **Desktop Protection** and the read-only CLI value side by side.
-- **Pricing policy:** decides whether a request for a provider/model is off-peak, peak, untracked, or unknown.
-- **Chat override:** `/offpeak protection chat on|off` is explicit bypass permission for one OpenCode session's verified peak-priced requests; `/offpeak run-now <task-id>` is the task-scoped 15-minute equivalent. `/offpeak session on|off` remains an alias.
+- **CLI Protection** — a persistent global switch for chats opened in the CLI/TUI.
+- **Desktop Protection** — an independent persistent global switch for chats opened in Desktop.
+- **This chat** — `follow global`, `always protect`, or `allow peak`.
 
-Turning the plugin OFF changes only automation. It does not change pricing evaluation, a global default, or a chat override. A shared or unregistered chat stays protected regardless of either global default.
+Both globals start ON. A chat without an explicit setting follows the client
+that most recently opened it. A chat no client has registered stays protected.
 
-## Modes
+An explicit chat setting wins over either global in both directions:
 
-`auto` starts and resumes queued tasks when policy allows, and defers normal interactive peak requests until off-peak returns. `queue` starts queued tasks when allowed but waits for a manual `/offpeak resume` after a peak pause, and blocks interactive peak requests immediately. `guard` enforces interactive model requests without automatically starting queued tasks or deferring interactive requests for a later window.
+```text
+global OFF + chat “Always protect” → waits at peak
+global ON  + chat “Allow peak”     → runs at peak
+```
+
+The Desktop settings page and `/offpeak` expose the same state. `/offpeak on`
+changes only the surface that ran it; `/offpeak desktop on` (or `cli on`) changes
+one named client explicitly.
+
+## Pricing policy
+
+The policy decides whether a provider/model request is `PEAK`, `OFF_PEAK`,
+`FLAT`, `UNTRACKED`, or `UNKNOWN` using the configured weekly windows, the
+vendor's flat priced model list, and the Chinese statutory holiday calendar.
+
+- `PEAK` — waits when the chat is protected.
+- `OFF_PEAK` / `FLAT` — allowed.
+- `UNTRACKED` — no policy installed for the provider; allowed.
+- `UNKNOWN` — a configured provider with an unmatched model; fail-closed.
+
+Invalid configuration always fails closed. `displayTimeZone` affects only the
+status output; the policy timezone moves the boundaries.
 
 ## Boundary behavior
 
-Pricing is enforced at two lifecycle points. A `model.request` hook runs while OpenCode prepares each model request, before the provider attempt and its response-header timeout exist. In `auto` mode a peak-priced request is deferred there: nothing is sent while pricing is blocked, and the same session continues the same turn when off-peak returns. The HTTP/WebSocket transport guard still runs immediately before the provider transport as the final hard barrier, and `queue`/`guard`/OFF requests are blocked there exactly as before. A request already accepted by the provider cannot be withdrawn. Local tool operations already running are allowed to settle; the next paid model request is the enforcement boundary.
+The `model.request` hook runs while OpenCode prepares each model request,
+before a provider attempt and its response-header timeout exist. A protected
+peak request is held there: nothing is sent, and the same session continues the
+same turn when off-peak returns. The HTTP/WebSocket transport hooks remain the
+final hard barrier immediately before the provider transport.
 
-In `auto` mode, an interactive message sent during peak pricing is deferred before the provider attempt and continues automatically when off-peak returns; no second message is needed, and no provider attempt or response-header timer is held open. The release comes from the scheduled pricing transition (or a config change), never from another message, a status command, or a manual wake-up. `queue`/`guard` modes and the OFF state block interactive peak requests immediately, and a plugin shutdown fails a deferred request closed rather than sending it. If OpenCode's own location-activity sweep ends a deferred session (60 minutes with no durable session events), the plugin records the persisted recovery described below.
+A request already accepted by the provider cannot be withdrawn. Local tool
+operations already running are allowed to settle; the next model request is the
+enforcement boundary. If the plugin or server shuts down while a request waits,
+it fails closed rather than guessing the price.
 
-A request that is already in flight and fails with a retryable provider/network error (for example a header timeout) after peak pricing begins is recovered the same way. The plugin stops OpenCode's retry before it can reach the provider, then continues the same session at the next off-peak transition with a short continuation prompt: a queue task returns to `WAITING_OFFPEAK`, and an interactive session is reported under `Recovery` in `/offpeak status`. Non-retryable failures and failures while pricing is allowed keep their normal OpenCode behavior.
+## Recovery
+
+A primary held request persists a deferral. If a reload, restart, or OpenCode's
+inactivity sweep interrupts it, the plugin continues the same session once at
+the next allowed window. A retryable provider/network failure that crosses into
+peak is vetoed and recovered the same way. Non-retryable failures keep their
+normal outcome.
+
+A lost compaction hold re-admits OpenCode's own compaction (semantic recovery,
+not a replay) and keeps it ahead of a prompt that was waiting behind it. A lost
+title hold only verifies the title; it never overwrites a rename or generates a
+second title.
 
 ## Lifecycle authority
 
-OpenCode owns session transcripts, session IDs, tools, permissions, model selection, and background server lifecycle. This plugin stores only task metadata and never selects an implicit global “last session.”
+OpenCode owns sessions, transcripts, tools, permissions, model selection, and
+the background server lifecycle. The plugin stores only pricing policy,
+client/chat protection state, and minimal recovery markers.

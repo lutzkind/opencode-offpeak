@@ -11,12 +11,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {
-  ConfigRepository,
-  OffpeakEngine,
-  QueueRepository,
-  RecoveryRepository,
-} from "../dist/index.js";
+import { ConfigRepository, OffpeakEngine, RecoveryRepository } from "../dist/index.js";
 
 class MemoryStorage {
   values = new Map();
@@ -100,7 +95,6 @@ async function harness(now = "2026-10-12T02:00:00Z", options = {}) {
   const sessions = options.sessions ?? new FakeSessions();
   const config = new ConfigRepository({ configPath: path.join(root, "offpeak.json") });
   const engine = new OffpeakEngine({
-    repository: new QueueRepository(storage),
     recoveries: new RecoveryRepository(storage),
     location: "test-location",
     config,
@@ -330,27 +324,6 @@ test("cancelling a session with no parked request is a no-op", async () => {
   try {
     const result = await h.engine.cancelHold({ sessionID: "nothing-here" });
     assert.deepEqual(result, { cancelled: false, state: "none" });
-  } finally {
-    await h.close();
-  }
-});
-
-test("a queue-owned hold is not cancellable by another plugin", async () => {
-  const clock = new ManualClock("2026-10-12T02:00:00Z");
-  const h = await harness("2026-10-12T02:00:00Z", { clock });
-  try {
-    const task = await h.engine.queue({
-      prompt: "queue work",
-      cwd: "/project",
-      model: selectedModel,
-    });
-    await until(async () => {
-      const tasks = await h.engine.list();
-      return tasks.some((entry) => entry.id === task.id && entry.state === "WAITING_OFFPEAK");
-    });
-    const result = await h.engine.cancelHold({ sessionID: "queue-session" });
-    assert.equal(result.cancelled, false);
-    assert.notEqual(result.state, "refused");
   } finally {
     await h.close();
   }

@@ -7,7 +7,6 @@ import {
   ConfigRepository,
   OffpeakEngine,
   PricingBlockedError,
-  QueueRepository,
   RecoveryRepository,
   SESSION_OVERRIDES_STORAGE_KEY,
   SessionOverridesRepository,
@@ -156,7 +155,6 @@ async function harness(now = "2026-10-12T01:30:00Z", options = {}) {
   });
   const notifications = options.notifications ?? [];
   const engine = new OffpeakEngine({
-    repository: new QueueRepository(storage),
     recoveries: new RecoveryRepository(storage),
     sessionOverrides: new SessionOverridesRepository(storage),
     location: "test-location",
@@ -185,7 +183,6 @@ async function harness(now = "2026-10-12T01:30:00Z", options = {}) {
 /** Reconstructs an engine over the same storage (reload / server restart). */
 async function restart(h) {
   const engine = new OffpeakEngine({
-    repository: new QueueRepository(h.storage),
     recoveries: new RecoveryRepository(h.storage),
     sessionOverrides: new SessionOverridesRepository(h.storage),
     location: "test-location",
@@ -531,125 +528,6 @@ test("multi-session isolation: A off, B and C remain protected, then A on again"
   }
 });
 
-test("queue-owned sessions never inherit the interactive override", async () => {
-  const h = await harness("2026-10-12T00:30:00Z");
-  const providerRequests = { count: 0 };
-  h.sessions.behavior = async ({ sessionID }) => {
-    // This task starts off-peak; its provider attempt crosses into PEAK.
-    await h.engine.guardRequest({ sessionID, ...selectedModel, transport: "http" });
-    providerRequests.count += 1;
-    h.clock.set(PEAK);
-    await h.engine.guardRequest({ sessionID, ...selectedModel, transport: "http" });
-    providerRequests.count += 1;
-  };
-  try {
-    const task = await h.engine.queue({
-      prompt: "crosses into peak",
-      cwd: "/project",
-      model: selectedModel,
-    });
-    await until(async () => {
-      const stored = (await h.engine.list()).find((item) => item.id === task.id);
-      return stored?.state === "WAITING_OFFPEAK" && stored.sessionID !== undefined;
-    });
-    const stored = (await h.engine.list()).find((item) => item.id === task.id);
-    // The queue session carries an explicit user override; the task still must
-    // not inherit it, because background queue tasks keep their own semantics.
-    assert.equal(await h.engine.setSessionProtection(stored.sessionID, "off"), "OFF");
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(providerRequests.count, 1);
-    assert.equal(
-      (await h.engine.list()).find((item) => item.id === task.id).state,
-      "WAITING_OFFPEAK",
-    );
-    // The explicit task-scoped override still works exactly as before.
-    await h.engine.runNow(task.id);
-    await until(async () => providerRequests.count === 2);
-    await until(
-      async () =>
-        (await h.engine.list()).find((item) => item.id === task.id)?.state === "COMPLETED",
-    );
-  } finally {
-    await h.close();
-  }
-});
-
-test("session off in queue and guard modes allows interactive PEAK requests; session on blocks them again", async () => {
-  for (const mode of ["queue", "guard"]) {
-    const h = await harness(PEAK, { options: { mode } });
-    try {
-      assert.equal((await h.engine.status(selectedModel)).mode, mode);
-      await assert.rejects(
-        h.engine.guardModelRequest({
-          sessionID: "session-mode",
-          ...selectedModel,
-          kind: "primary",
-          transport: "model",
-        }),
-        PricingBlockedError,
-      );
-      await h.engine.setSessionProtection("session-mode", "off");
-      await h.engine.guardModelRequest({
-        sessionID: "session-mode",
-        ...selectedModel,
-        kind: "primary",
-        transport: "model",
-      });
-      await h.engine.setSessionProtection("session-mode", "on");
-      await assert.rejects(
-        h.engine.guardModelRequest({
-          sessionID: "session-mode",
-          ...selectedModel,
-          kind: "primary",
-          transport: "model",
-        }),
-        PricingBlockedError,
-      );
-    } finally {
-      await h.close();
-    }
-  }
-});
-
-test("global OFF precedence: the explicit session override still authorizes that session only", async () => {
-  const h = await harness(PEAK);
-  try {
-    await h.engine.setEnabled(false);
-    await h.engine.setSessionProtection("session-allowed", "off");
-    // The explicit session grant is newer and more specific than the global
-    // pause: that one session may run verified PEAK inference.
-    await h.engine.guardModelRequest({
-      sessionID: "session-allowed",
-      ...selectedModel,
-      kind: "primary",
-      transport: "model",
-    });
-    // Every other session keeps the hard barrier while the plugin is OFF.
-    await assert.rejects(
-      h.engine.guardModelRequest({
-        sessionID: "session-protected",
-        ...selectedModel,
-        kind: "primary",
-        transport: "model",
-      }),
-      PricingBlockedError,
-    );
-    // A task still cannot start while globally OFF.
-    const task = await h.engine.queue({
-      prompt: "do not start",
-      cwd: "/project",
-      model: selectedModel,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(h.sessions.prompts.length, 0);
-    assert.equal((await h.engine.list()).find((item) => item.id === task.id).state, "QUEUED");
-    // run-now keeps requiring an enabled plugin.
-    await assert.rejects(h.engine.runNow(task.id), /Turn \/offpeak on/);
-  } finally {
-    await h.close();
-  }
-});
-
 test("session protection persists across a plugin reload and a server restart", async () => {
   const h = await harness(PEAK);
   const sessionID = "session-persisted";
@@ -675,7 +553,7 @@ test("session protection persists across a plugin reload and a server restart", 
       (await restarted.status({ ...selectedModel, sessionID })).sessionProtection,
       "OFF",
     );
-    await restarted.setSessionProtection(sessionID, "on");
+    await restarted.setSessionProtection(sessionID, "auto");
     assert.deepEqual(h.storage.values.get(SESSION_OVERRIDES_STORAGE_KEY), {
       schemaVersion: 1,
       sessions: {},
@@ -828,7 +706,6 @@ test("pending-compaction and pending-title recoveries honor the override without
     sessions.compactions.push(sessionID);
   };
   const engine = new OffpeakEngine({
-    repository: new QueueRepository(storage),
     recoveries: new RecoveryRepository(storage),
     sessionOverrides: new SessionOverridesRepository(storage),
     location: "test-location",
@@ -895,7 +772,6 @@ test("compaction and primary recoveries for one overridden session flush in comp
     sessions.compactions.push(sessionID);
   };
   const engine = new OffpeakEngine({
-    repository: new QueueRepository(storage),
     recoveries: new RecoveryRepository(storage),
     sessionOverrides: new SessionOverridesRepository(storage),
     location: "test-location",

@@ -1,6 +1,6 @@
 import { type FSWatcher, mkdirSync, watch } from "node:fs";
 import path from "node:path";
-import type { ConfigRepository, OffpeakConfig } from "./config.js";
+import type { ConfigRepository } from "./config.js";
 import {
   evaluatePricing,
   flatProviderNote,
@@ -15,8 +15,6 @@ import {
   type ClientsRepository,
   Mutex,
   type OffpeakClient,
-  type OffpeakTask,
-  type QueueRepository,
   type RecoveryEntry,
   type RecoveryOrigin,
   type RecoveryRepository,
@@ -24,8 +22,6 @@ import {
   type SessionOverridesDocument,
   type SessionOverridesRepository,
   type SessionProtectionOverride,
-  type TaskModel,
-  type TaskState,
 } from "./store.js";
 
 export interface SessionSnapshot {
@@ -39,11 +35,8 @@ export interface SessionSnapshot {
 }
 
 export interface SessionDriver {
-  create(input: { cwd: string; model: TaskModel; taskID: string }): Promise<string>;
   prompt(sessionID: string, text: string): Promise<void>;
-  wait(sessionID: string): Promise<void>;
   get(sessionID: string): Promise<SessionSnapshot>;
-  interrupt(sessionID: string): Promise<void>;
   /** Admits OpenCode's own compaction for the session (semantic recovery, never a replay). */
   compact(sessionID: string): Promise<void>;
 }
@@ -78,27 +71,22 @@ export interface PricingAnswer {
 }
 
 /**
- * How a session's protection was decided. `session-override` is the existing
- * explicit `/offpeak session off` authorization; `client-default` means the
- * session was reliably registered by exactly one client; `ambiguous` means the
- * session was observed with both clients; `unknown` means no client has
- * registered it; `queue` is server-owned queue work, which never inherits a
- * client default.
+ * How a session's protection was decided. `session-override` is an explicit
+ * per-chat setting; `client-default` follows the client that most recently
+ * opened the chat; `unknown` means no client registered it, so it stays
+ * protected (fail-closed).
  */
-export type ProtectionSource =
-  | "session-override"
-  | "client-default"
-  | "ambiguous"
-  | "unknown"
-  | "queue";
+export type ProtectionSource = "session-override" | "client-default" | "unknown";
 
-export type ClientOwnershipState = OffpeakClient | "ambiguous" | "unknown" | "queue";
+export type ClientOwnershipState = OffpeakClient | "unknown";
 
 export interface ClientSessionStatus {
   sessionID: string;
   ownership: ClientOwnershipState;
   protection: "ON" | "OFF";
   source: ProtectionSource;
+  /** The explicit chat setting, when one is stored. Absence means follow global. */
+  override?: "on" | "off";
 }
 
 export interface ClientStatus {
@@ -109,12 +97,17 @@ export interface ClientStatus {
 }
 
 export interface EngineStatus {
+  /**
+   * Deprecated compatibility fields. v0.5.0 has no installation-wide enable
+   * switch and no queue/guard mode; these are always true/"auto" so an older
+   * client still renders a coherent status during a rolling update.
+   */
   enabled: boolean;
-  mode: OffpeakConfig["mode"];
-  automaticExecution: "ACTIVE" | "PAUSED";
-  automaticResume: "ACTIVE" | "PAUSED";
-  override: { active: boolean; taskID?: string; expiresAt?: string };
-  /** Explicit session override only: "ON" when no override is stored. */
+  mode: "auto";
+  automaticExecution: "ACTIVE";
+  automaticResume: "ACTIVE";
+  override: { active: false };
+  /** Explicit chat override only: "ON"/"OFF" when one is stored. */
   sessionProtection?: "ON" | "OFF";
   /** Persistent CLI and Desktop client defaults. */
   clientDefaults: { cli: "ON" | "OFF"; desktop: "ON" | "OFF" };
@@ -131,10 +124,12 @@ export interface EngineStatus {
   /** Verified explanation for providers with no time-based pricing (for example OpenCode Zen). */
   providerNote?: string;
   displayTimeZone: string;
+  /** Deprecated queue counters kept at zero for older clients. */
   queued: number;
-  running?: { id: string; sessionID?: string; state: TaskState };
   waiting: number;
-  /** Interactive requests currently held at the pricing boundary (auto mode). */
+  failed: number;
+  tasks: never[];
+  /** Interactive requests currently held at the pricing boundary. */
   interactiveWaiting: number;
   /** Requests parked by an interactive hold right now. */
   interactiveHolds: number;
@@ -150,8 +145,6 @@ export interface EngineStatus {
   titleRecoveryWaiting: number;
   /** Subset of recoveryWaiting: sessions whose held compaction is still pending. */
   compactionRecoveryWaiting: number;
-  failed: number;
-  tasks: OffpeakTask[];
   configPath: string;
   configError?: string;
 }
@@ -335,7 +328,6 @@ export class PricingBlockedError extends Error {
 }
 
 export interface EngineOptions {
-  repository: QueueRepository;
   config: ConfigRepository;
   sessions: SessionDriver;
   /** Optional persisted recovery metadata for interactive sessions. */
@@ -354,7 +346,6 @@ export interface EngineOptions {
 }
 
 export class OffpeakEngine {
-  readonly #repo: QueueRepository;
   readonly #config: ConfigRepository;
   readonly #sessions: SessionDriver;
   readonly #clock: EngineClock;
@@ -363,7 +354,6 @@ export class OffpeakEngine {
   readonly #notify: (event: EngineNotification) => void;
   readonly #lock = new Mutex();
   readonly #signal: AsyncSignal;
-  readonly #runners = new Set<string>();
   readonly #interactiveWaiters = new Set<number>();
   /**
    * Interactive sessions whose current hold was announced to the UI. A resume
@@ -437,7 +427,6 @@ export class OffpeakEngine {
   readonly #recoveryChecks = new Map<string, number>();
   readonly #titleChecks = new Map<string, number>();
   #nextInteractiveWaiter = 0;
-  #timer: NodeJS.Timeout | undefined;
   #recoveryTimer: NodeJS.Timeout | undefined;
   #watcher: FSWatcher | undefined;
   #disposed = false;
@@ -445,7 +434,6 @@ export class OffpeakEngine {
   #pumpRequested = false;
 
   constructor(options: EngineOptions) {
-    this.#repo = options.repository;
     this.#config = options.config;
     this.#sessions = options.sessions;
     this.#recoveriesRepo = options.recoveries;
@@ -481,11 +469,6 @@ export class OffpeakEngine {
       this.#onError(error);
     }
     try {
-      await this.#reconcileAfterLoad();
-    } catch (error) {
-      this.#onError(error);
-    }
-    try {
       await this.pruneSessionProtections();
     } catch (error) {
       this.#onError(error);
@@ -511,60 +494,58 @@ export class OffpeakEngine {
     this.#sessionProtections.clear();
     this.#clientSessions.clear();
     this.#watcher?.close();
-    if (this.#timer) this.#clock.clearTimeout(this.#timer);
     if (this.#recoveryTimer) this.#clock.clearTimeout(this.#recoveryTimer);
     this.#signal.notify();
-  }
-
-  async setEnabled(enabled: boolean): Promise<void> {
-    await this.#lock.run(async () => {
-      const current = await this.#config.read();
-      if (!current.config) throw new Error(`Cannot update offpeak setting: ${current.error}`);
-      await this.#config.write({ ...current.config, enabled });
-    });
-    this.#signal.notify();
-    if (enabled) this.#requestPump();
+    // Let an in-flight recovery pass finish before a replacement engine can
+    // load the same document. Its own disposed checks stop it from delivering.
+    await this.#pumping?.catch(() => undefined);
   }
 
   /**
    * Sets off-peak protection for one interactive session.
    *
-   * `"off"` is an explicit, session-scoped authorization for verified
-   * PEAK-priced inference in that one session: its peak-priced requests are
-   * allowed immediately (including native auxiliary lifecycle work such as
-   * compaction, title and generate), and any still-valid work it is waiting
-   * with is released on the spot. It never applies to queue-owned sessions,
-   * never authorizes an UNKNOWN or invalid-policy request, and never changes
-   * any other session. `"on"` restores the default protection.
+   * - `"on"` forces protection for this chat even while its client global is
+   *   off: verified peak-priced requests wait for off-peak.
+   * - `"off"` allows verified peak-priced inference in this chat even while
+   *   its client global is on, and releases a request already waiting.
+   * - `"auto"` removes the explicit setting; the chat follows the global of
+   *   the client that most recently opened it.
    *
-   * The override persists in OpenCode plugin storage until it is changed or
-   * the session is deleted; there is no timer and no expiry.
+   * The setting never authorizes an UNKNOWN or invalid-policy request, never
+   * applies to a queue task (there is no queue in v0.5.0), and never changes
+   * another chat. It persists in OpenCode plugin storage until it is changed
+   * or the session is deleted; there is no timer and no expiry.
    */
-  async setSessionProtection(sessionID: string, protection: "on" | "off"): Promise<"ON" | "OFF"> {
+  async setSessionProtection(
+    sessionID: string,
+    protection: "on" | "off" | "auto",
+  ): Promise<"ON" | "OFF"> {
     const id = sessionID.trim();
     if (!id) throw new Error("A session ID is required for a session protection change.");
-    const had = this.#sessionProtections.has(id);
-    if (protection === "off") {
-      // Refresh the timestamp but keep a single authoritative entry.
+    const existing = this.#sessionProtections.get(id);
+    if (protection === "auto") {
+      if (existing === undefined) return this.sessionProtection(id);
+      this.#sessionProtections.delete(id);
+      await this.#persistSessionProtections();
+    } else {
+      if (existing?.protection === protection) return protection === "off" ? "OFF" : "ON";
       this.#sessionProtections.set(id, {
-        protection: "off",
+        protection,
         updatedAt: new Date(this.#clock.now()).toISOString(),
       });
-    } else {
-      this.#sessionProtections.delete(id);
+      await this.#persistSessionProtections();
     }
-    if ((protection === "off") !== had) await this.#persistSessionProtections();
     // Wake held requests and recovery delivery so a switch to OFF releases
-    // still-valid waiting work immediately; a switch to ON simply restores the
+    // still-valid waiting work immediately; a switch to ON restores the
     // normal waiting behavior for future requests.
     this.#signal.notify();
     this.#requestPump();
-    return protection === "off" ? "OFF" : "ON";
+    return this.sessionProtection(id);
   }
 
-  /** Off-peak protection for one session; absence means ON (the default). */
+  /** Effective off-peak protection for one session. */
   sessionProtection(sessionID: string): "ON" | "OFF" {
-    return this.#sessionProtections.has(sessionID) ? "OFF" : "ON";
+    return this.#sessionStatus(sessionID).protection;
   }
 
   /**
@@ -574,9 +555,7 @@ export class OffpeakEngine {
   async clientStatus(current?: { sessionID?: string }): Promise<ClientStatus> {
     await this.#refreshClientSettings();
     const sessionID = current?.sessionID?.trim();
-    const task = sessionID ? await this.#taskForSession(sessionID) : undefined;
-    const session =
-      sessionID !== undefined ? this.#sessionStatus(sessionID, task !== undefined) : undefined;
+    const session = sessionID !== undefined ? this.#sessionStatus(sessionID) : undefined;
     return {
       defaults: {
         cli: this.#clientDefaults.cli === "off" ? "OFF" : "ON",
@@ -616,42 +595,33 @@ export class OffpeakEngine {
   }
 
   /**
-   * Records that a client has observed a session. The first client wins the
-   * single-owner state; a second, different client marks the session
-   * ambiguous instead of replacing the first. Repeated registration by the
-   * same client is idempotent.
+   * Records that a client has opened a session. The most recent client owns
+   * the chat's default, so the switch in the client the user is actually
+   * using takes effect. Repeated registration by the same client is
+   * idempotent. An explicit per-chat setting always wins over this default.
    */
   async registerSessionClient(sessionID: string, client: OffpeakClient): Promise<ClientStatus> {
     const id = sessionID.trim();
     if (!id) throw new Error("A session ID is required for client registration.");
     this.#assertClient(client);
     this.#assertClientSettingsWritable();
-    let ownership: SessionClientOwnership | undefined;
+    let changedOwner = false;
     const result = await this.#mutateClients((document) => {
       const existing = document.sessions[id];
-      if (existing?.clients.includes(client)) {
-        ownership = existing;
-        return false;
-      }
-      const clients: OffpeakClient[] = [...(existing?.clients ?? []), client];
-      ownership = {
+      if (existing?.owner === client) return false;
+      const clients: OffpeakClient[] = existing ? [...existing.clients] : [];
+      if (!clients.includes(client)) clients.push(client);
+      document.sessions[id] = {
         clients,
-        ambiguous: clients.length > 1,
+        owner: client,
         updatedAt: new Date(this.#clock.now()).toISOString(),
       };
-      document.sessions[id] = ownership;
+      changedOwner = true;
       return true;
     });
-    if (!result.changed) return this.clientStatus({ sessionID: id });
-    if (ownership?.ambiguous) {
-      // A session opened by both clients must not inherit the client that
-      // happened to register last. Keep it protected and wake any hold so it
-      // re-evaluates under the ambiguous state.
-      this.#signal.notify();
-      this.#requestPump();
-    } else if (this.#clientDefaults[client] === "off") {
-      // The client is authorized for verified peak pricing. A request that
-      // arrived before registration and is currently held may proceed now.
+    if (result.changed && changedOwner) {
+      // The chat now follows a different client default. Wake a held request
+      // so it re-evaluates immediately instead of waiting for the old window.
       this.#signal.notify();
       this.#requestPump();
     }
@@ -713,131 +683,10 @@ export class OffpeakEngine {
     if (overridesChanged) await this.#persistSessionProtections();
   }
 
-  async queue(input: { prompt: string; cwd: string; model: TaskModel }): Promise<OffpeakTask> {
-    const prompt = input.prompt.trim();
-    const cwd = input.cwd.trim();
-    if (!prompt) throw new Error("Task prompt cannot be empty.");
-    if (!cwd) throw new Error("Project working directory is required.");
-    const settings = await this.#config.read();
-    if (!settings.config) throw new Error(`Cannot queue a task: ${settings.error}`);
-    const decision = evaluatePricing(
-      settings.config.policies,
-      input.model.providerID,
-      input.model.modelID,
-      this.#clock.now(),
-    );
-    if (!decision.policy) {
-      throw new Error(
-        decision.reason ?? "No pricing policy matches the selected provider and model.",
-      );
-    }
-    if (decision.state === "UNKNOWN")
-      throw new Error(decision.reason ?? "Pricing policy could not be evaluated.");
-    const now = new Date(this.#clock.now()).toISOString();
-    const task: OffpeakTask = {
-      id: this.#id(),
-      prompt,
-      cwd,
-      model: { ...input.model },
-      policyID: decision.policy.id,
-      state: "QUEUED",
-      createdAt: now,
-      lastTransition: now,
-      retryCount: 0,
-    };
-    await this.#lock.run(async () => {
-      const queue = await this.#repo.load();
-      queue.tasks.push(task);
-      await this.#repo.save(queue);
-    });
-    this.#signal.notify();
-    this.#requestPump();
-    return task;
-  }
-
-  async list(): Promise<OffpeakTask[]> {
-    return this.#lock.run(async () => structuredClone((await this.#repo.load()).tasks));
-  }
-
-  async cancel(taskID: string): Promise<void> {
-    const task = await this.#updateTask(taskID, (current) => {
-      if (current.state === "COMPLETED" || current.state === "CANCELLED") {
-        throw new Error(`Task ${taskID} is already ${current.state.toLowerCase()}.`);
-      }
-      current.state = "CANCELLED";
-      current.cancelledAt = new Date(this.#clock.now()).toISOString();
-      delete current.completedAt;
-      delete current.lastError;
-    });
-    this.#signal.notify();
-    if (task.sessionID) await this.#sessions.interrupt(task.sessionID).catch(this.#onError);
-    this.#requestPump();
-  }
-
-  async remove(taskID: string): Promise<void> {
-    await this.#lock.run(async () => {
-      const queue = await this.#repo.load();
-      const task = queue.tasks.find((candidate) => candidate.id === taskID);
-      if (!task) throw new Error(`Task ${taskID} was not found.`);
-      if (!["COMPLETED", "FAILED", "CANCELLED"].includes(task.state)) {
-        throw new Error(`Task ${taskID} is ${task.state}; cancel it before removing it.`);
-      }
-      queue.tasks = queue.tasks.filter((candidate) => candidate.id !== taskID);
-      await this.#repo.save(queue);
-    });
-  }
-
-  async retry(taskID: string): Promise<void> {
-    await this.#updateTask(taskID, (task) => {
-      if (task.state !== "FAILED")
-        throw new Error(`Only failed tasks can be retried (currently ${task.state}).`);
-      task.retryCount += 1;
-      task.lastAttemptAt = new Date(this.#clock.now()).toISOString();
-      delete task.lastError;
-      task.state = "QUEUED";
-      task.resumeRequested = true;
-    });
-    this.#signal.notify();
-    this.#requestPump();
-  }
-
-  async resume(taskID: string): Promise<void> {
-    await this.#updateTask(taskID, (task) => {
-      if (task.state !== "WAITING_OFFPEAK") {
-        throw new Error(`Only waiting tasks can be resumed (currently ${task.state}).`);
-      }
-      task.resumeRequested = true;
-    });
-    this.#signal.notify();
-    this.#requestPump();
-  }
-
-  async runNow(taskID: string, durationMs = 15 * 60_000): Promise<void> {
-    const settings = await this.#config.read();
-    if (!settings.config) throw new Error(`Cannot override pricing: ${settings.error}`);
-    if (!settings.config.enabled)
-      throw new Error("Turn /offpeak on before using an explicit peak-price override.");
-    await this.#updateTask(taskID, (task) => {
-      if (!["QUEUED", "WAITING_OFFPEAK", "FAILED"].includes(task.state)) {
-        throw new Error(`Task ${taskID} cannot be run now while it is ${task.state}.`);
-      }
-      if (task.state === "FAILED") {
-        task.retryCount += 1;
-        task.lastAttemptAt = new Date(this.#clock.now()).toISOString();
-      }
-      task.state = task.sessionID ? "WAITING_OFFPEAK" : "QUEUED";
-      delete task.lastError;
-      task.overrideUntil = new Date(this.#clock.now() + durationMs).toISOString();
-      task.resumeRequested = true;
-    });
-    this.#signal.notify();
-    this.#requestPump();
-  }
-
   /**
    * Evaluate the configured pricing policy for one model. This is the single
    * source of truth for PEAK/OFF_PEAK and is deliberately side-effect free:
-   * no queue, hold, timer, or provider request is involved.
+   * no hold, timer, or provider request is involved.
    */
   async pricing(input: PricingQuery): Promise<PricingAnswer> {
     const settings = await this.#config.read();
@@ -871,11 +720,10 @@ export class OffpeakEngine {
     await this.#refreshClientSettings();
     if (current?.sessionID !== undefined) await this.#pruneSessionOverride(current.sessionID);
     const settings = await this.#config.read();
-    const tasks = await this.list();
     const selected =
       current?.providerID && current.modelID
         ? { providerID: current.providerID, modelID: current.modelID }
-        : tasks.find((task) => task.state === "RUNNING" || task.state === "WAITING_OFFPEAK")?.model;
+        : undefined;
     const decision =
       settings.config && selected
         ? evaluatePricing(
@@ -885,31 +733,23 @@ export class OffpeakEngine {
             this.#clock.now(),
           )
         : { state: "UNKNOWN" as const, allowed: false, reason: "No provider/model selected." };
-    const running = tasks.find(
-      (task) => task.state === "RUNNING" || task.state === "WAITING_OFFPEAK",
-    );
-    const override = tasks.find(
-      (task) => task.overrideUntil && Date.parse(task.overrideUntil) > this.#clock.now(),
-    );
-    const enabled = settings.config?.enabled ?? false;
     const providerNote = selected?.providerID ? flatProviderNote(selected.providerID) : undefined;
+    // Compatibility field: the explicit chat setting, or ON when the chat has
+    // none. Use `effectiveProtection` for the value after client defaults.
     const sessionProtection =
-      current?.sessionID !== undefined ? this.sessionProtection(current.sessionID) : undefined;
+      current?.sessionID === undefined
+        ? undefined
+        : this.#sessionProtections.get(current.sessionID)?.protection === "off"
+          ? "OFF"
+          : "ON";
     const client =
-      current?.sessionID !== undefined
-        ? this.#sessionStatus(
-            current.sessionID,
-            tasks.some((task) => task.sessionID === current.sessionID),
-          )
-        : undefined;
+      current?.sessionID !== undefined ? this.#sessionStatus(current.sessionID) : undefined;
     return {
-      enabled,
-      mode: settings.config?.mode ?? "auto",
-      automaticExecution: enabled && settings.config?.mode !== "guard" ? "ACTIVE" : "PAUSED",
-      automaticResume: enabled && settings.config?.mode === "auto" ? "ACTIVE" : "PAUSED",
-      override: override?.overrideUntil
-        ? { active: true, taskID: override.id, expiresAt: override.overrideUntil }
-        : { active: false },
+      enabled: true,
+      mode: "auto",
+      automaticExecution: "ACTIVE",
+      automaticResume: "ACTIVE",
+      override: { active: false },
       ...(sessionProtection ? { sessionProtection } : {}),
       clientDefaults: {
         cli: this.#clientDefaults.cli === "off" ? "OFF" : "ON",
@@ -926,23 +766,16 @@ export class OffpeakEngine {
       ...(decision.policy?.id ? { policyID: decision.policy.id } : {}),
       pricingState: decision.state,
       requestsAllowed:
-        (!enabled && running !== undefined) || decision.state === "UNKNOWN"
+        decision.state === "UNKNOWN"
           ? false
           : decision.allowed || (client?.protection === "OFF" && decision.state === "PEAK"),
       ...(decision.nextTransition !== undefined ? { nextTransition: decision.nextTransition } : {}),
       ...(providerNote && decision.state === "UNTRACKED" ? { providerNote } : {}),
       displayTimeZone: settings.config?.displayTimeZone ?? "UTC",
-      queued: tasks.filter((task) => task.state === "QUEUED").length,
-      ...(running
-        ? {
-            running: {
-              id: running.id,
-              ...(running.sessionID ? { sessionID: running.sessionID } : {}),
-              state: running.state,
-            },
-          }
-        : {}),
-      waiting: tasks.filter((task) => task.state === "WAITING_OFFPEAK").length,
+      queued: 0,
+      waiting: 0,
+      failed: 0,
+      tasks: [],
       interactiveWaiting: this.#interactiveWaiters.size,
       interactiveHolds: this.holdDiagnostics().interactiveHolds,
       armedRefusals: this.holdDiagnostics().armedRefusals,
@@ -955,8 +788,6 @@ export class OffpeakEngine {
       compactionRecoveryWaiting: [...this.#recoveries.values()].filter(
         (entry) => entry.origin === COMPACTION_RECOVERY_ORIGIN,
       ).length,
-      failed: tasks.filter((task) => task.state === "FAILED").length,
-      tasks,
       configPath: settings.path,
       ...(settings.error ? { configError: settings.error } : {}),
     };
@@ -1020,11 +851,10 @@ export class OffpeakEngine {
     input: GuardInput,
     deferralOrigin: RecoveryOrigin | undefined,
   ): Promise<void> {
-    // Another OpenCode location may have changed a global default. Re-read it
-    // before the authorization decision; an unreadable document falls back to
-    // protected, never to an inferred bypass.
+    // Another OpenCode location may have changed a global default or another
+    // client may have opened this chat. Re-read before the decision; an
+    // unreadable document falls back to protected, never to an inferred bypass.
     await this.#refreshClientSettings();
-    const task = await this.#taskForSession(input.sessionID);
     const first = await this.#config.read();
     if (!first.config)
       throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${first.error}`);
@@ -1038,74 +868,43 @@ export class OffpeakEngine {
     if (decision.state === "UNKNOWN") {
       throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${decision.reason}`);
     }
-    // An explicit session-scoped override: verified PEAK pricing is authorized
-    // for this interactive session only. It is checked after the UNKNOWN
-    // fail-closed guard and after the config error guard, so it can never turn
-    // an unverified model or an invalid configuration into an allowed request,
-    // and it never applies to a queue-owned session (task !== undefined).
-    if (
-      task === undefined &&
-      decision.state === "PEAK" &&
-      this.#effectiveProtectionOff(input.sessionID, false)
-    )
+    // The explicit chat setting wins over the client global; otherwise the
+    // chat follows the client that most recently opened it. This check is
+    // after the UNKNOWN fail-closed guard, so it can never turn an unverified
+    // model or an invalid configuration into an allowed request.
+    if (decision.state === "PEAK" && this.#sessionStatus(input.sessionID).protection === "OFF")
       return;
-    if (this.#hasOverride(task, this.#clock.now()) && first.config.enabled) return;
-    if (decision.allowed && (!task || first.config.enabled)) return;
+    if (decision.allowed) return;
 
-    if (task && first.config.mode === "auto") {
-      await this.#transition(task.id, "WAITING_OFFPEAK");
-      await this.#holdUntilAllowed(input, task, undefined);
-      return;
+    // Hold the same request and the same session until the allowed window.
+    // Only the user's own primary request gets visible feedback; auxiliary
+    // title/compaction/generate holds stay silent.
+    if (input.kind === "primary") {
+      this.#announceHold(input.sessionID, decision, first.config.displayTimeZone);
     }
-
-    // A normal interactive request in auto mode is held at the boundary instead of
-    // being discarded; the same request and session continue when pricing allows.
-    if (!task && first.config.enabled && first.config.mode === "auto") {
-      // Only the user's own primary request gets visible feedback; auxiliary
-      // title/compaction/generate holds stay silent.
-      if (input.kind === "primary") {
-        this.#announceHold(input.sessionID, decision, first.config.displayTimeZone);
-      }
-      await this.#holdUntilAllowed(input, undefined, deferralOrigin);
-      return;
-    }
-
-    if (task) await this.#transition(task.id, "WAITING_OFFPEAK");
-    const reason = !first.config.enabled
-      ? "OpenCode Offpeak is disabled; automatic task execution is paused and peak pricing remains blocked."
-      : `${input.providerID}/${input.modelID} is in a peak-price window under policy ${decision.policy?.id}.`;
-    throw new PricingBlockedError(
-      task
-        ? `${reason} Use /offpeak run-now <task-id> for an explicit 15-minute task override.`
-        : `${reason} Interactive requests wait for off-peak automatically only in auto mode; queue and guard modes block them immediately.`,
-    );
+    await this.#holdUntilAllowed(input, deferralOrigin);
   }
 
   /**
-   * Holds a request at the provider transport boundary until the plugin is enabled
-   * and the pricing policy allows it. Used by queue-owned auto tasks, by normal
-   * interactive auto-mode requests, and by the pre-model guard.
+   * Holds a request at the provider transport boundary until the pricing
+   * policy allows it.
    *
    * The hard guarantee: the caller never crosses the transport boundary while
-   * pricing is blocked. Wake-ups come from the shared config signal and one timer
-   * for the policy's next transition. Queue tasks move through WAITING_OFFPEAK and
-   * may use their explicit override; interactive requests are tracked in memory
-   * (for status) and fail closed on shutdown instead of guessing the price state.
+   * pricing is blocked. Wake-ups come from the shared config signal and one
+   * timer for the policy's next transition. Requests are tracked in memory
+   * (for status) and fail closed on shutdown instead of guessing the price
+   * state.
    *
-   * `deferralOrigin` marks an interactive request that is safe to resume after a
-   * plugin reload or server restart: the recovery entry is persisted while the
+   * `deferralOrigin` marks a request that is safe to resume after a plugin
+   * reload or server restart: the recovery entry is persisted while the
    * request waits and removed again when the wait ends normally. A shutdown or
    * guard error leaves it in place so recovery can be delivered once the
    * allowed window arrives.
    */
-  async #holdUntilAllowed(
-    input: GuardInput,
-    task?: OffpeakTask,
-    deferralOrigin?: RecoveryOrigin,
-  ): Promise<void> {
-    const waiter = task ? undefined : this.#registerInteractiveWaiter();
-    const deferred = deferralOrigin !== undefined && !task;
-    if (deferred) {
+  async #holdUntilAllowed(input: GuardInput, deferralOrigin?: RecoveryOrigin): Promise<void> {
+    const waiter = this.#registerInteractiveWaiter();
+    const deferred = deferralOrigin !== undefined;
+    if (deferralOrigin !== undefined) {
       await this.#registerRecovery(
         input.sessionID,
         input.providerID,
@@ -1114,7 +913,7 @@ export class OffpeakEngine {
       );
       this.#requestPump();
     }
-    const hold = task === undefined ? this.#beginHold(input) : undefined;
+    const hold = this.#beginHold(input);
     this.#trackActiveHold(input.sessionID);
     const abortEpoch = this.#holdAborts.get(input.sessionID) ?? 0;
     // A caller can cancel the hold while this loop is awaiting config or
@@ -1122,7 +921,7 @@ export class OffpeakEngine {
     // before any path commits, so a refused hold is never resurrected by a
     // concurrent protection-off wake-up.
     const refuseCancelledHold = async (): Promise<boolean> => {
-      if (hold === undefined || hold.state !== "refused") return false;
+      if (hold.state !== "refused") return false;
       this.#armRefusal(hold);
       if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
       return true;
@@ -1153,56 +952,44 @@ export class OffpeakEngine {
           this.#clock.now(),
         );
         if (decision.state === "UNKNOWN") {
-          if (task) await this.#setTaskError(task.id, decision.reason);
           throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${decision.reason}`);
         }
-        // The user switched this interactive session's protection off while it
-        // was waiting: the verified PEAK request is authorized now, so the hold
-        // commits and the same request continues — no retry, no re-send, and no
-        // duplicate provider call. A refused hold is handled above and is never
-        // resurrected by this path.
+        // The chat was switched off (explicitly, or through its client global)
+        // while it was waiting: the verified PEAK request is authorized now, so
+        // the hold commits and the same request continues — no retry, no
+        // re-send, and no duplicate provider call. A refused hold is handled
+        // above and is never resurrected by this path.
         if (
-          task === undefined &&
           decision.state === "PEAK" &&
-          this.#effectiveProtectionOff(input.sessionID, false)
+          this.#sessionStatus(input.sessionID).protection === "OFF"
         ) {
-          if (hold !== undefined) hold.state = "committed";
+          hold.state = "committed";
           if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
           this.#announceResume(input.sessionID, "override");
           return;
         }
-        if (
-          task &&
-          settings.config.enabled &&
-          this.#hasOverride(await this.#taskByID(task.id), this.#clock.now())
-        ) {
-          await this.#transition(task.id, "RUNNING");
-          return;
-        }
-        if (settings.config.enabled && decision.allowed) {
+        if (decision.allowed) {
           // Commit synchronously, before any await can interleave a cancel: from
           // here the dispatch wins and `cancelHold` reports that honestly.
-          if (hold !== undefined) hold.state = "committed";
-          if (task) await this.#transition(task.id, "RUNNING");
+          hold.state = "committed";
           if (deferred) await this.#removeRecovery(input.sessionID, [deferralOrigin]);
           this.#announceResume(input.sessionID);
           return;
         }
-        if (settings.config.enabled && decision.nextTransition === undefined) {
+        if (decision.nextTransition === undefined) {
           throw new PricingBlockedError(
             "Offpeak policy has no known next transition; request blocked.",
           );
         }
-        const delay =
-          settings.config.enabled && decision.nextTransition !== undefined
-            ? Math.max(1, decision.nextTransition - this.#clock.now())
-            : undefined;
-        await this.#signal.waitSince(signalVersion, delay);
+        await this.#signal.waitSince(
+          signalVersion,
+          Math.max(1, decision.nextTransition - this.#clock.now()),
+        );
       }
       throw new PricingBlockedError("Offpeak plugin is shutting down; request blocked.");
     } finally {
-      if (hold !== undefined) this.#endHold(hold);
-      if (waiter !== undefined) this.#interactiveWaiters.delete(waiter);
+      this.#endHold(hold);
+      this.#interactiveWaiters.delete(waiter);
       this.#announcedHolds.delete(input.sessionID);
       this.#untrackActiveHold(input.sessionID);
     }
@@ -1433,10 +1220,10 @@ export class OffpeakEngine {
 
   /**
    * Called from OpenCode's `retry` hook before a retry is scheduled. When a
-   * retryable provider/network failure happens while pricing is blocked in auto
-   * mode, the retry is stopped and the work is marked to continue at the next
-   * allowed window instead of failing the turn. Returns "hold" when the caller
-   * must veto the retry (`decision = { retry: false }`).
+   * retryable provider/network failure happens while pricing is blocked, the
+   * retry is stopped and the work is marked to continue at the next allowed
+   * window instead of failing the turn. Returns "hold" when the caller must
+   * veto the retry (`decision = { retry: false }`).
    */
   async noteRetryFailure(input: RetryFailureInput): Promise<"pass" | "hold"> {
     if (this.#disposed) return "pass";
@@ -1457,7 +1244,6 @@ export class OffpeakEngine {
     }
     const settings = await this.#config.read();
     if (!settings.config) return "pass";
-    if (!settings.config.enabled || settings.config.mode !== "auto") return "pass";
     if (!input.willRetry && !RETRYABLE_ERROR_TYPES.has(input.errorType)) return "pass";
     const decision = evaluatePricing(
       settings.config.policies,
@@ -1466,24 +1252,10 @@ export class OffpeakEngine {
       this.#clock.now(),
     );
     if (decision.state !== "PEAK") return "pass";
-    const task = await this.#taskForSession(input.sessionID);
-    if (task) {
-      if (this.#hasOverride(task, this.#clock.now())) return "pass";
-      if (task.state !== "RUNNING" && task.state !== "WAITING_OFFPEAK") return "pass";
-      if (task.state === "RUNNING") {
-        await this.#updateTask(task.id, (current) => {
-          current.state = "WAITING_OFFPEAK";
-          delete current.lastError;
-        });
-      }
-      this.#signal.notify();
-      this.#requestPump();
-      return "hold";
-    }
     // This session is explicitly operating at verified PEAK rates: a retryable
     // provider failure is nothing more than that, so OpenCode's normal retry
     // behavior applies and no recovery continuation is registered.
-    if (this.#effectiveProtectionOff(input.sessionID, false)) return "pass";
+    if (this.#effectiveProtectionOff(input.sessionID)) return "pass";
     await this.#registerRecovery(input.sessionID, input.providerID, input.modelID, "retry-failure");
     this.#signal.notify();
     this.#requestPump();
@@ -1544,7 +1316,7 @@ export class OffpeakEngine {
     const document = await repo.load();
     this.#sessionProtections.clear();
     for (const [sessionID, override] of Object.entries(document.sessions)) {
-      if (override.protection === "off") this.#sessionProtections.set(sessionID, override);
+      this.#sessionProtections.set(sessionID, override);
     }
   }
 
@@ -1569,7 +1341,7 @@ export class OffpeakEngine {
     for (const [sessionID, ownership] of Object.entries(document.sessions)) {
       this.#clientSessions.set(sessionID, {
         clients: [...ownership.clients],
-        ambiguous: ownership.ambiguous,
+        owner: ownership.owner,
         updatedAt: ownership.updatedAt,
       });
     }
@@ -1584,7 +1356,7 @@ export class OffpeakEngine {
           sessionID,
           {
             clients: [...ownership.clients],
-            ambiguous: ownership.ambiguous,
+            owner: ownership.owner,
             updatedAt: ownership.updatedAt,
           },
         ]),
@@ -1688,24 +1460,22 @@ export class OffpeakEngine {
 
   /**
    * The effective protection of one session. Precedence is explicit:
-   * 1. queue-owned work never inherits a client default;
-   * 2. an explicit per-session override wins over any client default;
-   * 3. a session with exactly one registering client uses that client's default;
-   * 4. an unregistered or shared session is protected.
+   * 1. an explicit per-chat setting wins over any client global;
+   * 2. otherwise the chat follows the client that most recently opened it;
+   * 3. an unregistered session is protected (fail-closed).
    */
-  #sessionStatus(sessionID: string, taskOwned: boolean): ClientSessionStatus {
-    const override = this.#sessionProtections.has(sessionID);
+  #sessionStatus(sessionID: string): ClientSessionStatus {
+    const override = this.#sessionProtections.get(sessionID);
     const ownership = this.#clientSessions.get(sessionID);
-    const clients = ownership?.clients ?? [];
-    let state: ClientOwnershipState;
-    if (taskOwned) state = "queue";
-    else if (clients.length > 1) state = "ambiguous";
-    else if (clients.length === 1) state = clients[0] ?? "unknown";
-    else state = "unknown";
-
-    if (taskOwned) return { sessionID, ownership: state, protection: "ON", source: "queue" };
+    const state: ClientOwnershipState = ownership?.owner ?? "unknown";
     if (override) {
-      return { sessionID, ownership: state, protection: "OFF", source: "session-override" };
+      return {
+        sessionID,
+        ownership: state,
+        protection: override.protection === "off" ? "OFF" : "ON",
+        source: "session-override",
+        override: override.protection,
+      };
     }
     if (state === "cli" || state === "desktop") {
       return {
@@ -1717,15 +1487,15 @@ export class OffpeakEngine {
     }
     return {
       sessionID,
-      ownership: state,
+      ownership: "unknown",
       protection: "ON",
-      source: state === "ambiguous" ? "ambiguous" : "unknown",
+      source: "unknown",
     };
   }
 
   /** True when the session is authorized for verified PEAK inference. */
-  #effectiveProtectionOff(sessionID: string, taskOwned: boolean): boolean {
-    return this.#sessionStatus(sessionID, taskOwned).protection === "OFF";
+  #effectiveProtectionOff(sessionID: string): boolean {
+    return this.#sessionStatus(sessionID).protection === "OFF";
   }
 
   /** Removes the override for one session that no longer exists (lazy). */
@@ -1813,14 +1583,7 @@ export class OffpeakEngine {
       return;
     }
     const settings = await this.#config.read();
-    if (!settings.config) return;
-    // Queue-owned work never inherits a client default. Load the queue once
-    // for this pass so the recovery checks below can distinguish it from an
-    // interactive session without a per-entry queue read.
-    const queue = await this.#repo.load();
-    const taskSessions = new Set(
-      queue.tasks.flatMap((task) => (task.sessionID === undefined ? [] : [task.sessionID])),
-    );
+    if (!settings.config || this.#disposed) return;
     let next: number | undefined;
     const entries = [...this.#recoveries.values()].filter(
       (entry) => entry.directory === this.#location,
@@ -1850,14 +1613,13 @@ export class OffpeakEngine {
       // the re-triggered compaction request itself holds at the pre-model
       // guard through the peak window (zero provider traffic), and OpenCode's
       // runner keeps a pending compaction ahead of queued prompts, so
-      // compact-first ordering survives without waiting for the boundary. In
-      // queue/guard modes a re-trigger during peak would fail closed, so it
-      // waits for the allowed window — unless this session's protection was
-      // explicitly switched off, in which case its pending compaction proceeds
-      // immediately at the authorized peak rates.
+      // compact-first ordering survives without waiting for the boundary. A
+      // chat whose protection is off proceeds immediately at peak rates.
+      // The re-triggered compaction request itself holds at the pre-model
+      // guard through the peak window, so it is admitted as soon as the
+      // session has settled; only an UNKNOWN model stays fail-closed.
       const deliverable =
-        (settings.config.enabled && (settings.config.mode === "auto" || decision.allowed)) ||
-        this.#effectiveProtectionOff(entry.sessionID, taskSessions.has(entry.sessionID));
+        decision.state !== "UNKNOWN" || this.#effectiveProtectionOff(entry.sessionID);
       if (deliverable) {
         const result = await this.#deliverCompactionRecovery(entry);
         if (result.retryAt !== undefined)
@@ -1865,7 +1627,7 @@ export class OffpeakEngine {
         if (result.admitted) compactionAdmitted.add(entry.sessionID);
         continue;
       }
-      if (settings.config.enabled && decision.nextTransition !== undefined) {
+      if (decision.nextTransition !== undefined) {
         next =
           next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
       }
@@ -1883,15 +1645,12 @@ export class OffpeakEngine {
       // both. A session whose protection is explicitly off proceeds
       // immediately.
       const forced = compactionAdmitted.has(entry.sessionID);
-      if (
-        (settings.config.enabled && (forced || decision.allowed)) ||
-        this.#effectiveProtectionOff(entry.sessionID, taskSessions.has(entry.sessionID))
-      ) {
+      if (forced || decision.allowed || this.#effectiveProtectionOff(entry.sessionID)) {
         const retryAt = await this.#deliverRecovery(entry, { force: forced });
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
         continue;
       }
-      if (settings.config.enabled && decision.nextTransition !== undefined) {
+      if (decision.nextTransition !== undefined) {
         next =
           next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
       }
@@ -1903,15 +1662,12 @@ export class OffpeakEngine {
         entry.modelID,
         this.#clock.now(),
       );
-      if (
-        (settings.config.enabled && decision.allowed) ||
-        this.#effectiveProtectionOff(entry.sessionID, taskSessions.has(entry.sessionID))
-      ) {
+      if (decision.allowed || this.#effectiveProtectionOff(entry.sessionID)) {
         const retryAt = await this.#deliverTitleRecovery(entry);
         if (retryAt !== undefined) next = next === undefined ? retryAt : Math.min(next, retryAt);
         continue;
       }
-      if (settings.config.enabled && decision.nextTransition !== undefined) {
+      if (decision.nextTransition !== undefined) {
         next =
           next === undefined ? decision.nextTransition : Math.min(next, decision.nextTransition);
       }
@@ -1988,6 +1744,7 @@ export class OffpeakEngine {
   async #deliverCompactionRecovery(
     entry: RecoveryEntry,
   ): Promise<{ retryAt?: number; admitted: boolean }> {
+    if (this.#disposed) return { admitted: false };
     let session: SessionSnapshot;
     try {
       session = await this.#sessions.get(entry.sessionID);
@@ -2020,6 +1777,7 @@ export class OffpeakEngine {
       );
       return { admitted: false };
     }
+    if (this.#disposed) return { admitted: false };
     // Remove before admitting so the compaction is requested at most once.
     await this.#removeRecovery(entry.sessionID, [COMPACTION_RECOVERY_ORIGIN]);
     try {
@@ -2094,49 +1852,6 @@ export class OffpeakEngine {
     this.#recoveryTimer.unref?.();
   }
 
-  #hasOverride(task: OffpeakTask | undefined, nowMs: number): boolean {
-    return Boolean(task?.overrideUntil && Date.parse(task.overrideUntil) > nowMs);
-  }
-
-  async #taskForSession(sessionID: string): Promise<OffpeakTask | undefined> {
-    return this.#lock.run(async () =>
-      (await this.#repo.load()).tasks.find((task) => task.sessionID === sessionID),
-    );
-  }
-
-  async #taskByID(taskID: string): Promise<OffpeakTask | undefined> {
-    return this.#lock.run(async () =>
-      (await this.#repo.load()).tasks.find((task) => task.id === taskID),
-    );
-  }
-
-  async #updateTask(taskID: string, update: (task: OffpeakTask) => void): Promise<OffpeakTask> {
-    return this.#lock.run(async () => {
-      const queue = await this.#repo.load();
-      const task = queue.tasks.find((item) => item.id === taskID);
-      if (!task) throw new Error(`Task ${taskID} was not found.`);
-      update(task);
-      task.lastTransition = new Date(this.#clock.now()).toISOString();
-      await this.#repo.save(queue);
-      return structuredClone(task);
-    });
-  }
-
-  async #transition(taskID: string, state: TaskState): Promise<void> {
-    await this.#updateTask(taskID, (task) => {
-      task.state = state;
-      if (state === "RUNNING" && !task.startedAt)
-        task.startedAt = new Date(this.#clock.now()).toISOString();
-    });
-  }
-
-  async #setTaskError(taskID: string, error?: string): Promise<void> {
-    await this.#updateTask(taskID, (task) => {
-      if (error === undefined) delete task.lastError;
-      else task.lastError = error;
-    });
-  }
-
   #requestPump(): void {
     if (this.#disposed) return;
     this.#pumpRequested = true;
@@ -2155,218 +1870,7 @@ export class OffpeakEngine {
   }
 
   async #pump(): Promise<void> {
-    if (this.#timer) {
-      this.#clock.clearTimeout(this.#timer);
-      this.#timer = undefined;
-    }
+    if (this.#disposed) return;
     await this.#flushRecoveries();
-    const settings = await this.#config.read();
-    if (!settings.config?.enabled || this.#disposed) return;
-    if (this.#runners.size) return;
-
-    const queue = await this.#lock.run(() => this.#repo.load());
-    const hasRunning = queue.tasks.some((task) => task.state === "RUNNING");
-    if (hasRunning) return;
-
-    const tasks = queue.tasks
-      .filter((task) => task.state === "QUEUED" || task.state === "WAITING_OFFPEAK")
-      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-    for (const task of tasks) {
-      const override = this.#hasOverride(task, this.#clock.now());
-      if (settings.config.mode === "guard" && !task.resumeRequested && !override) continue;
-      if (
-        task.state === "WAITING_OFFPEAK" &&
-        settings.config.mode === "queue" &&
-        !task.resumeRequested
-      )
-        continue;
-      const decision = evaluatePricing(
-        settings.config.policies,
-        task.model.providerID,
-        task.model.modelID,
-        this.#clock.now(),
-      );
-      if (decision.state === "UNKNOWN" || decision.state === "UNTRACKED") {
-        await this.#updateTask(task.id, (current) => {
-          current.state = "FAILED";
-          current.lastError = decision.reason ?? "No pricing policy matches this task.";
-        });
-        continue;
-      }
-      if (!decision.allowed && !override) {
-        await this.#updateTask(task.id, (current) => {
-          current.state = "WAITING_OFFPEAK";
-          delete current.lastError;
-        });
-        this.#schedule(decision.nextTransition);
-        return;
-      }
-      if (
-        task.state === "WAITING_OFFPEAK" &&
-        settings.config.mode === "queue" &&
-        !task.resumeRequested &&
-        !override
-      )
-        continue;
-      if (task.resumeRequested) {
-        await this.#updateTask(task.id, (current) => {
-          current.resumeRequested = false;
-        });
-      }
-      await this.#transition(task.id, "RUNNING");
-      this.#runners.add(task.id);
-      try {
-        await this.#execute(task, task.sessionID !== undefined);
-      } finally {
-        this.#runners.delete(task.id);
-      }
-      const current = await this.#taskByID(task.id);
-      if (current?.state === "WAITING_OFFPEAK") {
-        if (settings.config.mode === "auto") this.#scheduleForTask(current, settings.config);
-        return;
-      }
-      if (current?.state === "FAILED" || current?.state === "CANCELLED") return;
-      return this.#pump();
-    }
-  }
-
-  #schedule(at?: number): void {
-    if (at === undefined || this.#disposed) return;
-    if (this.#timer) this.#clock.clearTimeout(this.#timer);
-    const delay = Math.max(1, at - this.#clock.now());
-    this.#timer = this.#clock.setTimeout(() => {
-      this.#timer = undefined;
-      this.#requestPump();
-    }, delay);
-    this.#timer.unref?.();
-  }
-
-  #scheduleForTask(task: OffpeakTask, settings: OffpeakConfig): void {
-    const decision = evaluatePricing(
-      settings.policies,
-      task.model.providerID,
-      task.model.modelID,
-      this.#clock.now(),
-    );
-    this.#schedule(decision.nextTransition);
-  }
-
-  async #execute(task: OffpeakTask, resume: boolean): Promise<void> {
-    let sessionID = task.sessionID;
-    try {
-      if (!sessionID) {
-        sessionID = await this.#sessions.create({
-          cwd: task.cwd,
-          model: task.model,
-          taskID: task.id,
-        });
-        const createdSessionID = sessionID;
-        await this.#updateTask(task.id, (current) => {
-          current.sessionID = createdSessionID;
-          current.startedAt ??= new Date(this.#clock.now()).toISOString();
-        });
-      } else if (resume) {
-        await this.#sessions.wait(sessionID);
-        const state = await this.#sessions.get(sessionID);
-        if (state.outcome === "succeeded") {
-          await this.#complete(task.id);
-          return;
-        }
-      }
-
-      const current = await this.#taskByID(task.id);
-      if (current?.state === "CANCELLED") return;
-      if (!sessionID) throw new Error("OpenCode did not return a session ID.");
-      const prompt = resume
-        ? `Continue the task in this session from the current project state. Avoid repeating work that is already complete.\n\nOriginal task:\n${task.prompt}`
-        : task.prompt;
-      await this.#sessions.prompt(sessionID, prompt);
-      await this.#sessions.wait(sessionID);
-      const finalState = await this.#sessions.get(sessionID);
-      const latest = await this.#taskByID(task.id);
-      if (latest?.state === "CANCELLED" || latest?.state === "WAITING_OFFPEAK") return;
-      if (finalState.outcome === "succeeded") {
-        await this.#complete(task.id);
-        return;
-      }
-      const message =
-        finalState.outcome === "interrupted"
-          ? "OpenCode interrupted the session. Use retry to continue this same session."
-          : finalState.outcome === "failed"
-            ? "OpenCode reported a failed session. Use retry to continue this same session."
-            : "The session became idle without a succeeded outcome. Use retry to continue this same session.";
-      await this.#fail(task.id, message);
-    } catch (error) {
-      const latest = await this.#taskByID(task.id).catch(() => undefined);
-      if (latest?.state === "CANCELLED" || latest?.state === "WAITING_OFFPEAK") return;
-      await this.#fail(task.id, error instanceof Error ? error.message : "OpenCode task failed.");
-    }
-  }
-
-  async #complete(taskID: string): Promise<void> {
-    await this.#updateTask(taskID, (task) => {
-      task.state = "COMPLETED";
-      task.completedAt = new Date(this.#clock.now()).toISOString();
-      delete task.lastError;
-      delete task.overrideUntil;
-      task.resumeRequested = false;
-    });
-  }
-
-  async #fail(taskID: string, message: string): Promise<void> {
-    await this.#updateTask(taskID, (task) => {
-      task.state = "FAILED";
-      task.lastError = message;
-      delete task.overrideUntil;
-      task.resumeRequested = false;
-    });
-  }
-
-  async #reconcileAfterLoad(): Promise<void> {
-    const queue = await this.#lock.run(() => this.#repo.load());
-    for (const task of queue.tasks) {
-      if (task.state === "RUNNING") {
-        if (!task.sessionID) {
-          await this.#fail(
-            task.id,
-            "Server restarted before the session ID was recorded; use retry.",
-          );
-          continue;
-        }
-        this.#runners.add(task.id);
-        void this.#reconcileRunning(task);
-      }
-    }
-  }
-
-  async #reconcileRunning(task: OffpeakTask): Promise<void> {
-    const sessionID = task.sessionID;
-    if (!sessionID) {
-      await this.#fail(task.id, "The stored OpenCode session ID is missing; use retry.");
-      this.#runners.delete(task.id);
-      this.#requestPump();
-      return;
-    }
-    try {
-      await this.#sessions.wait(sessionID);
-      const session = await this.#sessions.get(sessionID);
-      if (session.outcome === "succeeded") {
-        await this.#complete(task.id);
-      } else {
-        await this.#fail(
-          task.id,
-          "OpenCode restarted while this task was RUNNING. The provider outcome may be ambiguous; use retry to explicitly continue the same session.",
-        );
-      }
-    } catch (error) {
-      await this.#fail(
-        task.id,
-        `OpenCode restart left the task outcome ambiguous: ${error instanceof Error ? error.message : "unknown error"}. Use retry to continue the same session.`,
-      );
-    } finally {
-      this.#runners.delete(task.id);
-      this.#signal.notify();
-      this.#requestPump();
-    }
   }
 }

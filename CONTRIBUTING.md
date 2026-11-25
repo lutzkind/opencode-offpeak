@@ -3,11 +3,11 @@
 Contributions are welcome. Keep the implementation focused on one OpenCode v2 plugin and preserve these invariants:
 
 - Peak-price requests fail closed unless a visible, unexpired task override was explicitly requested.
-- OFF pauses queue automation and never creates an override.
+- Protection is two client globals plus one per-chat setting; an explicit chat setting wins over either global.
 - Queued work resumes in its stored OpenCode session; it does not silently start over.
 - Ambiguous provider outcomes after a crash are not replayed automatically.
 - Pricing windows have one canonical policy definition and use its IANA timezone.
-- No prompt, code, queue, or usage telemetry is added.
+- No prompt, code, session content, or usage telemetry is added.
 
 Before opening a pull request:
 

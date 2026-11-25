@@ -3,10 +3,7 @@ export {
   isSupportedOpenCodeVersion,
   SUPPORTED_OPENCODE_RANGE,
 } from "./compat.js";
-export type {
-  OffpeakConfig,
-  RunMode,
-} from "./config.js";
+export type { OffpeakConfig } from "./config.js";
 export { ConfigRepository, defaultConfig, validateConfig } from "./config.js";
 export type {
   ClientOwnershipState,
@@ -53,21 +50,16 @@ export type {
   ClientProtection,
   ClientsDocument,
   OffpeakClient,
-  OffpeakTask,
-  QueueDocument,
   RecoveryDocument,
   RecoveryEntry,
   RecoveryOrigin,
   SessionClientOwnership,
   SessionOverridesDocument,
   SessionProtectionOverride,
-  TaskModel,
-  TaskState,
 } from "./store.js";
 export {
   CLIENT_SETTINGS_STORAGE_KEY,
   ClientsRepository,
-  QueueRepository,
   RecoveryRepository,
   SESSION_OVERRIDES_STORAGE_KEY,
   SessionOverridesRepository,

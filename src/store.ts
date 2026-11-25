@@ -1,61 +1,3 @@
-export type TaskState =
-  | "QUEUED"
-  | "RUNNING"
-  | "WAITING_OFFPEAK"
-  | "COMPLETED"
-  | "FAILED"
-  | "CANCELLED";
-
-export interface TaskModel {
-  providerID: string;
-  modelID: string;
-}
-
-export interface OffpeakTask {
-  id: string;
-  prompt: string;
-  cwd: string;
-  sessionID?: string;
-  model: TaskModel;
-  policyID: string;
-  state: TaskState;
-  createdAt: string;
-  startedAt?: string;
-  lastTransition: string;
-  completedAt?: string;
-  cancelledAt?: string;
-  retryCount: number;
-  lastAttemptAt?: string;
-  lastError?: string;
-  overrideUntil?: string;
-  resumeRequested?: boolean;
-}
-
-export interface QueueDocument {
-  schemaVersion: 1;
-  tasks: OffpeakTask[];
-}
-
-/**
- * Minimal recovery metadata for a session whose provider request must continue
- * at the next allowed window. The session itself is untouched; only the
- * identity needed to continue it is kept.
- *
- * `origin` distinguishes:
- * - "retry-failure": a request that failed retryably during a peak crossing;
- * - "deferred": a primary interactive request deferred before its provider
- *   attempt. Both continue the same session automatically; a user interrupt
- *   clears a deferral but not a retry-failure.
- * - "pending-title": the session still needs its automatic OpenCode-generated
- *   title. Recovery is semantic (OpenCode's own title generation is invoked
- *   again; no provider request is replayed) and never overwrites a title the
- *   session already has.
- * - "pending-compaction": a compaction request deferred before its provider
- *   attempt. Recovery is semantic — OpenCode's own compaction is requested
- *   again at the next allowed window, and its runner keeps a pending
- *   compaction ahead of any queued prompt, so compact-first ordering is
- *   preserved without replaying the original request.
- */
 export interface RecoveryEntry {
   sessionID: string;
   providerID: string;
@@ -73,15 +15,15 @@ export interface RecoveryDocument {
 }
 
 /**
- * An explicit, session-scoped override of off-peak protection. Only sessions
- * the user deliberately switched off are stored; the absence of an entry means
- * protection is ON, which is the default for every session. The override is an
- * explicit authorization for verified PEAK-priced inference in that one
- * interactive session — it never applies to queue-owned sessions and never
- * turns an unverified (UNKNOWN) model into an allowed request.
+ * An explicit, session-scoped protection override. Absence means "follow the
+ * client global"; `on` forces protection for this chat while the client
+ * global is off, and `off` allows verified peak pricing for this chat while
+ * the client global is on. The override is an explicit authorization for one
+ * interactive session; it never turns an unverified (UNKNOWN) model into an
+ * allowed request.
  */
 export interface SessionProtectionOverride {
-  protection: "off";
+  protection: "on" | "off";
   updatedAt: string;
 }
 
@@ -94,7 +36,7 @@ export interface SessionOverridesDocument {
 /**
  * The two OpenCode clients this plugin can protect independently. A client is
  * an interactive origin, not a transport: the same OpenCode server can serve
- * both, and a session may be opened by both.
+ * both.
  */
 export type OffpeakClient = "cli" | "desktop";
 
@@ -107,14 +49,15 @@ export interface ClientDefaults {
 }
 
 /**
- * Which clients have been observed with a session. A session registered by
- * exactly one client uses that client's default. A session registered by both
- * is explicitly ambiguous and remains protected; registration never replaces
- * the other client's observation, so the last client to register cannot win.
+ * The clients that have opened a session, and the one that most recently did.
+ * A chat follows the most recent client's global by default, so the switch in
+ * the client the user is actually using takes effect. An explicit per-chat
+ * override always wins over this default.
  */
 export interface SessionClientOwnership {
   clients: OffpeakClient[];
-  ambiguous: boolean;
+  /** Last client that opened the session. */
+  owner: OffpeakClient;
   updatedAt: string;
 }
 
@@ -130,14 +73,9 @@ export interface JsonStorage {
   set(key: string, value: unknown): Promise<void>;
 }
 
-export const QUEUE_STORAGE_KEY = "opencode-offpeak/queue-v1";
 export const RECOVERY_STORAGE_KEY = "opencode-offpeak/recovery-v1";
 export const SESSION_OVERRIDES_STORAGE_KEY = "opencode-offpeak/session-overrides-v1";
 export const CLIENT_SETTINGS_STORAGE_KEY = "opencode-offpeak/clients-v1";
-
-export function emptyQueue(): QueueDocument {
-  return { schemaVersion: 1, tasks: [] };
-}
 
 export function emptyRecovery(): RecoveryDocument {
   return { schemaVersion: 1, entries: [] };
@@ -159,24 +97,6 @@ export function emptyClients(): ClientsDocument {
     defaults: { cli: "on", desktop: "on" },
     sessions: {},
   };
-}
-
-export class QueueRepository {
-  constructor(private readonly storage: JsonStorage) {}
-
-  async load(): Promise<QueueDocument> {
-    const value = await this.storage.get(QUEUE_STORAGE_KEY);
-    if (value === undefined) return emptyQueue();
-    if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.tasks)) {
-      throw new Error("Stored offpeak queue is invalid; refusing to overwrite it.");
-    }
-    const tasks = value.tasks.map((task, index) => validateTask(task, index));
-    return { schemaVersion: 1, tasks };
-  }
-
-  async save(queue: QueueDocument): Promise<void> {
-    await this.storage.set(QUEUE_STORAGE_KEY, queue as unknown as JsonValue);
-  }
 }
 
 export class RecoveryRepository {
@@ -315,38 +235,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validateTask(value: unknown, index: number): OffpeakTask {
-  if (!isRecord(value)) throw new Error(`Stored queue task ${index} is not an object.`);
-  const states: TaskState[] = [
-    "QUEUED",
-    "RUNNING",
-    "WAITING_OFFPEAK",
-    "COMPLETED",
-    "FAILED",
-    "CANCELLED",
-  ];
-  if (
-    typeof value.id !== "string" ||
-    typeof value.prompt !== "string" ||
-    typeof value.cwd !== "string" ||
-    typeof value.policyID !== "string" ||
-    typeof value.state !== "string" ||
-    !states.includes(value.state as TaskState) ||
-    typeof value.createdAt !== "string" ||
-    typeof value.lastTransition !== "string" ||
-    typeof value.retryCount !== "number" ||
-    !isRecord(value.model) ||
-    typeof value.model.providerID !== "string" ||
-    typeof value.model.modelID !== "string"
-  ) {
-    throw new Error(`Stored queue task ${index} has invalid fields.`);
-  }
-  if (value.sessionID !== undefined && typeof value.sessionID !== "string") {
-    throw new Error(`Stored queue task ${index} has an invalid session ID.`);
-  }
-  return value as unknown as OffpeakTask;
-}
-
 function validateRecoveryEntry(value: unknown, index: number): RecoveryEntry {
   if (!isRecord(value)) throw new Error(`Stored recovery entry ${index} is not an object.`);
   if (
@@ -398,24 +286,30 @@ function validateClientOwnership(sessionID: string, value: unknown): SessionClie
   if (typeof value.updatedAt !== "string") {
     throw new Error(`Stored client ownership for ${sessionID} has an invalid update time.`);
   }
-  const ambiguous = clients.length > 1;
-  if (value.ambiguous !== ambiguous) {
-    throw new Error(`Stored client ownership for ${sessionID} has inconsistent ambiguity.`);
+  const storedOwner = value.owner;
+  if (storedOwner !== undefined && storedOwner !== "cli" && storedOwner !== "desktop") {
+    throw new Error(`Stored client ownership for ${sessionID} has an invalid owner.`);
   }
-  return { clients, ambiguous, updatedAt: value.updatedAt };
+  // v0.4.x documents stored the registration order and an `ambiguous` flag but
+  // no explicit owner. The last registrant is the closest correct migration.
+  const owner = storedOwner ?? clients[clients.length - 1];
+  if (owner === undefined) {
+    throw new Error(`Stored client ownership for ${sessionID} has no owner.`);
+  }
+  return { clients, owner, updatedAt: value.updatedAt };
 }
 
 function validateSessionOverride(sessionID: string, value: unknown): SessionProtectionOverride {
   if (!sessionID.trim()) throw new Error("Stored session override has an empty session ID.");
   if (!isRecord(value))
     throw new Error(`Stored session override for ${sessionID} is not an object.`);
-  if (value.protection !== "off") {
+  if (value.protection !== "on" && value.protection !== "off") {
     throw new Error(`Stored session override for ${sessionID} has an invalid protection value.`);
   }
   if (typeof value.updatedAt !== "string") {
     throw new Error(`Stored session override for ${sessionID} has an invalid update time.`);
   }
-  return { protection: "off", updatedAt: value.updatedAt };
+  return { protection: value.protection, updatedAt: value.updatedAt };
 }
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
