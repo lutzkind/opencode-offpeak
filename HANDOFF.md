@@ -1,5 +1,88 @@
 # Handoff — 2026-11-18
 
+## 2026-11-25 Simplified protection (`v0.5.0`)
+
+**Trigger.** The user reported that the plugin had become overcomplicated and
+confusing, that it should support only separate CLI/Desktop global on/off plus a
+way to keep selected chats on while a global is off, and that Desktop settings
+did not appear to take effect ("no matter what I set I don't get it to use peak").
+
+**Preflight.** Canonical checkout `/root/opencode-offpeak` on `main` at
+`02fdeb4`; live host OpenCode **2.4.1** with `opencode-offpeak#v0.4.4` and
+`offpeak.json` containing the legacy `enabled`/`mode` fields. Classification:
+`IMPLEMENTATION WITHIN APPROVED ARCHITECTURE` under the explicit current user
+instruction; the user instruction explicitly replaces the v0.4.x product model.
+
+**Root causes addressed.**
+- `/offpeak off` paused automation but still blocked peak requests, with a
+  confusing `PricingBlockedError` ("OFF is not an override"). This was the main
+  source of "I set it but it still doesn't use peak".
+- First-client-wins ownership turned any chat seen by both clients into
+  `ambiguous` and permanently protected it, so a Desktop global switch could
+  appear to do nothing.
+- The Desktop page exposed ownership, chat pickers, session IDs, and command
+  references instead of the two decisions the user wanted.
+
+**Implementation (v0.5.0).**
+- Removed the installation-wide `enabled` toggle, `auto`/`queue`/`guard` modes,
+  the task queue, and all queue commands. `offpeak.json` is pricing policy only;
+  legacy `enabled`/`mode` fields are accepted and ignored.
+- Two persistent client globals (`clients-v1`) plus a tri-state per-chat setting
+  (`on`/`off`/follow-global) in `session-overrides-v1`. An explicit chat setting
+  wins over either global in both directions.
+- A chat follows the client that most recently opened it; an unregistered chat
+  stays protected. Existing `ambiguous` entries migrate to the last registrant.
+- New command grammar: `/offpeak status|on|off|chat on|off|auto|cli on|off|desktop on|off`.
+  The v0.4.x `protection`/`client`/`session` forms remain hidden aliases.
+- Desktop page reduced to CLI Protection, Desktop Protection, and Off-peak
+  protection for this chat. Both globals are writable there. A startup RPC is
+  retried for ~3 seconds instead of leaving a permanent error while the server
+  plugin registers.
+- `dispose()` now awaits an in-flight recovery pump and delivery checks
+  `#disposed`, preventing a replacement engine from double-admitting a
+  compaction under load.
+
+**Tests and CI (zero paid traffic).**
+- `npm run lint`, `npm run typecheck`, `npm test` (**145 tests, 0 failures**),
+  `npm pack --dry-run`, and a clean committed GUI bundle rebuild.
+- CI PR **#29** run **45549634235**: Ubuntu and macOS pass.
+- The real packed-TUI fixture loads the plugin, registers the CLI session, and
+  releases the held request when CLI protection is switched off.
+
+**Release.**
+- PR **#29** merge commit `d6d24c053c90cb5d3735f44e8b3e8b6fddcbf8db`.
+- Annotated tag **v0.5.0** object `3acbbd5509d9bc1e83babe9d02187604901a532c` →
+  commit `d6d24c0`; release asset `opencode-offpeak-0.5.0.tgz`, **162891 bytes**,
+  SHA-256 `ff84aac9c36ae48f885858a29e37db5e68c15e4e377ecef9c0133818440f2a6b`.
+  GitHub asset digest matches.
+
+**Deployment and live verification.**
+- `/root/.config/opencode/opencode.json` now pins exactly
+  `git+...#v0.5.0`; backup `opencode.json.bak-*-pre-v0.5.0`.
+- `opencode reload` loaded v0.5.0 in the live server without restarting it
+  (log `loading plugin ... #v0.5.0`).
+- Live RPC on `opencode-go/deepseek-v4.1-flash`: both defaults ON, OFF_PEAK,
+  requests allowed, queue counters 0.
+- Temporary session verification: Desktop OFF → chat `on` effective ON with
+  `override: "on"`; chat `auto` → follows Desktop OFF; Desktop restored ON; the
+  temporary session was deleted.
+- `/root/.config/opencode/offpeak.json` was cleaned of the legacy
+  `enabled`/`mode` fields after a backup
+  (`offpeak.json.bak-*-pre-v0.5.0`); the policy set is unchanged and the live
+  status reports no config error.
+
+**Residual limitations.**
+- The user's macOS Desktop application must list `#v0.5.0` in its own
+  `opencode.json(c)` and be restarted; this host cannot update the local app.
+  A ready-to-run local agent prompt is included in the shared handoff.
+- Until the local GUI updates, the v0.4.x Desktop page still works through the
+  backward-compatible RPC actions, but it shows the old, larger surface.
+- Legacy `opencode-offpeak/queue-v1` storage is preserved and not read.
+- The version ceiling remains `>=2.0.26 <2.5.0`; 2.5.0 is rejected until tested.
+
+**Cleanup.** Temporary verification session deleted; no test server or tmux
+session remains. Build/test logs are under `/tmp/opencode/` (non-production).
+
 ## 2026-11-23 OpenCode 2.4 compatibility (`v0.4.3`) and 2.4.1 validation (`v0.4.4`)
 
 **Trigger.** OpenCode **2.4.0** was published 2026-11-23T09:22Z. The live Desktop SSH server started 2.4.0 and `opencode-offpeak` v0.4.2, whose ceiling was `<2.4.0`, refused to load: the log recorded `opencode-offpeak requires OpenCode >=2.0.26 <2.4.0; this server host runs 2.4.0`, so peak-price protection was absent. OpenCode **2.4.1** was published at 15:57Z during the pass (macOS 12 SQLite fix, config-only providers, unread `/btw`, additive plugin automation hooks).
