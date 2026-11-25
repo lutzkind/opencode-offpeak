@@ -353,7 +353,8 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(clientStatus.client.session.ownership, "cli");
     assert.equal(clientStatus.client.session.protection, "ON");
     assert.equal(clientStatus.client.session.source, "client-default");
-    // A second, different client makes the session shared, never last-writer-wins.
+    // The most recently opened client owns the chat's default, so the switch
+    // in the client the user is actually using takes effect.
     await rpcHandlers.control({
       action: "client-register",
       client: "desktop",
@@ -363,52 +364,76 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       action: "client",
       sessionID: "entrypoint-client",
     });
-    assert.equal(clientStatus.client.session.ownership, "ambiguous");
-    assert.equal(clientStatus.client.session.protection, "ON");
-    assert.equal(clientStatus.client.session.source, "ambiguous");
+    assert.equal(clientStatus.client.session.ownership, "desktop");
+    assert.equal(clientStatus.client.session.protection, "OFF");
+    assert.equal(clientStatus.client.session.source, "client-default");
     await rpcHandlers.control({ action: "client-set", client: "desktop", protection: "on" });
+    clientStatus = await rpcHandlers.control({
+      action: "client",
+      sessionID: "entrypoint-client",
+    });
+    assert.equal(clientStatus.client.session.protection, "ON");
+    // An explicit chat setting beats the client global in both directions.
+    sessionStore.set("entrypoint-client", { outcome: undefined, time: { created: Date.now() } });
+    await rpcHandlers.control({
+      action: "session-set",
+      sessionID: "entrypoint-client",
+      protection: "off",
+    });
+    clientStatus = await rpcHandlers.control({
+      action: "client",
+      sessionID: "entrypoint-client",
+    });
+    assert.equal(clientStatus.client.session.protection, "OFF");
+    assert.equal(clientStatus.client.session.override, "off");
+    await rpcHandlers.control({
+      action: "session-set",
+      sessionID: "entrypoint-client",
+      protection: "on",
+    });
+    clientStatus = await rpcHandlers.control({
+      action: "client",
+      sessionID: "entrypoint-client",
+    });
+    assert.equal(clientStatus.client.session.protection, "ON");
+    assert.equal(clientStatus.client.session.override, "on");
     await assert.rejects(
       rpcHandlers.control({ action: "client-set", client: "mobile", protection: "off" }),
-      /Usage: \/offpeak protection global/,
+      /Usage: \/offpeak cli on\|off/,
     );
     await assert.rejects(
       rpcHandlers.control({ action: "client-register", client: "desktop" }),
       /requires a sessionID/,
     );
 
+    // `off` now means "CLI protection off", not "pause the plugin and keep
+    // blocking". An unregistered session is still protected (fail-closed).
     const off = await rpcHandlers.control({ action: "off" });
-    assert.match(off.message, /Peak pricing is still blocked/);
-    // OFF never releases a held request and is not a price override.
+    assert.deepEqual(off.client.defaults, { cli: "OFF", desktop: "ON" });
     await assertStillPending(heldOutcome, 60);
-    // A fresh interactive peak request while OFF is blocked immediately.
-    await assert.rejects(
-      hooks.get("http.request")({
+    // A fresh interactive peak request for an unknown session is still held.
+    const unknownHeld = hooks
+      .get("http.request")({
         sessionID: "interactive-off",
         model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
         request: new Request("http://fixture.invalid"),
-      }),
-      PricingBlockedError,
-    );
-    const queued = await rpcHandlers.control({
-      action: "queue",
-      prompt: "fixture task",
-      cwd: "/fixture-project",
-      providerID: "opencode-go",
-      modelID: "deepseek-v4.1-flash",
-    });
-    assert.match(queued.message, /Queued [a-f0-9-]+/);
-    // No task session was created while the plugin is OFF (the pre-registered
-    // verification sessions carry no task input).
-    assert.equal([...sessionStore.values()].filter((session) => session.input).length, 0);
+      })
+      .then(
+        () => "resolved",
+        (error) => error,
+      );
+    await assertStillPending(unknownHeld, 60);
     const status = await rpcHandlers.control({
       action: "status",
       providerID: "opencode-go",
       modelID: "deepseek-v4.1-flash",
     });
-    assert.equal(status.status.enabled, false);
-    assert.equal(status.status.queued, 1);
+    assert.equal(status.status.enabled, true);
+    assert.equal(status.status.mode, "auto");
+    assert.equal(status.status.queued, 0);
+    assert.equal(status.status.failed, 0);
     assert.equal(status.status.requestsAllowed, false);
-    assert.equal(status.status.interactiveWaiting, 1);
+    assert.equal(status.status.interactiveWaiting, 2);
     assert.equal(status.status.recoveryWaiting, 2);
     // Without a session, no session protection is reported (home screen).
     assert.equal(status.status.sessionProtection, undefined);
@@ -484,23 +509,16 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
     assert.equal(command.slash.arguments, true);
     assert.deepEqual(command.slash.aliases, ["op"]);
     await command.run("/offpeak status");
-    assert.match(toasts.at(-1).message, /Plugin: DISABLED/);
-    await command.run("/op queue from the TUI");
-    assert.match(toasts.at(-1).message, /Queued [a-f0-9-]+/);
-    const tasks = (await rpcHandlers.control({ action: "list" })).tasks;
-    assert.equal(tasks.length, 2);
-    await command.run(`/offpeak cancel ${tasks[0].id}`);
-    assert.match(toasts.at(-1).message, /Cancelled/);
-    await command.run(`/offpeak remove ${tasks[0].id}`);
-    assert.match(toasts.at(-1).message, /Removed/);
-    assert.equal((await rpcHandlers.control({ action: "list" })).tasks.length, 1);
+    assert.match(toasts.at(-1).message, /CLI protection: OFF/);
+    assert.match(toasts.at(-1).message, /Desktop protection: ON/);
+    assert.doesNotMatch(toasts.at(-1).message, /Queue|Mode:|Plugin:/);
 
-    // Session protection from the real TUI command: the focused session is
-    // resolved from the supported route, never typed by hand.
+    // Chat commands resolve the focused session from the supported route,
+    // never typed by hand.
     sessionStore.set("tui-session", { outcome: undefined, time: { created: Date.now() } });
-    await command.run("/offpeak session off");
-    assert.match(toasts.at(-1).message, /Session off-peak protection disabled/);
-    assert.match(toasts.at(-1).message, /verified peak-priced inference/);
+    await command.run("/offpeak chat off");
+    assert.match(toasts.at(-1).message, /This chat: allow peak \(explicit\)/);
+    assert.match(toasts.at(-1).message, /verified peak-priced requests may run/i);
     const tuiSessionStatus = await rpcHandlers.control({
       action: "status",
       providerID: "opencode-go",
@@ -508,57 +526,35 @@ test("OpenCode v2 server and TUI entrypoints register the request gate and /offp
       sessionID: "tui-session",
     });
     assert.equal(tuiSessionStatus.status.sessionProtection, "OFF");
-    await command.run("/offpeak status");
-    assert.match(toasts.at(-1).message, /Session protection \(explicit\): OFF/);
-    await command.run("/offpeak session on");
-    assert.match(toasts.at(-1).message, /Session off-peak protection enabled/);
-    await command.run("/offpeak status");
-    assert.match(toasts.at(-1).message, /Session protection \(explicit\): ON/);
-    await command.run("/offpeak session sometimes");
-    assert.match(toasts.at(-1).message, /Usage: \/offpeak session on\|off/);
-    // Client-level commands are separate from the global and session controls.
-    await command.run("/offpeak client");
-    assert.match(toasts.at(-1).message, /CLI default: ON/);
-    assert.match(toasts.at(-1).message, /Desktop default: ON/);
-    assert.match(toasts.at(-1).message, /This session: CLI/);
-    await command.run("/offpeak client cli off");
-    assert.match(toasts.at(-1).message, /CLI default: OFF/);
-    assert.match(toasts.at(-1).message, /Desktop default: ON/);
-    await command.run("/offpeak client desktop off");
-    assert.match(toasts.at(-1).message, /CLI default: OFF/);
-    assert.match(toasts.at(-1).message, /Desktop default: OFF/);
-    await command.run("/offpeak client cli on");
-    assert.match(toasts.at(-1).message, /CLI default: ON/);
-    assert.match(toasts.at(-1).message, /Desktop default: OFF/);
-    await command.run("/offpeak client mobile on");
-    assert.match(toasts.at(-1).message, /Usage: \/offpeak client/);
-    await command.run("/offpeak client desktop on");
-    assert.match(toasts.at(-1).message, /Desktop default: ON/);
+    await command.run("/offpeak chat on");
+    assert.match(toasts.at(-1).message, /This chat: always protect \(explicit\)/);
+    await command.run("/offpeak chat auto");
+    assert.match(toasts.at(-1).message, /This chat: follows the CLI global \(OFF\)/);
+    await command.run("/offpeak chat sometimes");
+    assert.match(toasts.at(-1).message, /Usage: \/offpeak chat on\|off\|auto/);
 
-    // Canonical independent commands: global is interface-scoped, chat is the
-    // explicit override for this one session, and status reports both levels.
+    // Global commands are interface-scoped and independent.
+    await command.run("/offpeak on");
+    assert.match(toasts.at(-1).message, /CLI protection: ON/);
+    assert.match(toasts.at(-1).message, /Desktop protection: ON \(not modified\)/);
+    await command.run("/offpeak desktop off");
+    assert.match(toasts.at(-1).message, /Desktop protection: OFF/);
+    assert.match(toasts.at(-1).message, /CLI protection: ON \(not modified\)/);
+    await command.run("/offpeak desktop on");
+    assert.match(toasts.at(-1).message, /Desktop protection: ON/);
+    await command.run("/offpeak cli sometimes");
+    assert.match(toasts.at(-1).message, /Usage: \/offpeak cli on\|off/);
+    // The hidden v0.4.x aliases keep working over the same state.
     await command.run("/offpeak protection global off");
-    assert.match(toasts.at(-1).message, /CLI global protection: OFF/);
-    assert.match(toasts.at(-1).message, /Desktop global protection: ON \(not modified\)/);
+    assert.match(toasts.at(-1).message, /CLI protection: OFF/);
     await command.run("/offpeak protection chat off");
-    assert.match(toasts.at(-1).message, /Protection for this chat: OFF \(explicit override/);
-    assert.match(toasts.at(-1).message, /CLI global protection: OFF \(not modified\)/);
-    await command.run("/offpeak status");
-    assert.match(toasts.at(-1).message, /CLI global protection: OFF/);
-    assert.match(toasts.at(-1).message, /Desktop global protection: ON/);
-    assert.match(toasts.at(-1).message, /Protection for this chat: OFF \(explicit override/);
-    assert.match(toasts.at(-1).message, /Queue: /);
-    await command.run("/offpeak protection chat on");
-    assert.match(toasts.at(-1).message, /Protection for this chat: follows the CLI global \(OFF\)/);
-    await command.run("/offpeak protection global on");
-    assert.match(toasts.at(-1).message, /CLI global protection: ON/);
-    assert.match(toasts.at(-1).message, /Desktop global protection: ON \(not modified\)/);
-    await command.run("/offpeak protection global sometimes");
-    assert.match(toasts.at(-1).message, /Usage: \/offpeak protection/);
+    assert.match(toasts.at(-1).message, /This chat: allow peak \(explicit\)/);
+    await command.run("/offpeak protection chat auto");
+    assert.match(toasts.at(-1).message, /This chat: follows the CLI global \(OFF\)/);
     // Without a focused session the command refuses instead of guessing.
     tuiContext.ui.router.current = () => ({ type: "home" });
-    await command.run("/offpeak session off");
-    assert.match(toasts.at(-1).message, /No current OpenCode session is focused/);
+    await command.run("/offpeak chat off");
+    assert.match(toasts.at(-1).message, /Open this chat/);
     tuiContext.ui.router.current = () => ({ type: "session", sessionID: "tui-session" });
   } finally {
     await dispose?.();

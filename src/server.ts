@@ -15,12 +15,7 @@ import {
   type OffpeakRpcInput,
   type OffpeakRpcOutput,
 } from "./rpc.js";
-import {
-  ClientsRepository,
-  QueueRepository,
-  RecoveryRepository,
-  SessionOverridesRepository,
-} from "./store.js";
+import { ClientsRepository, RecoveryRepository, SessionOverridesRepository } from "./store.js";
 
 export default Plugin.define({
   id: "opencode-offpeak",
@@ -31,24 +26,13 @@ export default Plugin.define({
       get: (key: string) => context.storage.get(key),
       set: (key: string, value: unknown) => context.storage.set(key, value as never),
     };
-    const repository = new QueueRepository(storage);
     const recoveries = new RecoveryRepository(storage);
     const sessionOverrides = new SessionOverridesRepository(storage);
     const clients = new ClientsRepository(storage);
     const sessions: SessionDriver = {
-      create: async ({ cwd, model, taskID }) => {
-        const session = await context.session.create({
-          title: `Offpeak ${taskID}`,
-          location: { directory: cwd },
-          model: { providerID: model.providerID, id: model.modelID },
-          metadata: { "opencode-offpeak.taskID": taskID },
-        });
-        return session.id;
-      },
       prompt: async (sessionID, text) => {
         await context.session.prompt({ sessionID, text });
       },
-      wait: async (sessionID) => context.session.wait({ sessionID }),
       get: async (sessionID) => {
         const session = await context.session.get({ sessionID });
         // A missing session (or a host that returns undefined instead of
@@ -76,9 +60,6 @@ export default Plugin.define({
       // title instead. The pending-title recovery therefore never mutates the
       // session; it verifies and clears, and OpenCode's own input promotion
       // generates the title (see #deliverTitleRecovery).
-      interrupt: async (sessionID) => {
-        await context.session.interrupt({ sessionID });
-      },
       compact: async (sessionID) => {
         // Semantic compaction recovery: admit OpenCode's own compaction
         // again. It is never a replay of the lost request.
@@ -90,7 +71,6 @@ export default Plugin.define({
     // no subscriber.
     let publishNotification: ((event: EngineNotification) => Promise<void>) | undefined;
     const engine = new OffpeakEngine({
-      repository,
       recoveries,
       sessionOverrides,
       clients,
@@ -224,7 +204,7 @@ export default Plugin.define({
             continue;
           }
           // OpenCode's supported session-deletion event: an explicit per-session
-          // protection override for a session that no longer exists is reaped
+          // protection setting for a session that no longer exists is reaped
           // here instead of lingering in plugin storage. State for a session
           // that still exists is never removed.
           if (event.type === "session.deleted") {
@@ -238,49 +218,62 @@ export default Plugin.define({
     const rpc = await context.rpc.register(OFFPEAK_RPC, {
       control: async (rawInput: unknown): Promise<OffpeakRpcOutput> => {
         const input = rawInput as OffpeakRpcInput;
-        const id = input.id?.trim();
         switch (input.action) {
+          // Deprecated automation aliases from v0.4.x. v0.5.0 has no
+          // installation-wide enable switch, so they now mean "protect this
+          // surface" (CLI by default) instead of "start/stop the queue".
           case "on":
-            await engine.setEnabled(true);
-            return {
-              message: "OpenCode Offpeak is ON. Queue processing and automatic resume are active.",
-            };
-          case "off":
-            await engine.setEnabled(false);
-            return {
-              message:
-                "OpenCode Offpeak is OFF. Automation is paused; queued tasks and session IDs are preserved. Peak pricing is still blocked except for sessions you explicitly switched with /offpeak session off.",
-            };
+          case "off": {
+            const client = input.client?.trim();
+            const target = client === "desktop" ? "desktop" : "cli";
+            await engine.setClientProtection(target, input.action === "off" ? "off" : "on");
+            const sessionID = input.sessionID?.trim();
+            return { client: await engine.clientStatus(sessionID ? { sessionID } : {}) };
+          }
+          case "session-set": {
+            const sessionID = input.sessionID?.trim();
+            const protection = input.protection?.trim().toLowerCase();
+            if (!sessionID) {
+              throw new Error(
+                "No current OpenCode session is focused. Open a chat before changing its off-peak protection.",
+              );
+            }
+            if (protection !== "on" && protection !== "off" && protection !== "auto") {
+              throw new Error("Usage: /offpeak chat on|off|auto");
+            }
+            const state = await engine.setSessionProtection(sessionID, protection);
+            void engine.pruneSessionProtections().catch(() => undefined);
+            return { state, client: await engine.clientStatus({ sessionID }) };
+          }
+          // v0.4.x command aliases. `session-on` used to mean "follow the
+          // global"; in v0.5.0 it explicitly forces protection on, which is the
+          // behavior users intended when a client global was off.
           case "session-on":
           case "session-off": {
             const sessionID = input.sessionID?.trim();
             if (!sessionID) {
               throw new Error(
-                "No current OpenCode session was provided. Run /offpeak session on|off from an open session.",
+                "No current OpenCode session is focused. Open a chat before changing its off-peak protection.",
               );
             }
-            const protection = await engine.setSessionProtection(
+            const state = await engine.setSessionProtection(
               sessionID,
               input.action === "session-off" ? "off" : "on",
             );
-            // Lazy, bounded cleanup: a session command is a natural state
-            // access, so stale overrides (deleted sessions) are reaped here.
             void engine.pruneSessionProtections().catch(() => undefined);
             return {
+              state,
               message:
-                protection === "OFF"
-                  ? "Session off-peak protection disabled. This session may use verified peak-priced inference."
-                  : "Session off-peak protection enabled. Peak-priced requests will wait for off-peak.",
-              state: protection,
-              // The shared command layer renders the authoritative effective
-              // state and confirms the interface global was not modified.
+                state === "OFF"
+                  ? "Session off-peak protection disabled. This chat may use verified peak-priced inference."
+                  : "Session off-peak protection enabled. Peak-priced requests wait for off-peak.",
               client: await engine.clientStatus({ sessionID }),
             };
           }
           case "client": {
             // Read-only client defaults plus the effective state of the
-            // focused session. `/offpeak client` uses this; it never guesses a
-            // client from IP, User-Agent, or an environment variable.
+            // focused session. Never guesses a client from IP, User-Agent, or
+            // an environment variable.
             const sessionID = input.sessionID?.trim();
             return {
               client: await engine.clientStatus(sessionID ? { sessionID } : {}),
@@ -290,10 +283,10 @@ export default Plugin.define({
             const client = input.client?.trim();
             const protection = input.protection?.trim().toLowerCase();
             if (client !== "cli" && client !== "desktop") {
-              throw new Error("Usage: /offpeak protection global on|off");
+              throw new Error("Usage: /offpeak cli on|off or /offpeak desktop on|off");
             }
             if (protection !== "on" && protection !== "off") {
-              throw new Error("Usage: /offpeak protection global on|off");
+              throw new Error("Protection must be on or off.");
             }
             await engine.setClientProtection(client, protection);
             void engine.pruneSessionProtections().catch(() => undefined);
@@ -312,18 +305,6 @@ export default Plugin.define({
             const status = await engine.registerSessionClient(sessionID, client);
             return { client: status };
           }
-          case "queue": {
-            if (!input.prompt) throw new Error("Usage: /offpeak queue <task>");
-            if (!input.providerID || !input.modelID) {
-              throw new Error("Select a provider/model in OpenCode before queueing a task.");
-            }
-            const task = await engine.queue({
-              prompt: input.prompt,
-              cwd: input.cwd ?? context.location.directory,
-              model: { providerID: input.providerID, modelID: input.modelID },
-            });
-            return { message: `Queued ${task.id} (${task.policyID}).`, tasks: [task] };
-          }
           case "status":
           case "pricing": {
             const status = await engine.status({
@@ -333,35 +314,9 @@ export default Plugin.define({
             });
             return { status: status as unknown as Record<string, unknown> };
           }
-          case "list":
-            return { tasks: await engine.list() };
-          case "cancel":
-            if (!id) throw new Error("Usage: /offpeak cancel <task-id>");
-            await engine.cancel(id);
-            return { message: `Cancelled ${id}. Its OpenCode session is preserved.` };
-          case "remove":
-            if (!id) throw new Error("Usage: /offpeak remove <task-id>");
-            await engine.remove(id);
-            return {
-              message: `Removed ${id} from the queue. Its OpenCode session is preserved.`,
-            };
-          case "retry":
-            if (!id) throw new Error("Usage: /offpeak retry <task-id>");
-            await engine.retry(id);
-            return {
-              message: `Retry requested for ${id}; the same session will be continued when allowed.`,
-            };
-          case "resume":
-            if (!id) throw new Error("Usage: /offpeak resume <task-id>");
-            await engine.resume(id);
-            return { message: `Resume requested for ${id}; pricing rules still apply.` };
-          case "run-now":
-            if (!id) throw new Error("Usage: /offpeak run-now <task-id>");
-            await engine.runNow(id);
-            return { message: `Explicit 15-minute peak-price override active for ${id}.` };
           default:
             throw new Error(
-              "Usage: /offpeak on|off|status|pricing|queue|list|cancel|remove|retry|resume|run-now|protection global on|off|protection chat on|off|session on|off|client [cli|desktop on|off]",
+              "Usage: /offpeak status | /offpeak on | /offpeak off | /offpeak chat on|off|auto | /offpeak cli on|off | /offpeak desktop on|off",
             );
         }
       },

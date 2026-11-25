@@ -151,7 +151,7 @@ test("the real OpenCode v2 TUI loads the packed plugin without keymap errors and
     await new Promise((resolve) => setTimeout(resolve, 1500));
     await tmux(socket, ["send-keys", "-t", session, "Enter"]);
     await waitFor(
-      async () => (await pane()).includes("Plugin: ENABLED"),
+      async () => (await pane()).includes("CLI protection:"),
       "/offpeak status did not produce a status toast in the real TUI",
     );
     assert.doesNotMatch(await log(), /Keymap\.Provider is missing/);

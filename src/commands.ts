@@ -2,9 +2,10 @@ import { formatInTimeZone } from "./format.js";
 import type { OffpeakClientStatus, OffpeakRpcInput, OffpeakRpcOutput } from "./rpc.js";
 
 /**
- * The interactive interface a command was issued from. The global protection
- * command always targets this interface's own default; a CLI command can never
- * change the Desktop default (and the reverse) through this surface.
+ * The interactive interface a command was issued from. `/offpeak on|off`
+ * changes this interface's own persistent global default; a CLI command never
+ * changes the Desktop default through that shorthand (use `desktop on|off`
+ * explicitly).
  */
 export type OffpeakSurface = "cli" | "desktop";
 
@@ -14,31 +15,21 @@ export interface OffpeakCommandContext {
   sessionID?: string;
   providerID?: string;
   modelID?: string;
-  cwd?: string;
 }
 
 export interface OffpeakRpcCaller {
   control(input: OffpeakRpcInput): Promise<unknown>;
 }
 
-export type OffpeakCommandKind =
-  | "status"
-  | "protection-global"
-  | "protection-chat"
-  | "client"
-  | "session"
-  | "queue"
-  | "list"
-  | "task"
-  | "pricing"
-  | "automation"
-  | "other";
+export type OffpeakCommandKind = "status" | "client-global" | "chat" | "pricing";
 
 export interface OffpeakCommandPlan {
   request: OffpeakRpcInput;
   kind: OffpeakCommandKind;
   surface: OffpeakSurface;
-  direction?: "on" | "off";
+  direction?: "on" | "off" | "auto";
+  /** The client whose global this command changes, when it is not the surface. */
+  client?: "cli" | "desktop";
 }
 
 export interface OffpeakCommandResult {
@@ -58,10 +49,6 @@ function surfaceLabel(surface: OffpeakSurface): string {
   return surface === "cli" ? "CLI" : "Desktop";
 }
 
-function otherSurface(surface: OffpeakSurface): OffpeakSurface {
-  return surface === "cli" ? "desktop" : "cli";
-}
-
 function withSession(context: OffpeakCommandContext): { sessionID?: string } {
   return context.sessionID ? { sessionID: context.sessionID } : {};
 }
@@ -76,21 +63,29 @@ function withModel(context: OffpeakCommandContext): {
   };
 }
 
-function clientStatusRequest(context: OffpeakCommandContext): OffpeakRpcInput {
-  return { action: "client", ...withSession(context) };
-}
-
 function statusRequest(context: OffpeakCommandContext): OffpeakRpcInput {
   return { action: "status", ...withSession(context), ...withModel(context) };
+}
+
+function clientRequest(context: OffpeakCommandContext): OffpeakRpcInput {
+  return { action: "client", ...withSession(context) };
 }
 
 /**
  * Parses one `/offpeak` invocation. The TUI passes the full slash text; the
  * Desktop slash command receives the argument text after `/offpeak`.
  *
- * This is the single command grammar for both interfaces. It returns a typed
- * RPC request and never writes state itself, so the TUI and Desktop share the
- * same behavior and only differ in the surface passed in.
+ * Canonical grammar:
+ *   /offpeak                      status
+ *   /offpeak on | off             this surface's global default
+ *   /offpeak chat on|off|auto     this chat only
+ *   /offpeak cli on|off           CLI global explicitly
+ *   /offpeak desktop on|off       Desktop global explicitly
+ *   /offpeak pricing              pricing status
+ *
+ * The v0.4.x `protection …`, `client …`, and `session …` forms remain hidden
+ * aliases so existing muscle memory keeps working; they are intentionally not
+ * advertised.
  */
 export function planOffpeakCommand(
   rawInput: string,
@@ -101,11 +96,75 @@ export function planOffpeakCommand(
   const action = (space < 0 ? input : input.slice(0, space)).toLowerCase() || "status";
   const argument = space < 0 ? "" : input.slice(space + 1).trim();
 
+  if (action === "status" || action === "pricing" || action === "help") {
+    return {
+      request: statusRequest(context),
+      kind: action === "pricing" ? "pricing" : "status",
+      surface: context.surface,
+    };
+  }
+
+  if (isDirection(action) && argument === "") {
+    return {
+      request: {
+        action: "client-set",
+        client: context.surface,
+        protection: action,
+        ...withSession(context),
+      },
+      kind: "client-global",
+      surface: context.surface,
+      direction: action,
+      client: context.surface,
+    };
+  }
+
+  if (action === "chat" || action === "session") {
+    const direction = (argument || (action === "session" ? "" : "status")).toLowerCase();
+    if (direction === "" || direction === "status") {
+      return { request: clientRequest(context), kind: "chat", surface: context.surface };
+    }
+    if (direction !== "on" && direction !== "off" && direction !== "auto") {
+      throw new Error("Usage: /offpeak chat on|off|auto");
+    }
+    if (!context.sessionID) {
+      throw new Error("Open this chat before changing its off-peak protection.");
+    }
+    return {
+      request: {
+        action: "session-set",
+        sessionID: context.sessionID,
+        protection: direction,
+      },
+      kind: "chat",
+      surface: context.surface,
+      direction,
+    };
+  }
+
+  if (action === "cli" || action === "desktop") {
+    if (!isDirection(argument)) {
+      throw new Error(`Usage: /offpeak ${action} on|off`);
+    }
+    return {
+      request: {
+        action: "client-set",
+        client: action,
+        protection: argument,
+        ...withSession(context),
+      },
+      kind: "client-global",
+      surface: context.surface,
+      direction: argument,
+      client: action,
+    };
+  }
+
+  // Hidden v0.4.x aliases.
   if (action === "protection") {
     const parts = argument.toLowerCase().split(/\s+/).filter(Boolean);
-    // `/offpeak protection` without arguments is a read-only status.
     if (parts.length === 0) {
-      return { request: clientStatusRequest(context), kind: "client", surface: context.surface };
+      return { request: clientRequest(context), kind: "status", surface: context.surface };
     }
     const [scope, direction] = parts;
     if (scope === "global" && parts.length === 2 && isDirection(direction)) {
@@ -116,42 +175,40 @@ export function planOffpeakCommand(
           protection: direction,
           ...withSession(context),
         },
-        kind: "protection-global",
+        kind: "client-global",
         surface: context.surface,
         direction,
+        client: context.surface,
       };
     }
-    if (scope === "chat" && parts.length === 2 && isDirection(direction)) {
+    if (scope === "chat" && parts.length === 2) {
+      const chatDirection = direction === "auto" ? "auto" : isDirection(direction) ? direction : "";
+      if (!chatDirection) throw new Error("Usage: /offpeak chat on|off|auto");
       if (!context.sessionID) {
-        throw new Error(
-          "No current OpenCode session is focused. Open this chat and run /offpeak protection chat on|off again.",
-        );
+        throw new Error("Open this chat before changing its off-peak protection.");
       }
       return {
         request: {
-          action: direction === "off" ? "session-off" : "session-on",
+          action: "session-set",
           sessionID: context.sessionID,
+          protection: chatDirection,
         },
-        kind: "protection-chat",
+        kind: "chat",
         surface: context.surface,
-        direction,
+        direction: chatDirection,
       };
     }
-    throw new Error("Usage: /offpeak protection global on|off or /offpeak protection chat on|off");
+    throw new Error("Usage: /offpeak chat on|off|auto");
   }
 
-  // Legacy aliases remain available. They target the same server actions and
-  // the same persisted state as the canonical `/offpeak protection` commands.
   if (action === "client") {
     const parts = argument.toLowerCase().split(/\s+/).filter(Boolean);
     if (parts.length === 0) {
-      return { request: clientStatusRequest(context), kind: "client", surface: context.surface };
+      return { request: clientRequest(context), kind: "status", surface: context.surface };
     }
     const [who, direction] = parts;
     if (parts.length !== 2 || (who !== "cli" && who !== "desktop") || !isDirection(direction)) {
-      throw new Error(
-        "Usage: /offpeak client, /offpeak client cli on|off, or /offpeak client desktop on|off",
-      );
+      throw new Error("Usage: /offpeak cli on|off or /offpeak desktop on|off");
     }
     return {
       request: {
@@ -160,110 +217,26 @@ export function planOffpeakCommand(
         protection: direction,
         ...withSession(context),
       },
-      kind: "client",
-      surface: context.surface,
-    };
-  }
-
-  if (action === "session") {
-    const direction = argument.toLowerCase();
-    if (!isDirection(direction)) {
-      throw new Error("Usage: /offpeak session on|off");
-    }
-    if (!context.sessionID) {
-      throw new Error(
-        "No current OpenCode session is focused. Open the session and run /offpeak session on|off again.",
-      );
-    }
-    return {
-      request: {
-        action: direction === "off" ? "session-off" : "session-on",
-        sessionID: context.sessionID,
-      },
-      kind: "session",
+      kind: "client-global",
       surface: context.surface,
       direction,
+      client: who,
     };
   }
 
-  if (action === "queue") {
-    if (!argument) throw new Error("Usage: /offpeak queue <task>");
-    if (!context.modelID || !context.providerID) {
-      throw new Error("Select an OpenCode model before queueing a task.");
-    }
-    return {
-      request: {
-        action,
-        prompt: argument,
-        ...(context.cwd ? { cwd: context.cwd } : {}),
-        providerID: context.providerID,
-        modelID: context.modelID,
-      },
-      kind: "queue",
-      surface: context.surface,
-    };
-  }
-
-  if (["cancel", "remove", "retry", "resume", "run-now"].includes(action)) {
-    if (!argument) throw new Error(`Usage: /offpeak ${action} <task-id>`);
-    return {
-      request: { action, id: argument },
-      kind: "task",
-      surface: context.surface,
-    };
-  }
-
-  if (action === "list") {
-    return { request: { action }, kind: "list", surface: context.surface };
-  }
-
-  if (action === "status") {
-    return { request: statusRequest(context), kind: "status", surface: context.surface };
-  }
-
-  if (action === "pricing") {
-    return {
-      request: { action, ...withSession(context), ...withModel(context) },
-      kind: "pricing",
-      surface: context.surface,
-    };
-  }
-
-  if (action === "on" || action === "off") {
-    return {
-      request: { action, ...withSession(context), ...withModel(context) },
-      kind: "automation",
-      surface: context.surface,
-    };
-  }
-
-  return {
-    request: { action, ...withSession(context), ...withModel(context) },
-    kind: "other",
-    surface: context.surface,
-  };
-}
-
-function statusOf(output: OffpeakRpcOutput): Record<string, unknown> | undefined {
-  return output.status;
-}
-
-function clientStatus(output: OffpeakRpcOutput): OffpeakClientStatus | undefined {
-  return output.client;
+  throw new Error(
+    "Usage: /offpeak status | /offpeak on | /offpeak off | /offpeak chat on|off|auto | /offpeak cli on|off | /offpeak desktop on|off",
+  );
 }
 
 interface StatusShape {
   enabled?: boolean;
-  mode?: string;
-  automaticExecution?: string;
-  automaticResume?: string;
-  override?: { active?: boolean; taskID?: string; expiresAt?: string };
-  sessionProtection?: string;
   clientDefaults?: { cli?: string; desktop?: string };
   client?: {
     ownership?: string;
     protection?: string;
     source?: string;
+    override?: string;
   };
   effectiveProtection?: string;
   providerID?: string;
@@ -274,92 +247,41 @@ interface StatusShape {
   nextTransition?: number;
   providerNote?: string;
   displayTimeZone?: string;
-  queued?: number;
-  waiting?: number;
   interactiveWaiting?: number;
   recoveryWaiting?: number;
   compactionRecoveryWaiting?: number;
-  running?: { id?: string; sessionID?: string; state?: string };
-  failed?: number;
   configError?: string;
 }
 
-function ownershipName(ownership: string | undefined): string {
-  switch (ownership) {
-    case "cli":
-      return "CLI";
-    case "desktop":
-      return "Desktop";
-    case "ambiguous":
-      return "shared (CLI + Desktop; protected)";
-    case "queue":
-      return "queue task (client defaults do not apply)";
-    default:
-      return "unknown (protected)";
-  }
+function surfaceName(surface: string | undefined): string {
+  if (surface === "cli") return "CLI";
+  if (surface === "desktop") return "Desktop";
+  return "unknown";
 }
 
-function sourceName(source: string | undefined): string {
-  switch (source) {
-    case "session-override":
-      return "explicit /offpeak protection chat off";
-    case "client-default":
-      return "interface global default";
-    case "ambiguous":
-      return "shared ownership; fail-closed";
-    case "queue":
-      return "queue task; explicit task override only";
-    default:
-      return "no reliable client registration; fail-closed";
-  }
-}
-
-/**
- * Human-readable state of the current chat. `sessionProtection` alone cannot
- * distinguish "follows the global" from "explicitly disabled", so the
- * authoritative client status supplies the source.
- */
-function chatProtectionLabel(
-  session: { ownership?: string; protection?: string; source?: string } | undefined,
-  defaults: { cli?: string; desktop?: string } | undefined,
+/** The chat's effective state, with the global it follows when it has no override. */
+function chatLabel(
+  client: StatusShape["client"] | undefined,
+  defaults: StatusShape["clientDefaults"],
 ): string {
-  if (!session) return "unknown (protected)";
-  if (session.source === "session-override") {
-    return `OFF (explicit override; bypasses the ${ownershipName(session.ownership)} global)`;
+  if (!client) return "no chat focused";
+  if (
+    client.override === "on" ||
+    (client.source === "session-override" && client.protection === "ON")
+  ) {
+    return "always protect (explicit)";
   }
-  if (session.source === "client-default") {
-    const owner = session.ownership === "desktop" ? "Desktop" : "CLI";
-    const value = owner === "Desktop" ? defaults?.desktop : defaults?.cli;
-    return `follows the ${owner} global (${value ?? session.protection ?? "ON"})`;
+  if (
+    client.override === "off" ||
+    (client.source === "session-override" && client.protection === "OFF")
+  ) {
+    return "allow peak (explicit)";
   }
-  if (session.source === "queue") return "queue task; client defaults do not apply";
-  if (session.source === "ambiguous") return "ON (shared session; fail-closed)";
-  return "ON (no reliable client registration; fail-closed)";
-}
-
-function formatClientInfo(client: OffpeakClientStatus | undefined): string {
-  if (!client) return "Client settings are unavailable.";
-  const { defaults, session, error } = client;
-  const lines = [
-    "Client-level off-peak protection",
-    `CLI default: ${defaults.cli}`,
-    `Desktop default: ${defaults.desktop}`,
-  ];
-  if (session) {
-    lines.push(
-      `This session: ${ownershipName(session.ownership)}`,
-      `Effective protection: ${session.protection}`,
-      `Source: ${sourceName(session.source)}`,
-      `Session override: ${session.source === "session-override" ? "OFF (explicit)" : "not set"}`,
-    );
-  } else {
-    lines.push("This session: none focused");
+  if (client.source === "client-default") {
+    const owner = client.ownership === "desktop" ? "desktop" : "cli";
+    return `follows the ${surfaceName(owner)} global (${defaults?.[owner] ?? client.protection ?? "ON"})`;
   }
-  if (error) lines.push(`Client settings error: ${error}`);
-  lines.push(
-    "CLI and Desktop defaults are independent. Change this interface with /offpeak protection global on|off; change this chat with /offpeak protection chat on|off.",
-  );
-  return lines.join("\n");
+  return "protected (no client registration yet)";
 }
 
 export function formatOffpeakStatus(
@@ -375,12 +297,8 @@ export function formatOffpeakStatus(
       : pricing === "FLAT" || pricing === "UNTRACKED"
         ? "none (no peak window)"
         : "unknown";
-  const sessionOverride = status.effectiveProtection === "OFF" && pricing === "PEAK";
-  const requestDetail = sessionOverride
-    ? status.client?.source === "client-default"
-      ? " (interface default)"
-      : " (chat override)"
-    : pricing === "FLAT"
+  const detail =
+    pricing === "FLAT"
       ? " (flat all-hours pricing; never waits)"
       : pricing === "UNTRACKED"
         ? status.providerNote
@@ -391,113 +309,70 @@ export function formatOffpeakStatus(
           : "";
   const defaults = status.clientDefaults;
   return [
-    `Plugin: ${status.enabled ? "ENABLED" : "DISABLED"}`,
-    `Mode: ${status.mode ?? "unknown"}`,
-    `Automatic execution: ${status.automaticExecution ?? "PAUSED"}`,
-    `Automatic resume: ${status.automaticResume ?? "PAUSED"}`,
-    `Override: ${status.override?.active ? `ON for ${status.override.taskID} until ${status.override.expiresAt}` : "OFF"}`,
-    `Provider/model: ${status.providerID ?? "unknown"}/${status.modelID ?? "unknown"}`,
-    `Policy: ${status.policyID ?? (pricing === "UNKNOWN" ? "none (model not in any verified policy)" : "none")}`,
-    `Pricing: ${pricing}`,
-    defaults
-      ? `Client defaults: CLI ${defaults.cli ?? "ON"}, Desktop ${defaults.desktop ?? "ON"}`
-      : "",
-    defaults ? `CLI global protection: ${defaults.cli ?? "ON"}` : "",
-    defaults ? `Desktop global protection: ${defaults.desktop ?? "ON"}` : "",
-    status.client ? `Client ownership: ${status.client.ownership ?? "unknown"}` : "",
-    status.sessionProtection ? `Session protection (explicit): ${status.sessionProtection}` : "",
-    status.client
-      ? `Protection for this chat: ${chatProtectionLabel(status.client, defaults)}`
-      : "",
-    status.effectiveProtection
-      ? `Effective protection: ${status.effectiveProtection}${status.client?.source ? ` (${status.client.source})` : ""}`
-      : "",
-    `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}${requestDetail}`,
+    `CLI protection: ${defaults?.cli ?? "ON"}`,
+    `Desktop protection: ${defaults?.desktop ?? "ON"}`,
+    `This chat: ${chatLabel(status.client, defaults)}`,
+    `Pricing: ${pricing}${detail}`,
+    `Requests: ${status.requestsAllowed ? "ALLOWED" : "BLOCKED"}`,
     `Next transition: ${next}`,
-    `Queue: ${status.queued ?? 0} queued, ${status.waiting ?? 0} waiting, ${status.failed ?? 0} failed`,
     status.interactiveWaiting
-      ? `Interactive: ${status.interactiveWaiting} request${status.interactiveWaiting === 1 ? "" : "s"} waiting for off-peak`
+      ? `Waiting: ${status.interactiveWaiting} request${status.interactiveWaiting === 1 ? "" : "s"} for off-peak`
       : "",
     status.recoveryWaiting
       ? `Recovery: ${status.recoveryWaiting} session${status.recoveryWaiting === 1 ? "" : "s"} waiting for off-peak`
       : "",
     status.compactionRecoveryWaiting
-      ? `Compaction recovery: ${status.compactionRecoveryWaiting} session${status.compactionRecoveryWaiting === 1 ? "" : "s"} waiting for off-peak`
+      ? `Compaction recovery: ${status.compactionRecoveryWaiting} session${status.compactionRecoveryWaiting === 1 ? "" : "s"}`
       : "",
-    `Running: ${status.running?.id ?? "none"}${status.running?.sessionID ? ` (session ${status.running.sessionID})` : ""}`,
     status.configError ? `Config error: ${status.configError}` : "",
-    status.enabled
-      ? ""
-      : "Queued tasks and sessions are preserved. Peak-price execution is still blocked; OFF is not an override.",
-    `This surface: ${surfaceLabel(context.surface)}. Session-level control here is /offpeak protection chat on|off.`,
+    `Surface: ${surfaceLabel(context.surface)} · change this global with /offpeak on|off · this chat with /offpeak chat on|off|auto`,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-function formatProtectionGlobal(plan: OffpeakCommandPlan, output: OffpeakRpcOutput): string {
+function formatClientGlobal(plan: OffpeakCommandPlan, output: OffpeakRpcOutput): string {
   const defaults = output.client?.defaults;
-  const other = otherSurface(plan.surface);
-  const own = defaults ? defaults[plan.surface] : plan.direction === "off" ? "OFF" : "ON";
-  const lines = [
-    `${surfaceLabel(plan.surface)} global protection: ${own}`,
-    `${surfaceLabel(other)} global protection: ${defaults ? defaults[other] : "unknown"} (not modified)`,
-    plan.surface === "cli"
-      ? "Applies to CLI sessions without an explicit per-chat override."
-      : "Applies to Desktop sessions without an explicit per-chat override.",
-    "Queued tasks keep their existing queue behavior; this setting never adopts or starts a queue task.",
-  ];
-  if (output.client?.error) lines.push(`Client settings error: ${output.client.error}`);
-  return lines.join("\n");
+  const target = plan.client ?? plan.surface;
+  const other = target === "cli" ? "desktop" : "cli";
+  const own = defaults ? defaults[target] : plan.direction === "off" ? "OFF" : "ON";
+  return [
+    `${surfaceLabel(target)} protection: ${own}`,
+    `${surfaceLabel(other)} protection: ${defaults ? defaults[other] : "unknown"} (not modified)`,
+    `Applies to ${target === "cli" ? "CLI" : "Desktop"} chats without an explicit per-chat setting.`,
+  ].join("\n");
 }
 
-function formatProtectionChat(plan: OffpeakCommandPlan, output: OffpeakRpcOutput): string {
+function formatChat(plan: OffpeakCommandPlan, output: OffpeakRpcOutput): string {
   const client = output.client;
   const session = client?.session;
   const defaults = client?.defaults;
   if (!session) {
-    return (
-      output.message ??
-      `Protection for this chat: ${plan.direction === "off" ? "OFF" : "follows the interface global"}.`
-    );
+    return plan.direction === "auto"
+      ? "This chat now follows its client global."
+      : plan.direction === "on"
+        ? "This chat is now always protected."
+        : plan.direction === "off"
+          ? "This chat may now use verified peak pricing."
+          : "No chat is focused.";
   }
-  const label =
+  const state =
     session.source === "session-override"
-      ? "OFF (explicit override for this chat only)"
+      ? session.protection === "ON"
+        ? "always protect (explicit)"
+        : "allow peak (explicit)"
       : session.source === "client-default"
-        ? `follows the ${session.ownership === "desktop" ? "Desktop" : "CLI"} global (${session.protection})`
-        : session.source === "queue"
-          ? "queue task; client defaults do not apply"
-          : session.source === "ambiguous"
-            ? "ON (shared session; fail-closed)"
-            : "ON (no reliable client registration; fail-closed)";
-  const lines = [
-    `Protection for this chat: ${label}`,
+        ? `follows the ${surfaceName(session.ownership)} global (${session.protection})`
+        : "protected (no client registration yet)";
+  return [
+    `This chat: ${state}`,
     `Effective protection: ${session.protection}`,
-  ];
-  if (defaults) {
-    lines.push(
-      `${surfaceLabel(plan.surface)} global protection: ${defaults[plan.surface]} (not modified)`,
-      `${surfaceLabel(otherSurface(plan.surface))} global protection: ${defaults[otherSurface(plan.surface)]} (not modified)`,
-    );
-  }
-  if (session.source === "session-override") {
-    lines.push("This chat may use verified peak-priced inference; other chats are unchanged.");
-  }
-  lines.push(
-    "Queued tasks keep their existing queue behavior; this setting never adopts or starts a queue task.",
-  );
-  return lines.join("\n");
-}
-
-function formatTasks(tasks: unknown[] | undefined): string {
-  if (!tasks?.length) return "Queue is empty.";
-  return tasks
-    .map((raw) => {
-      const task = raw as { id?: string; state?: string; sessionID?: string; lastError?: string };
-      return `${task.id ?? "?"} ${task.state ?? "UNKNOWN"}${task.sessionID ? ` session=${task.sessionID}` : ""}${task.lastError ? ` error=${task.lastError}` : ""}`;
-    })
-    .join("\n");
+    `CLI protection: ${defaults?.cli ?? "ON"} (unchanged)`,
+    `Desktop protection: ${defaults?.desktop ?? "ON"} (unchanged)`,
+    session.protection === "OFF"
+      ? "Verified peak-priced requests may run immediately in this chat."
+      : "Verified peak-priced requests wait for off-peak and continue automatically.",
+  ].join("\n");
 }
 
 export function formatOffpeakResult(
@@ -506,28 +381,16 @@ export function formatOffpeakResult(
   context: OffpeakCommandContext,
 ): string {
   switch (plan.kind) {
-    case "status":
-      return formatOffpeakStatus(statusOf(output), context);
-    case "protection-global":
-      return formatProtectionGlobal(plan, output);
-    case "protection-chat":
-      return formatProtectionChat(plan, output);
-    case "client":
-      return formatClientInfo(clientStatus(output));
-    case "session":
-      return (
-        output.message ?? `Session protection ${plan.direction === "off" ? "disabled" : "enabled"}.`
-      );
-    case "list":
-      return formatTasks(output.tasks);
-    case "queue":
-    case "task":
-    case "automation":
-      return output.message ?? "Done.";
+    case "client-global":
+      return formatClientGlobal(plan, output);
+    case "chat":
+      return formatChat(plan, output);
     case "pricing":
-      return formatOffpeakStatus(statusOf(output), context);
+    case "status":
     default:
-      return output.message ?? "Done.";
+      if (output.status) return formatOffpeakStatus(output.status, context);
+      if (output.client) return formatChat(plan, output);
+      return output.message ?? "No Offpeak state was returned.";
   }
 }
 
@@ -545,3 +408,5 @@ export async function runOffpeakCommand(
   const output = (await caller.control(plan.request)) as OffpeakRpcOutput;
   return { plan, output, text: formatOffpeakResult(plan, output, context) };
 }
+
+export type { OffpeakClientStatus };

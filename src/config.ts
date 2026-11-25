@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -8,12 +8,13 @@ import {
   validateTimeZone,
 } from "./policy.js";
 
-export type RunMode = "auto" | "queue" | "guard";
-
+/**
+ * Pricing configuration only. Peak-price protection itself is controlled per
+ * chat and per client; there is no installation-wide enable switch and no
+ * queue/guard execution mode.
+ */
 export interface OffpeakConfig {
   schemaVersion: 1;
-  enabled: boolean;
-  mode: RunMode;
   displayTimeZone: string;
   policies: PricingPolicy[];
 }
@@ -33,12 +34,6 @@ function defaultDisplayTimeZone(): string {
 }
 
 export function defaultConfig(options: Record<string, unknown> = {}): OffpeakConfig {
-  const mode = options.mode ?? "auto";
-  if (mode !== "auto" && mode !== "queue" && mode !== "guard") {
-    throw new Error("Plugin option 'mode' must be auto, queue, or guard.");
-  }
-  const enabled = options.enabled ?? true;
-  if (typeof enabled !== "boolean") throw new Error("Plugin option 'enabled' must be boolean.");
   const displayTimeZone = options.displayTimeZone ?? defaultDisplayTimeZone();
   if (typeof displayTimeZone !== "string") {
     throw new Error("Plugin option 'displayTimeZone' must be a time zone string.");
@@ -47,8 +42,6 @@ export function defaultConfig(options: Record<string, unknown> = {}): OffpeakCon
   if (!Array.isArray(extra)) throw new Error("Plugin option 'policies' must be an array.");
   return {
     schemaVersion: 1,
-    enabled,
-    mode,
     displayTimeZone,
     policies: [...structuredClone(BUILTIN_POLICIES), ...(extra as PricingPolicy[])],
   };
@@ -58,12 +51,10 @@ export function validateConfig(value: unknown, fallback: OffpeakConfig): Offpeak
   if (!isRecord(value)) throw new Error("Configuration must be a JSON object.");
   if (value.schemaVersion !== 1)
     throw new Error("Unsupported offpeak configuration schemaVersion.");
-  if (typeof value.enabled !== "boolean")
-    throw new Error("Configuration field 'enabled' must be boolean.");
-  if (value.mode !== "auto" && value.mode !== "queue" && value.mode !== "guard") {
-    throw new Error("Configuration field 'mode' must be auto, queue, or guard.");
-  }
-  const displayTimeZone = value.displayTimeZone;
+  // `enabled` and `mode` were removed in v0.5.0. They are accepted and ignored
+  // so an existing offpeak.json keeps working without an edit; the next write
+  // (if any) drops them.
+  const displayTimeZone = value.displayTimeZone ?? fallback.displayTimeZone;
   if (typeof displayTimeZone !== "string") {
     throw new Error("Configuration field 'displayTimeZone' must be a time zone string.");
   }
@@ -82,8 +73,6 @@ export function validateConfig(value: unknown, fallback: OffpeakConfig): Offpeak
   if (new Set(ids).size !== ids.length) throw new Error("Pricing policy IDs must be unique.");
   return {
     schemaVersion: 1,
-    enabled: value.enabled,
-    mode: value.mode,
     displayTimeZone,
     policies: structuredClone(adoptBuiltinDefaults(configuredPolicies, fallback.policies)),
   };
@@ -98,11 +87,11 @@ export function validateConfig(value: unknown, fallback: OffpeakConfig): Offpeak
  * explicit holiday list or flat model list always wins.
  *
  * When every stored policy is an unmodified copy of a built-in policy — that
- * is, the stored file is only a cached copy of the shipped defaults, which is
- * what a first `/offpeak on|off` persists — newly shipped built-in policies
- * are appended too, so an existing installation gains a policy for a newly
- * supported provider without editing the file. As soon as anything is
- * customized, the stored set is authoritative and nothing is added or removed.
+ * is, the stored file is only a cached copy of the shipped defaults — newly
+ * shipped built-in policies are appended too, so an existing installation
+ * gains a policy for a newly supported provider without editing the file. As
+ * soon as anything is customized, the stored set is authoritative and nothing
+ * is added or removed.
  */
 function adoptBuiltinDefaults(stored: PricingPolicy[], builtin: PricingPolicy[]): PricingPolicy[] {
   const adopted = stored.map((policy) => {
@@ -197,24 +186,6 @@ export class ConfigRepository {
         error: error instanceof Error ? error.message : "Could not load offpeak configuration.",
         path: this.path,
       };
-    }
-  }
-
-  async write(config: OffpeakConfig): Promise<void> {
-    const validated = validateConfig(config, this.#fallback);
-    await mkdir(path.dirname(this.path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, {
-      mode: 0o600,
-      flag: "wx",
-    });
-    try {
-      await rename(temporary, this.path);
-    } catch (error) {
-      await import("node:fs/promises")
-        .then(({ unlink }) => unlink(temporary))
-        .catch(() => undefined);
-      throw error;
     }
   }
 }

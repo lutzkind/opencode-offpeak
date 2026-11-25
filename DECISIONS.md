@@ -1,5 +1,41 @@
 # Decisions
 
+## 2026-11-25: Protection is two client globals plus one per-chat choice (v0.5.0)
+
+The v0.4.x surface had accumulated an installation-wide `enabled` toggle, three
+execution modes (`auto`, `queue`, `guard`), a persistent task queue with seven
+commands, a first-client-wins ownership model with an `ambiguous` fail-closed
+state, and a Desktop page with ownership, session IDs, chat pickers, and command
+references. The user asked for the product they actually use: a CLI switch, a
+Desktop switch, and a way to turn one chat on while its global is off.
+
+Decision: remove the enable toggle, modes, and queue; keep exactly two
+persistent client globals and one per-chat tri-state (`follow global`, `always
+protect`, `allow peak`). An explicit chat setting wins over either global in
+both directions. A chat with no explicit setting follows the client that most
+recently opened it; an unregistered chat stays protected. The Desktop page
+exposes only the two globals and the chat selector, and both globals are
+writable there. `/offpeak on|off` now changes the calling client's global; the
+old "OFF still blocks" behavior was the main source of confusion.
+
+Rejected alternatives:
+
+- Keeping the queue behind hidden commands. It would preserve dead storage,
+  tests, and scheduler paths that nothing can reach, and the product statement
+  is "just protection".
+- Keeping first-client-wins ownership and requiring an explicit chat override
+  to escape `ambiguous`. That reproduced the Desktop symptom: a Desktop global
+  switch appeared to do nothing because the chat had once been seen by the CLI.
+  Last-opener ownership matches the client the user is actually using, and an
+  explicit chat setting still overrides it.
+- Storing the globals in `offpeak.json`. They are per-installation client state,
+  not pricing policy, and OpenCode plugin storage already provides the atomic
+  read-merge-write needed by multiple locations.
+
+Legacy config `enabled`/`mode` fields, `"off"` chat overrides, and the old
+`ambiguous` ownership entries are accepted and migrated without an edit. The
+legacy queue document is left untouched but is no longer read or executed.
+
 ## 2026-11-23: OpenCode 2.4.1 validation (v0.4.4)
 
 OpenCode **2.4.1** was published at 15:57Z, after the 2.4.0 compatibility work

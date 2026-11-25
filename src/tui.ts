@@ -71,7 +71,7 @@ export default Plugin.define({
       commands: [
         {
           title: "OpenCode Offpeak",
-          description: "Queue tasks and inspect off-peak pricing controls",
+          description: "Peak-price protection for the CLI and this chat",
           id: "opencode-offpeak.command",
           slash: { name: "offpeak", aliases: ["op"], arguments: true },
           run: async (input = "") => {

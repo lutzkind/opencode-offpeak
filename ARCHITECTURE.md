@@ -2,185 +2,144 @@
 
 `opencode-offpeak` is one npm package with three OpenCode v2 entrypoints:
 
-- `./server` owns the request guard, queue scheduler, config file, client defaults/ownership, and OpenCode plugin-storage state. It is the single authority for every pricing decision.
-- `./tui` registers `/offpeak` through the v2 keymap slash-command API, registers the routed CLI session's origin through typed RPC, and sends typed RPC calls to the connected server (including a remote server).
-- `./gui-experimental` is the Desktop GUI entrypoint (`src/gui.tsx` → one prebuilt `dist/gui-experimental.cjs`). It contributes a native settings page, the same `/offpeak` command as a native composer slash command, a session-registration effect, and hold/resume toasts. It calls the selected session server's typed RPC. Because `Sessions.current()` is undefined while the route shows Settings, the page resolves the session from the mounted screen, the active tab, or the last routed session, and offers a Chat selector when several are open. The page writes the Desktop global default and the routed chat's explicit override; it never writes the CLI default. It does not import or initialize the server engine.
+- `./server` owns pricing evaluation, request holds, recovery, client globals,
+  per-chat settings, and OpenCode plugin-storage state. It is the single
+  authority for every pricing decision.
+- `./tui` registers `/offpeak`, registers the routed CLI chat's origin through
+  typed RPC, and renders hold/resume toasts.
+- `./gui-experimental` is the Desktop GUI entrypoint (`src/gui.tsx` → one
+  prebuilt `dist/gui-experimental.cjs`). It contributes the native settings page,
+  the same `/offpeak` command as a composer slash command, a session-registration
+  effect, and hold/resume toasts. It calls the selected chat server's typed RPC
+  and never initializes the server engine.
 
-Both interactive entrypoints use the shared command grammar in `src/commands.ts`. It maps `/offpeak protection global on|off` to `client-set` for the calling surface (`cli` or `desktop`), `/offpeak protection chat on|off` to the session override, and `/offpeak status` to the authoritative server status. The TUI and GUI differ only in the surface and active session they pass in; they do not duplicate parsing, protection rules, or rendering logic.
+There is no installation-wide enable switch, no execution mode, no background
+task queue, no daemon, database, scheduler, or provider proxy. OpenCode owns
+sessions, model/provider selection, permissions, tools, transcript, and project
+context.
 
-The plugin does not run a second agent runtime, server, daemon, database, queue, scheduler, or provider proxy. OpenCode owns the sessions, model/provider, permissions, tools, transcript, and project context.
+## User model
 
-## Compatibility enforcement
+Two persistent client globals and one per-chat setting:
 
-The server and TUI entrypoints are defined with `Plugin.define(...)` and start by checking `context.app.version` against the tested range `>=2.0.26 <2.5.0` (validated against OpenCode 2.0.26, 2.0.27, 2.0.30, 2.1.3, 2.2.6, 2.3.0, 2.3.2, and 2.4.1; the same range declared in `package.json` `engines.opencode`). `context.app.version` remains a `string` on 2.4.1 (verified in the host's published `@opencode/plugin@2.4.1` declarations and at runtime). OpenCode 2.1's session/compaction schema change (`providerState` → `native`) does not affect the hooks used here; its internal retry of buffered model calls only changes how quickly a failed probe settles. OpenCode 2.2 leaves the hooks, RPC channel, and TUI surfaces used here unchanged; the OpenTUI 0.7/0.8 renderable changes do not apply because this plugin defines no custom renderables, ScrollBox wrappers, or custom `RenderContext`. OpenCode releases before 2.0.26 activate TUI plugins outside the Solid keymap provider owner, so `context.keymap.layer()` fails with `Keymap.Provider is missing` there even though the plugin follows the documented API. On an unsupported host the plugin refuses to initialize with an explicit version error instead of reaching that confusing runtime failure. OpenCode 2.2.3 moved managed-policy plugin control from `integration.use` to `plugin.use`; a managed `plugin.use: deny` prevents any plugin from loading and is an operator-policy concern, not a version-range defect. OpenCode 2.3 adds plugin surfaces (`session.fork`, `experimental.model.resolve`, `experimental.idle`, artifacts, credentials, session instructions, event type filters) and deprecates `generate` in favour of `experimental.generate.text`, which this plugin does not call; the declarations for `model.request`, `http.request`, the experimental WebSocket hooks, `retry`, session events, storage, RPC, and the TUI context are unchanged. OpenCode 2.3.1 enables background compaction by default (`compaction.background`, replacing `experimental.background_compaction`) and adds a `codemode` variant to `SessionIdleBackground`; a foreground or background compaction summary both prepare the same `compaction` model request, so the pre-model hold and transport guard cover them unchanged. OpenCode 2.3.2 removes `video` from the plugin `experimental.generate` surface (server-only) and changes provider prompt caching; neither is used here. The published `@opencode/plugin` declarations at 2.3.2 differ from 2.3.0 only in those two places, and the package now builds against that SDK. OpenCode 2.3 also stops making `rpc.call` wait for plugin load, so a TUI command or client registration issued in the first moments of startup can precede server-side registration; the TUI registers again on the next route change or command, and an unregistered session remains `UNKNOWN` and protected, so no retry loop or polling is used. OpenCode 2.4 adds background jobs, video generation, automations, GUI icon declarations, and composer delivery modes. The TUI context only gains `job.list`; the GUI's additions are opt-in declarations (`icons`) and composer methods, and `model.request`, `http.request`, the experimental WebSocket hooks, `retry`, session events, storage, RPC, and `context.keymap.layer()` keep their 2.3 signatures. TUI plugins now build against OpenTUI 0.9.4, and its renderer callback shape changed, but this plugin registers no code-block renderer or custom renderable. OpenCode 2.4 also restores asynchronous plugin loading, so a first request can arrive before the server plugin's RPC registration; the same fail-closed `UNKNOWN` rule covers that window. The Desktop GUI SDK exists from 2.3.0; the GUI entrypoint is therefore built and validated against 2.4.1 while the server/TUI range remains `>=2.0.26 <2.5.0`.
+| State | Effect |
+|---|---|
+| CLI global `ON` | CLI chats wait for off-peak unless a chat overrides |
+| Desktop global `ON` | Desktop chats wait for off-peak unless a chat overrides |
+| Chat `follow global` | follows the client that most recently opened the chat |
+| Chat `always protect` | waits at peak even when its client global is `OFF` |
+| Chat `allow peak` | runs at verified peak prices even when its global is `ON` |
 
-```mermaid
-flowchart LR
-  TUI[OpenCode CLI / TUI] -->|client-register + /offpeak| RPC[OpenCode v2 plugin RPC]
-  GUI[OpenCode Desktop GUI] -->|client-register + settings| RPC
-  RPC --> Engine[Queue, client and toggle engine]
-  Engine --> Storage[OpenCode plugin storage]
-  Engine --> Sessions[OpenCode session API]
-  Sessions --> Defer[Pre-model hook: model.request]
-  Sessions --> Guard[HTTP and WebSocket request hooks]
-  Defer --> Policy[Pricing policy evaluator]
-  Guard --> Policy
-  Policy -->|allowed, or client/override authorization| Provider[Configured model provider]
-  Policy -->|peak, OFF, unknown, shared| Wait[Block or wait before send]
-```
+Defaults are `ON` for both clients and `follow global` for every chat. A chat
+no client has registered stays protected (fail-closed). Invalid configuration
+and `UNKNOWN` pricing always fail closed, including for an `allow peak` chat.
+
+## Client identification
+
+The server's request hooks expose the session ID but no client identity, so
+each client extension observes the chat through its supported lifecycle API and
+registers that observation with the server that owns the chat:
+
+- TUI: `context.client.rpc(...)` registers the routed/active session as `cli`.
+- GUI: the selected session's `SessionRef.server.client` registers it as `desktop`.
+
+Registration is idempotent and additive. The most recent client becomes the
+chat's `owner`; opening an existing chat in the other client updates the owner,
+so the switch in the client the user is actually using takes effect. An explicit
+per-chat setting is unaffected by ownership.
+
+## Request path
+
+The server registers `model.request`, `http.request`,
+`experimental.ws.handshake`, `experimental.ws.send`, and `retry`.
+
+1. `model.request` runs while OpenCode prepares every model request (primary,
+   compaction, title, generate), before any provider attempt exists.
+2. The plugin evaluates the configured pricing policy with its stored clock and
+   timezone.
+3. `UNTRACKED` providers pass. `UNKNOWN` models throw a fail-closed
+   `PricingBlockedError`. `OFF_PEAK` and `FLAT` pass. `PEAK` passes only when the
+   chat's effective protection is `OFF`.
+4. Otherwise the request is held. No provider traffic is sent. A primary request
+   emits one hold notification; auxiliary title/compaction/generate holds are
+   silent.
+5. The hold re-evaluates on the shared signal, on the policy's next transition,
+   and when any global or chat setting changes. If protection becomes `OFF` or
+   pricing becomes allowed, the same request continues in the same session.
+6. The transport hooks remain the final hard barrier immediately before an HTTP
+   request or WebSocket frame. They re-check the same decision and fail closed.
+
+A primary pre-model hold persists a `deferred` recovery marker. If the plugin
+reloads or the server restarts, the marker is delivered as one same-session
+continuation at the allowed window. A lost compaction hold persists a
+`pending-compaction` marker and re-admits OpenCode's own compaction; a lost title
+hold persists a `pending-title` marker and only verifies the title, never
+overwrites it. A user cancel clears pending work; an inactivity or shutdown
+interrupt keeps it.
+
+A retryable provider/network failure that crosses into peak is vetoed
+(`decision.retry = false`) and recorded as a `retry-failure` recovery instead of
+retrying into the provider. Non-retryable failures keep OpenCode's normal
+outcome. A chat with effective protection `OFF` keeps OpenCode's normal retry
+behavior.
+
+## Held-request cancellation
+
+`cancelHold { sessionID }` lets a caller that owns a routing decision cancel a
+parked request without interrupting the session. The hold settles once:
+`committed` (dispatch won), `refused` (cancellation won), or `none`. A refused
+request is replaced at the transport boundary with a credential-free placeholder
+aimed at a closed loopback endpoint carrying only the marker header
+`x-opencode-offpeak-refused`; OpenCode sees a retryable transport failure and its
+own retry policy decides what happens next. The refusal is not treated as a
+provider failure, so the plugin does not register its own continuation for it.
+
+`pricing { providerID, modelID }` is the read-only canonical classification for
+other plugins (for example `opencode-free-first` `peak-only`). It has no queue,
+hold, timer, or persistence side effect.
 
 ## State and persistence
 
-The queue is one versioned JSON document in OpenCode plugin storage. Each task stores its ID, prompt, working directory, provider/model, policy ID, state, explicit OpenCode session ID, timestamps, retry metadata, last error, and any expiring override. There is no database or second queue service.
+- `offpeak.json` — pricing policy only: `schemaVersion`, `displayTimeZone`, and
+  optional `policies`. `enabled` and `mode` from v0.4.x are accepted and ignored.
+- `opencode-offpeak/clients-v1` — `defaults {cli, desktop}` and per-chat
+  `{clients, owner, updatedAt}`.
+- `opencode-offpeak/session-overrides-v1` — explicit per-chat `on`/`off` only.
+  Absence means follow-global.
+- `opencode-offpeak/recovery-v1` — same-session recovery markers, scoped by
+  plugin location.
+- `opencode-offpeak/queue-v1` — legacy v0.4.x queue records. Not read, executed,
+  or deleted by v0.5.0.
 
-Client protection is a third, minimal versioned document (`opencode-offpeak/clients-v1`): `defaults` (`cli` and `desktop`, both initialized to `"on"`) and per-session `sessions` ownership (`clients: ["cli"] | ["desktop"] | ["cli","desktop"]`, an `ambiguous` flag, and an update timestamp). OpenCode can load one server engine per project/location in the same process, while the document is global. A client-setting or ownership write therefore reads the latest stored document under a process-wide lock and applies only its own delta; it never writes a whole stale snapshot. Every protection decision, status read, and client-status read refreshes the document first. Only one client's field is written by a client-setting change; the other is preserved from the latest document. Registration by the same client is idempotent, and a second different client marks the session ambiguous instead of replacing the first. Absence of a session entry means `UNKNOWN`. The document survives reloads and restarts; `session.deleted` removes ownership with the session, and bounded lazy cleanup reaps only confident not-found sessions. There is no heartbeat, lease, timer, poll, or second database. Both defaults start ON so an installation that predates this feature keeps every session protected.
+All documents are versioned JSON in OpenCode plugin storage. Client writes read
+the latest document under a process-wide lock and apply only their own delta, so
+a stale OpenCode location cannot revert another location's newer setting. Reads
+happen before every protection decision; a read failure falls back to both
+globals `ON`, unknown ownership, and refused writes (fail-closed).
 
-Chat-scoped off-peak protection is a second, tiny plugin-storage document (`opencode-offpeak/session-overrides-v1`) that records only the sessions the user explicitly switched off (`protection: "off"` with an update timestamp); the absence of an entry means protection is ON, which is the default for every session. It is deliberately not part of `offpeak.json`: it describes one interactive session's explicit authorization, not an installation setting, and it survives reloads and restarts with the session. OpenCode's supported `session.deleted` event removes an entry when its session is deleted; otherwise stale entries are reaped by bounded lazy cleanup on start-up, session commands, and status reads. Only a confident "session not found" is ever treated as deletion — a transient error keeps the entry. There is no timer, no expiry, and no periodic sweep.
+`session.deleted` removes a chat's ownership and override. Bounded lazy cleanup
+on start-up and explicit chat commands reaps only sessions that a supported
+`session.get` reports as confidently missing; a transient error keeps state.
 
-The setting file is `$OPENCODE_CONFIG_DIR/offpeak.json` when `OPENCODE_CONFIG_DIR` is set; otherwise it is `$XDG_CONFIG_HOME/opencode/offpeak.json`, defaulting to `~/.config/opencode/offpeak.json`. `OPENCODE_OFFPEAK_CONFIG` can override the file path. It is canonical for the persistent enabled toggle, execution mode, display timezone, and policy definitions. Commands write it atomically with owner-only permissions. The queue remains in OpenCode storage.
+## Compatibility
 
-## State machine
+`package.json` declares `engines.opencode >=2.0.26 <2.5.0`. Both entrypoints
+check `context.app.version` at setup and refuse an unsupported host with an
+explicit error. The range has been validated at 2.0.26, 2.0.27, 2.0.30, 2.1.3,
+2.2.6, 2.3.0, 2.3.2, 2.4.0, and 2.4.1.
 
-```mermaid
-stateDiagram-v2
-  [*] --> QUEUED
-  QUEUED --> RUNNING: enabled and policy allows
-  QUEUED --> WAITING_OFFPEAK: peak window
-  WAITING_OFFPEAK --> RUNNING: auto resume or explicit resume, policy allows
-  RUNNING --> WAITING_OFFPEAK: next request reaches peak, retryable failure during peak, or plugin is OFF
-  RUNNING --> COMPLETED: OpenCode session outcome is succeeded
-  RUNNING --> FAILED: non-retryable OpenCode failure or ambiguous restart
-  FAILED --> QUEUED: explicit retry or run-now
-  QUEUED --> CANCELLED: explicit cancel
-  WAITING_OFFPEAK --> CANCELLED: explicit cancel
-```
+OpenCode 2.3 added plugin surfaces and deprecated `generate`; OpenCode 2.3.1
+enabled background compaction by default; 2.3.2 changed only
+`experimental.generate` and prompt caching; 2.4 added background jobs, video,
+automations, GUI icons, and composer delivery modes. None of those changed
+`model.request`, `http.request`, the experimental WebSocket hooks, `retry`,
+session events, storage, RPC, or `context.keymap.layer()`. The Desktop GUI SDK
+exists from 2.3.0; the GUI entrypoint is built against 2.4.1.
 
-OFF does not delete state. It stops automatic starts and resumes. If a queued task is already active, the request guard allows the in-flight provider request to settle and blocks its next inference request. It preserves the session. OFF does not authorize peak pricing.
+## Testing contract
 
-`COMPLETED`, `FAILED`, and `CANCELLED` tasks are terminal records. `/offpeak remove <task-id>` deletes a terminal record from the queue document; active tasks must be cancelled first. Removing a record never deletes the OpenCode session it references.
-
-## Request guard and policy evaluation
-
-The server plugin registers two lifecycle points:
-
-- `model.request` — runs while OpenCode prepares every model request (primary, compaction, title, generate), before the provider attempt and its response-header timeout exist. In `auto` mode this is where a peak-priced request is deferred: nothing is sent, no attempt timer runs, and the same session continues the same turn at the next allowed window.
-- `http.request`, `experimental.ws.handshake`, and `experimental.ws.send` — run immediately before the provider transport sends the request/frame. These remain the final hard barrier: a blocked request never crosses them, and OFF/`queue`/`guard` modes block interactive requests here exactly as before.
-
-A queued `auto` task transitions to `WAITING_OFFPEAK` and waits at whichever point it reaches first (normally `model.request`); its existing override still applies. In `auto` mode, a normal interactive request for a supported model is deferred the same way. It creates no task and no session, is tracked only in server memory (shown by `/offpeak status`), and is released exactly once when the plugin is enabled and the policy allows. Wake-ups come from the shared config-change signal plus one timer scheduled for the policy's `nextTransition`; there is no polling loop. If the plugin shuts down while a request is held, the request fails closed as blocked rather than being sent under an uncertain pricing state. Requests in `queue`/`guard` mode, and requests that arrive while the plugin is OFF, are blocked immediately by the transport guard; OFF does not release a request that is already held.
-
-### Read-only pricing query
-
-`pricing` is the second RPC method and the single canonical classification
-surface for other plugins. It takes `{ providerID, modelID }`, calls the same
-`evaluatePricing` used by every guard with the same stored policies and clock,
-and returns `{ state, allowed, policyID?, nextTransition?, reason? }`. It has no
-queue, hold, timer, or persistence side effect. `opencode-free-first` consumes it
-for `peak-only`; this plugin remains the only owner of the weekly windows and the
-Chinese holiday calendar.
-
-### Cancelling a held request
-
-A caller that owns a routing decision can cancel the request this plugin is holding for a session through the `cancelHold` RPC method. `state` on the held request is the single authoritative transition, and it is mutated synchronously:
-
-```
-holding --pricing allowed--> committed   (dispatch wins; cancelHold reports "committed")
-holding --cancelHold-------> refused     (cancellation wins; the request is refused at the boundary)
-```
-
-A session can hold several requests at once (the agent loop and an auxiliary title request are prepared concurrently), so holds are tracked per request and `cancelHold` cancels every waiting request of that session. A `refused` hold returns from the loop and arms a one-shot refusal keyed by session, provider, model, and kind. The transport-boundary hooks registered before the pricing guards consume it and replace the request with a credential-free placeholder aimed at a closed loopback endpoint, so OpenCode sees a retryable transport failure and its own retry policy decides what happens next. A placeholder is never re-evaluated by the guards. An armed refusal expires after 60 seconds and is dropped when a fresh hold starts for the same session, so it cannot refuse an unrelated request. `consumeRefusal` also suppresses this plugin's own retry recovery for that one failure, because a refusal is not a provider failure and the caller owns the follow-up.
-
-The mechanism is deliberately generic: this plugin exports a capability, not a policy. It knows nothing about who calls it or why, a queue-owned hold is never cancellable this way, and an unused capability changes nothing.
-
-### Chat-scoped off-peak protection
-
-`/offpeak protection chat off` (legacy alias `/offpeak session off`) records an explicit chat-scoped authorization for verified peak-priced inference; `/offpeak protection chat on` (legacy alias `/offpeak session on`) removes it. The TUI resolves the current session from OpenCode's supported command context — `ui.router.current()` (the focused route) first, then the active entry of `ui.tabs.list()` — so the user never types a session ID; on the home screen, where no session is focused, the command refuses instead of guessing.
-
-The override is checked inside the request guard after the fail-closed guards and only for requests that are not queue-owned: a request that evaluates `PEAK` under a verified policy is allowed immediately for that session, and `UNKNOWN`/invalid-configuration requests still fail closed. A hold that is already waiting re-reads the override after every signal wake-up, so switching protection off commits the same parked request through the existing signal — no re-send, no retry, no duplicate provider call, no polling loop. Persisted recovery entries for the session are released on the same pass, keeping the native order (pending compaction, primary continuation, title check); entries of other sessions and other classes are untouched. A refused or committed hold is never recalled, and switching protection back on changes nothing for a request already dispatched — the next request that crosses the guard waits normally again.
-
-Precedence is explicit and documented: the per-session grant is newer and more specific than the global automation state, so it applies in `auto`, `queue`, and `guard` modes and while the plugin is globally OFF — for that one session only. `/offpeak off` itself stays passive (it pauses every queue start and auto-resume, releases nothing, and blocks every other session and every task). Background queue tasks never inherit the override, even when they run in the same OpenCode session; `/offpeak run-now <task-id>` remains the task-scoped authorization. Status reports both global defaults, the current chat's protection, and, at peak with protection off, renders `Pricing: PEAK` with `Protection for this chat: OFF (explicit override)` and `Requests: ALLOWED (chat override)`.
-
-### Client identification and independent protection
-
-The server's `model.request`, `http.request`, and WebSocket hooks expose the session ID, agent, model, request kind, and transport data, but **no client identity**. There is no supported request-context field, header, or session-creation hook that says whether a request originated from the CLI/TUI or Desktop. The plugin therefore never infers the origin from IP addresses, User-Agent strings, undocumented internals, environment variables, or the order of `session.created` events.
-
-Instead, each client extension observes the session through its supported lifecycle API and registers that observation with the server that owns the session:
-
-- The TUI reads `ui.router.current()` and the active `ui.tabs` entry in a Solid computation. It registers the routed session as `cli` immediately and again before every `/offpeak` command. Registration uses `context.client.rpc`, which points at the connected server, including a remote one.
-- The GUI uses `ctx.sessions.current()` and `SessionRef.server.client`. A new routed session is registered as `desktop` through its actual server, never an assumed local sidecar. The GUI's `setup` runs in every Desktop window; the bundle contains no server engine. The Desktop's synced `ServerRef.data` session store supplies real titles and project IDs; a session missing from that store is loaded once through the supported session API, and OpenCode rename/move events update the same reactive store. No title database, poll, or per-render lookup is added.
-
-Registration is idempotent and additive. A session seen by one client has that client's default; a session seen by both is `ambiguous` and stays protected. A session with no registration is `UNKNOWN` and stays protected. The last registrant can never overwrite the first, and there is no lease expiry that could silently change ownership after a client closes.
-
-The effective decision is, in order: invalid configuration/`UNKNOWN` pricing fail closed; an explicit `/offpeak protection chat off` override wins for that one chat; a reliably single-owner chat uses that interface's global default; a queue-owned session never inherits a global default; otherwise the chat is protected. Changing a global default updates both existing and future chats of that interface by waking the same shared signal and pump that every other configuration change uses. A hold already waiting re-evaluates on that wake-up, so switching the interface off releases it in place; a committed request is never recalled. `src/commands.ts` parses the canonical commands, and the GUI's `Command.slash` registration uses the installed SDK's supported composer slash field.
-
-Desktop's first prompt in a brand-new draft is the one supported-API gap: `ctx.sessions.current()` is undefined on a draft and there is no pre-submit hook. The GUI registers the session as soon as OpenCode creates and routes it, but the first model request can race that observation. The server's fail-closed rule covers the race: the unknown session's verified peak request is held, never sent unprotected, and is released when the Desktop registration arrives if the Desktop default is OFF. Off-peak requests are unaffected. Headless `opencode run` has no client extension and remains `UNKNOWN`.
-
-### Command surface and two-level controls
-
-`/offpeak protection global on|off` is deliberately interface-scoped: the TUI sends `client: "cli"`, the Desktop slash command sends `client: "desktop"`, and the server writes only that field. There is no command form that changes the other interface's global default; the legacy `/offpeak client cli|desktop on|off` forms remain explicit per-client aliases over the same stored fields. `/offpeak protection chat on|off` writes or removes the one session override keyed by the actual OpenCode session ID; `on` means "follow the interface's global default", not "force protection on against a global OFF". Both commands use the existing signal/pump, so an interactive request already waiting for off-peak is released in place when its effective protection becomes OFF.
-
-The Desktop settings page has exactly two control levels: **Desktop Protection** (the Desktop global default) and **Protection for this chat** (the routed chat's explicit switch). It also shows read-only state: CLI Protection, ownership, effective protection, the real chat title/project, and the full session ID. No slider, third policy level, or additional user-facing setting is introduced.
-
-Queue-owned tasks never inherit either global default or a chat override. A global or chat change can release an interactive hold, but it never adopts, starts, reorders, duplicates, or loses a queue task; `/offpeak run-now <task-id>` remains the task-scoped authorization. If client settings cannot be loaded or written, the engine records the error, keeps showing the safe ON defaults, refuses writes, and continues fail-closed rather than silently bypassing protection.
-
-### Auxiliary requests and pending titles
-
-OpenCode prepares auxiliary requests with the same session identity as the agent loop: `compaction` (context summarization inside a turn), `generate` (stateless text generation), and `title` (automatic chat naming). Compaction and generate share the turn's fate: if their hold is interrupted, the primary recovery continuation re-runs the step and the auxiliary request is prepared again. An automatic title does not: OpenCode generates it once when the first input of an untitled root session is promoted, and a lost title request is not retried by OpenCode itself.
-
-A held `compaction` request (manual `/compact` or automatic context compaction — both are the same `model.request` kind) persists a semantic `pending-compaction` marker. It is not a replay: as soon as the recovered session is settled and idle, the plugin admits OpenCode's own compaction again (`session.compact`), and the re-triggered request holds at the pre-model guard through the peak window exactly like the original. OpenCode's runner keeps a pending compaction ahead of queued prompts, so a compact-first workflow survives a lost hold with its order intact: compaction first, then the prompt that was waiting behind it. Earlier-started work is different: if a compaction is recovered alongside a primary continuation for the same session, both are admitted in the same pass — compaction first, continuation behind it — and the continuation is not treated as stale just because the compaction completed first.
-
-A held `title` request therefore persists a semantic `pending-title` recovery marker (same minimal shape as a deferral: session ID, provider/model, location, timestamp, origin) instead of the primary continuation. A session can hold a primary continuation, a pending-title marker, and a pending-compaction marker at the same time; each class is superseded only by a fresh request of its own kind, and each transport-guard class (`title`, `compaction`, `primary`) clears only its own entry — a compact request can never clear a primary deferral or a pending title, and a `generate` request clears nothing. When the allowed window arrives the title marker is delivered as a check, never as a replay or a mutation:
-
-- A session that already has a title — generated by OpenCode, generated by another process, or renamed by the user — clears the marker without any request, so a title is never overwritten and never generated twice.
-- A session that still needs a title is left to OpenCode's own generation. Every path that loses a title hold (inactivity, supersede, shutdown, reload) also resumes the session — the plugin's same-session continuation or OpenCode's restart recovery — and that input promotion is OpenCode's native trigger for automatic naming. The marker waits for the title, clears once it appears, and is dropped with a diagnostic if no title appears within the settle cap; a later input promotion still names the session normally.
-- OpenCode 2.0.27 exposes no plugin-facing regeneration call. The HTTP API's `PATCH /api/session/:id {"title": ""}` runs OpenCode's regeneration, but the plugin host's `session.update` (the only form a plugin can call) renames the session to an empty title instead. The recovery therefore mutates nothing; the `titleRecoveryWaiting` status field reports pending markers.
-
-`UNKNOWN` stays fail-closed for every kind, including titles: a model with no policy entry produces no provider traffic at any hour until the policy is extended. The built-in Go policy avoids that for the models OpenCode actually requests by declaring the provider's documented flat-priced models explicitly (see `src/policy.ts` and `docs/pricing-policies.md`).
-
-### Held-request notifications
-
-A primary interactive request that enters a hold announces itself exactly once as a plugin RPC event (`rpc.opencode-offpeak.hold`, carrying the session, the next transition and a display-zone formatted deadline); the release of that same hold, or a persisted recovery that actually continues a session, emits at most one `rpc.opencode-offpeak.resume`. Events travel on OpenCode's own stream to whichever clients subscribe; the TUI entrypoint renders them as toasts, while a headless run has no subscriber and its stdout stays untouched. The engine announces a hold only for `kind === "primary"` requests and remembers the announcement per instance, so auxiliary `title`/`compaction`/`generate` holds are silent, queue-owned sessions keep their queue semantics, a user cancel never produces a resumption, and a reload or restart cannot duplicate a notification for one hold. Notifications never enter the session, the transcript, or the model context.
-
-### Peak-aware retry recovery and the inactivity safety net
-
-OpenCode retries retryable transport failures on its own (for the agent loop: jittered exponential backoff; header-timeout failures are bounded to three retries). Each retry attempt is a new paid request, and every attempt re-enters the whole hook chain, so a retry during peak would either be held or exhaust the retry budget and fail the turn.
-
-The server plugin therefore also registers OpenCode's supported `retry` hook. The hook runs after OpenCode classifies a failure and before any retry is scheduled. When the plugin is ON in `auto` mode, the failure is retryable (`decision.retry === true`, or a retryable `provider.transport`/`provider.internal`/`provider.rate-limit` type after a retry sequence), and the policy blocks the model, the plugin sets `decision = { retry: false }` and records the recovery:
-
-- A queue-owned task in `RUNNING` moves to `WAITING_OFFPEAK` (not `FAILED`) and keeps its session ID. The existing pump resumes it at the next allowed window with the safe continuation prompt.
-- A normal interactive session is recorded in a small persisted recovery document scoped to the plugin location; at the next allowed window the engine sends the same safe continuation prompt into the same session.
-
-OpenCode's location-activity sweep interrupts sessions whose location has had no durable events for 60 minutes (`session.execution.interrupted`, reason `inactivity`). The plugin subscribes to OpenCode's supported event stream and, for `inactivity` interrupts of sessions it is currently deferring, releases the hold and records the same persisted recovery so the session continues automatically at the next allowed window. `user` and `shutdown` interrupts are ignored by that path.
-
-Non-retryable failures (`provider.invalid-request`, `provider.auth`, `provider.quota`, `provider.content-filter`, …) are left untouched and still end as `FAILED`/error. Failures while pricing is allowed keep OpenCode's normal retry behavior. OFF, `queue`, and `guard` modes are unchanged. The continuation is a new state-aware turn; the failed provider request is never replayed byte-for-byte. A recovery whose session never settles is dropped without sending anything.
-
-Policy matching uses provider IDs and exact/glob model IDs. Each policy declares its peak-priced `models` (weekly `blocked` windows) and its `flatModels` (vendor-documented all-hours pricing, which evaluate `FLAT`: allowed with no transition and never held); `models` wins if a pattern matches both. A configured provider with an unmatched model is `UNKNOWN` and blocked with an actionable message. Invalid timezone or schedule data is blocked. Providers without an installed policy are `UNTRACKED`; they are not covered by this plugin until a policy is added, and a verified provider fact records the ones whose pricing is known to be flat (OpenCode Zen) so status output can explain that no policy is needed. Queue tasks must match a valid policy.
-
-The built-in `deepseek-opencode-go` (provider `opencode-go`) and `deepseek-api` (provider `deepseek`, the direct API) policies are defined once in `src/policy.ts`, in UTC, sharing the same peak windows and the Chinese statutory holiday calendar in `src/holidays.ts`. When a stored configuration contains only unmodified copies of the shipped policies, a newly shipped built-in policy is appended at read time so existing installations gain it without editing the file; any customization makes the stored set authoritative. Time evaluation uses `Intl.DateTimeFormat` and the policy's IANA timezone, including weekday changes and DST; holiday dates are evaluated on the calendar's own timezone (`Asia/Shanghai`) so the host-local timezone never matters. The user's display timezone does not change pricing boundaries. Full-day off-peak exception dates override every weekday peak window, and `nextTransition` skips holiday peak windows.
-
-## Queue execution and sessions
-
-The scheduler is sequential. It has no polling loop: pending work schedules one timer for the next policy boundary, while a request already waiting sleeps on a signal and boundary timer. A task gets a new OpenCode session once. Pause/resume reuses the persisted session ID; a failed task can only continue after an explicit retry.
-
-Completion uses OpenCode's session outcome (`succeeded`) after the session wait operation. Process exit alone does not complete a task. A session idle without a successful outcome is marked failed and requires an explicit retry.
-
-## Recovery and delivery guarantees
-
-OpenCode's v2 recovery is at-least-once, not exactly-once. If the plugin finds a task in `RUNNING` after plugin/server startup, it waits for its stored session. If OpenCode reports success, the task completes. Otherwise the outcome may be ambiguous, so the plugin marks it `FAILED` and does not send a duplicate prompt automatically. The user can inspect and explicitly retry the same session.
-
-A `WAITING_OFFPEAK` record is written before the guarded request is allowed. That state is safe for automatic same-session resume in `auto` mode. A hold for a live request (interactive or queue-owned) is intentionally not persisted as a request: it belongs to a running OpenCode session, so a plugin/server shutdown fails it closed instead of replaying it; the OpenCode server's own execution-claim recovery can resume sessions interrupted by a crash, and the plugin enforces pricing when they come back. Retry recoveries and inactivity-released holds are persisted (minimal metadata: session ID, provider/model, location) because their provider request is already finished or the session was deliberately interrupted; a reload or restart during peak keeps the pending continuation, which is delivered only when the session has settled with a failed/interrupted outcome and pricing allows. A running OpenCode server is required for automatic timers; the plugin does not install or operate a separate daemon. The supported OpenCode background service can remain running when the TUI terminal closes. Machine-restart startup is delegated to the host OS service manager if desired.
-
-Recovery delivery is guarded against live work so it can never duplicate it. `session.outcome` only changes at settlement, so a running turn still reports its previous outcome; the engine tracks holds that are still parked in this instance and the execution state reported by OpenCode's own `session.execution.started` / terminal events, and it skips (rather than delivers) any recovery whose session is currently owned by a live hold or a running execution — ending the hold or settling the execution wakes the engine again. That closes the race where a boundary release and a recovery admission could otherwise both fire for one request. Delivery itself stays at-most-once per entry (the entry is removed before the request is sent) and per class: a compaction marker is delivered as the semantic compaction re-trigger, a primary marker as the continuation prompt, a title marker as a check.
-
-## Override
-
-`/offpeak run-now <task-id>` is a task-scoped, 15-minute override. It is persisted with an absolute expiry and shown in status while active. OFF pauses its use; it does not create or extend it. Expiry returns the next provider request to normal policy enforcement.
-
-`/offpeak protection chat on|off` (and the legacy `/offpeak session on|off` alias) is the separate, chat-scoped, non-expiring protection switch described above. The two overrides are independent and never converted into one another: a task override never applies to an interactive session, and a session override never applies to a queue task.
-
-## Intentionally outside the architecture
-
-- No second agent runtime, external scheduler, helper daemon, database, provider proxy, telemetry, billing aggregator, or web dashboard.
-- No global `--continue` or implicit “last session” selection.
-- No guarantee that a provider request already accepted before a boundary can be recalled.
-- No exactly-once provider semantics across a crash where the provider outcome is ambiguous.
-- No byte-for-byte replay of a failed provider request; recovery continues the session with a state-aware prompt instead.
+Tests use fixtures and a deterministic mock provider; they never incur provider
+charges or provoke a real free-tier limit. The suite covers policy evaluation,
+client globals, last-opener ownership, per-chat overrides in both directions,
+holds and releases, retry recovery, compaction/title recovery, cancellation,
+persistence, the packaged GUI bundle, and a packed real-TUI fixture run.

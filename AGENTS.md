@@ -18,7 +18,7 @@ Tests use fixtures and must not incur provider charges.
 ## Production
 
 - This repository contains one OpenCode v2 package with `server`, `tui`, and `gui-experimental` entrypoints. The server remains the only pricing authority. Do not add a parallel daemon, DB, scheduler, queue, provider proxy, or second server initialization in the GUI bundle.
-- Request enforcement belongs at the v2 model HTTP/WebSocket hooks. Invalid config, unknown models for a configured provider, unregistered/shared client sessions, and ambiguous restart state must fail closed.
-- Preserve `/offpeak off` as passive automation. It never starts work, erases task/session state, or implies a price override.
+- Request enforcement belongs at the v2 model and HTTP/WebSocket hooks. Invalid config, unknown models for a configured provider, and chats no client has registered must fail closed.
+- Protection is exactly two client globals plus one per-chat setting (`on`, `off`, follow-global). An explicit chat setting wins over either global; there is no installation-wide enable switch and no queue.
 - Keep the OpenCode support range explicit and test the installed API version before expanding it.
 - Do not place credentials, auth files, provider responses, or private user prompts in documentation, issues, or handoffs.

@@ -185,33 +185,25 @@ test("real CLI TUI registers its session, shows the CLI default, and releases on
 
     // The TUI extension registered this session before the prompt; the status
     // command reports CLI ownership and the client defaults.
-    await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "-l", "/offpeak client"]);
+    await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "-l", "/offpeak status"]);
     await new Promise((resolve) => setTimeout(resolve, 500));
     await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "Enter"]);
     await waitFor(
-      async () => (await pane()).includes("CLI default: ON"),
+      async () => (await pane()).includes("CLI protection: ON"),
       "the TUI client status did not render",
     );
-    assert.match(await pane(), /This session: CLI/);
-    assert.match(await pane(), /Desktop default: ON/);
+    assert.match(await pane(), /This chat: follows the CLI global \(ON\)/);
+    assert.match(await pane(), /Desktop protection: ON/);
 
     // Turning Desktop off must not release a CLI-owned request.
-    await exec("tmux", [
-      "-L",
-      socket,
-      "send-keys",
-      "-t",
-      "tui",
-      "-l",
-      "/offpeak client desktop off",
-    ]);
+    await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "-l", "/offpeak desktop off"]);
     await new Promise((resolve) => setTimeout(resolve, 500));
     await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "Enter"]);
     await new Promise((resolve) => setTimeout(resolve, 1200));
     assert.equal(fixture.requests.length, 0, "Desktop's setting changed the CLI session");
 
     // Switching the CLI default off releases the same held request exactly once.
-    await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "-l", "/offpeak client cli off"]);
+    await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "-l", "/offpeak cli off"]);
     await new Promise((resolve) => setTimeout(resolve, 500));
     await exec("tmux", ["-L", socket, "send-keys", "-t", "tui", "Enter"]);
     await waitFor(

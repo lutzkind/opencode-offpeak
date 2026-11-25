@@ -141,15 +141,14 @@ test("the packaged Desktop GUI loads and registers the settings page plus one sl
     assert.equal(typeof page.render, "function");
     const bundleSource = await readFile(bundlePath, "utf8");
     assert.match(bundleSource, /Desktop Protection/);
-    assert.match(bundleSource, /Protection for this chat/);
-    assert.match(bundleSource, /Untitled session/);
+    assert.match(bundleSource, /Off-peak protection/);
     assert.equal(
       page.entries.find((entry) => entry.id === "desktop-protection")?.title,
       "Desktop Protection",
     );
     assert.equal(
       page.entries.find((entry) => entry.id === "chat-protection")?.title,
-      "Protection for this chat",
+      "Off-peak protection for this chat",
     );
     const commands = additions
       .filter((entry) => entry.registry === gui.Command)
@@ -216,8 +215,8 @@ test("GUI RPC targets the selected session's server and the settings helpers nev
     [{ action: "client-set", client: "desktop", protection: "off", sessionID: "ses_remote" }],
   );
   assert.equal(peakInferencePermitted(read), true);
-  assert.equal(ownershipLabel("ambiguous"), "Shared session (CLI + Desktop); protected");
-  assert.match(sourceLabel("unknown"), /fail-closed/);
+  assert.equal(ownershipLabel("unknown"), "Unknown client; protected");
+  assert.match(sourceLabel("unknown"), /protected/);
 });
 
 test("GUI session override targets the owning server and re-reads the authoritative status", async () => {
@@ -235,28 +234,29 @@ test("GUI session override targets the owning server and re-reads the authoritat
 
   const next = await setSessionProtection(context, "off", "remote", "ses_remote");
   assert.equal(next.defaults.desktop, "OFF");
-  // The write goes to the session's own server, followed by one authoritative read.
+  // The write goes to the session's own server and returns its new state.
   assert.deepEqual(
     calls
       .filter((call) => call.action !== undefined)
       .map((call) => `${call.server}:${call.action}`),
-    ["remote:session-off", "remote:client"],
+    ["remote:session-set"],
   );
-  assert.deepEqual(calls.find((call) => call.action === "session-off").input, {
-    action: "session-off",
+  assert.deepEqual(calls.find((call) => call.action === "session-set").input, {
+    action: "session-set",
     sessionID: "ses_remote",
+    protection: "off",
   });
 
   calls.length = 0;
-  await setSessionProtection(context, "on", "remote", "ses_remote");
+  await setSessionProtection(context, "auto", "remote", "ses_remote");
   assert.deepEqual(
     calls.filter((call) => call.action !== undefined).map((call) => call.action),
-    ["session-on", "client"],
+    ["session-set"],
   );
 
   await assert.rejects(
     () => setSessionProtection(context, "off", "remote", undefined),
-    /Open a session/,
+    /Open a chat/,
   );
 });
 
@@ -505,19 +505,16 @@ test("Desktop chat slash commands use the shared handler and the Desktop surface
         },
       };
     }
-    if (input.action === "session-off" || input.action === "session-on") {
+    if (input.action === "session-set") {
       return {
-        message:
-          input.action === "session-off"
-            ? "Session off-peak protection disabled."
-            : "Session off-peak protection enabled.",
         client: {
           defaults: { cli: "ON", desktop: "ON" },
           session: {
             sessionID: "ses_remote",
             ownership: "desktop",
-            protection: input.action === "session-off" ? "OFF" : "ON",
-            source: input.action === "session-off" ? "session-override" : "client-default",
+            protection: input.protection === "off" ? "OFF" : "ON",
+            source: input.protection === "auto" ? "client-default" : "session-override",
+            ...(input.protection === "auto" ? {} : { override: input.protection }),
           },
         },
       };
@@ -568,23 +565,24 @@ test("Desktop chat slash commands use the shared handler and the Desktop surface
       (entry) => entry.registry === gui.Command && entry.item.slash?.name === "offpeak",
     )?.item;
     assert.ok(command);
-    await command.run("protection global off");
+    await command.run("off");
     assert.deepEqual(calls.filter((call) => call.action === "client-set").at(-1).input, {
       action: "client-set",
       client: "desktop",
       protection: "off",
       sessionID: "ses_remote",
     });
-    assert.match(toasts.at(-1).description, /^Desktop global protection: OFF$/m);
-    assert.match(toasts.at(-1).description, /CLI global protection: ON \(not modified\)/);
+    assert.match(toasts.at(-1).description, /^Desktop protection: OFF$/m);
+    assert.match(toasts.at(-1).description, /CLI protection: ON \(not modified\)/);
 
-    await command.run("protection chat off");
-    assert.deepEqual(calls.filter((call) => call.action === "session-off").at(-1).input, {
-      action: "session-off",
+    await command.run("chat off");
+    assert.deepEqual(calls.filter((call) => call.action === "session-set").at(-1).input, {
+      action: "session-set",
       sessionID: "ses_remote",
+      protection: "off",
     });
-    assert.match(toasts.at(-1).description, /Protection for this chat: OFF \(explicit override/);
-    assert.match(toasts.at(-1).description, /Desktop global protection: ON \(not modified\)/);
+    assert.match(toasts.at(-1).description, /This chat: allow peak \(explicit\)/);
+    assert.match(toasts.at(-1).description, /Desktop protection: ON \(unchanged\)/);
 
     await command.run("status");
     assert.deepEqual(calls.filter((call) => call.action === "status").at(-1).input, {
@@ -593,8 +591,8 @@ test("Desktop chat slash commands use the shared handler and the Desktop surface
       providerID: "opencode-go",
       modelID: "deepseek-v4.1-flash",
     });
-    assert.match(toasts.at(-1).description, /CLI global protection: ON/);
-    assert.match(toasts.at(-1).description, /Desktop global protection: OFF/);
+    assert.match(toasts.at(-1).description, /CLI protection: ON/);
+    assert.match(toasts.at(-1).description, /Desktop protection: OFF/);
 
     // The helper rejects when no Desktop server can be resolved.
     await assert.rejects(

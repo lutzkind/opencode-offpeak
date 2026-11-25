@@ -3,94 +3,80 @@ import { createEffect, createSignal, on, Show } from "solid-js";
 import type { OffpeakClientStatus as RpcClientStatus } from "../rpc.js";
 import {
   defaultServerID,
-  ensureSessionMetadata,
-  openSessions,
-  ownershipLabel,
   readClientStatus,
-  registerDesktopSession,
   resolveSessionTarget,
-  serverOptions,
   sessionDisplayName,
-  sessionProjectName,
-  sessionTitle,
-  setDesktopProtection,
+  setClientProtection,
   setSessionProtection,
-  sourceLabel,
 } from "./connection.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The Offpeak server could not be reached.";
 }
 
-function ownerName(ownership: string | undefined): string {
-  return ownership === "desktop" ? "Desktop" : "CLI";
+type ChatSetting = "auto" | "on" | "off";
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 /**
- * Native Desktop settings page. It reads and writes only through the selected
- * session server's typed RPC; the Desktop default is the only global setting
- * this page can change, so touching it can never modify the CLI default.
+ * Native Desktop settings page, reduced to the two decisions that matter:
+ * each client has one global switch, and the current chat can override its
+ * client global (force protection on, or allow peak pricing).
  */
 export function OffpeakSettings(props: { ctx: Context }) {
-  const [selectedServer, setSelectedServer] = createSignal<string | undefined>(undefined);
-  const [selectedSession, setSelectedSession] = createSignal<string | undefined>(undefined);
   const [status, setStatus] = createSignal<RpcClientStatus | undefined>(undefined);
   const [error, setError] = createSignal<string | undefined>(undefined);
   const [notice, setNotice] = createSignal<string | undefined>(undefined);
   const [busy, setBusy] = createSignal(false);
   let request = 0;
 
-  // `sessions.current()` is undefined while Settings is on screen; the helper
-  // follows the mounted session, then the active tab, then the last routed one.
-  const opened = () => openSessions(props.ctx);
-  const resolvedSession = () => resolveSessionTarget(props.ctx, selectedSession());
-  const targetServerID = () =>
-    selectedServer() ?? resolvedSession()?.server.id ?? defaultServerID(props.ctx);
+  const resolvedSession = () => resolveSessionTarget(props.ctx);
+  const targetServerID = () => resolvedSession()?.server.id ?? defaultServerID(props.ctx);
   const targetServer = () => {
     const id = targetServerID();
     return id ? props.ctx.servers.get(id) : undefined;
   };
-  const targetSession = () => {
-    const session = resolvedSession();
-    return session && session.server.id === targetServerID() ? session : undefined;
-  };
-  const targetSessionID = () => targetSession()?.id;
+  const targetSessionID = () => resolvedSession()?.id;
   const currentSession = () => status()?.session;
-  const sessionOptions = () =>
-    opened()
-      .filter((session) => session.server.id === targetServerID())
-      .map((session) => ({ value: session.id, label: sessionDisplayName(session) }));
-  const options = () => serverOptions(props.ctx);
-  const globalDefault = (surface: "cli" | "desktop") => status()?.defaults[surface] ?? "ON";
-  const chatProtectionChecked = () => currentSession()?.protection === "ON";
-
-  // Existing sessions opened before this page loaded may not be in the
-  // Desktop's synced store yet. This asks the supported session API once per
-  // session; renames and moves then arrive through the reactive store.
-  createEffect(() => {
-    for (const session of opened()) ensureSessionMetadata(session);
-  });
+  const globalDefault = (client: "cli" | "desktop") => status()?.defaults[client] ?? "ON";
+  const chatSetting = (): ChatSetting => {
+    const session = currentSession();
+    if (session?.override === "on" || session?.override === "off") return session.override;
+    return "auto";
+  };
 
   const refresh = async () => {
     const sequence = ++request;
     if (!targetServer()) {
       setStatus(undefined);
-      setError("No OpenCode server is available. Open a session or add a server, then retry.");
+      setError("No OpenCode server is available. Open a session, then retry.");
       setBusy(false);
       return;
     }
     setBusy(true);
     setError(undefined);
-    try {
-      const next = await readClientStatus(props.ctx, targetServerID(), targetSessionID());
-      if (sequence === request) setStatus(next);
-    } catch (failure) {
-      if (sequence === request) {
-        setStatus(undefined);
-        setError(errorMessage(failure));
+    // A freshly started Desktop SSH server can receive this read a few
+    // milliseconds before the server plugin registers its RPC methods. Retry
+    // briefly instead of leaving the page stuck on a startup error.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const next = await readClientStatus(props.ctx, targetServerID(), targetSessionID());
+        if (sequence !== request) return;
+        setStatus(next);
+        setBusy(false);
+        return;
+      } catch (failure) {
+        if (sequence !== request) return;
+        if (attempt === 4) {
+          setStatus(undefined);
+          setError(errorMessage(failure));
+          setBusy(false);
+          return;
+        }
+        await delay(600);
       }
-    } finally {
-      if (sequence === request) setBusy(false);
     }
   };
 
@@ -101,55 +87,25 @@ export function OffpeakSettings(props: { ctx: Context }) {
     ),
   );
 
-  const registerCurrent = async () => {
-    const current = targetSession();
-    if (!current) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await registerDesktopSession(current);
-      await refresh();
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const chooseServer = (value: string) => {
-    const chosen = selectedSession();
-    if (
-      chosen &&
-      !opened().some((session) => session.id === chosen && session.server.id === value)
-    ) {
-      setSelectedSession(undefined);
-    }
-    setSelectedServer(value);
-  };
-
-  const chooseSession = (value: string) => {
-    setSelectedSession(value);
-    const chosen = opened().find((session) => session.id === value);
-    if (chosen && chosen.server.id !== selectedServer()) setSelectedServer(undefined);
-  };
-
-  const updateDesktop = async (enabled: boolean) => {
+  const updateClient = async (client: "cli" | "desktop", enabled: boolean) => {
     const sequence = ++request;
     setBusy(true);
     setError(undefined);
     try {
-      const next = await setDesktopProtection(
+      const next = await setClientProtection(
         props.ctx,
+        client,
         enabled ? "on" : "off",
         targetServerID(),
         targetSessionID(),
       );
-      if (sequence === request) {
-        setStatus(next);
-        setNotice(
-          `Desktop Protection is now ${next.defaults.desktop}. CLI Protection is ${next.defaults.cli} and was not modified.`,
-        );
-      }
+      if (sequence !== request) return;
+      setStatus(next);
+      setNotice(
+        `${client === "cli" ? "CLI" : "Desktop"} protection is now ${next.defaults[client]}. ${
+          client === "cli" ? "Desktop" : "CLI"
+        } protection is ${next.defaults[client === "cli" ? "desktop" : "cli"]} and was not changed.`,
+      );
     } catch (failure) {
       if (sequence === request) setError(errorMessage(failure));
     } finally {
@@ -157,7 +113,7 @@ export function OffpeakSettings(props: { ctx: Context }) {
     }
   };
 
-  const updateSession = async (protection: "on" | "off") => {
+  const updateSession = async (setting: ChatSetting) => {
     const sequence = ++request;
     const sessionID = targetSessionID();
     if (!sessionID) {
@@ -167,23 +123,16 @@ export function OffpeakSettings(props: { ctx: Context }) {
     setBusy(true);
     setError(undefined);
     try {
-      const next = await setSessionProtection(props.ctx, protection, targetServerID(), sessionID);
-      if (sequence === request) {
-        setStatus(next);
-        if (protection === "off") {
-          setNotice(
-            "Protection is disabled for this chat only. Other chats and both global settings are unchanged.",
-          );
-        } else if (next.session?.protection === "OFF") {
-          setNotice(
-            `This chat now follows the ${ownerName(next.session.ownership)} Protection default, which is OFF.`,
-          );
-        } else {
-          setNotice(
-            `This chat now follows the ${ownerName(next.session?.ownership)} Protection default (${next.session?.protection ?? "ON"}).`,
-          );
-        }
-      }
+      const next = await setSessionProtection(props.ctx, setting, targetServerID(), sessionID);
+      if (sequence !== request) return;
+      setStatus(next);
+      setNotice(
+        setting === "on"
+          ? "This chat always waits for off-peak, even while its client global is off."
+          : setting === "off"
+            ? "This chat may use verified peak pricing. Other chats are unchanged."
+            : "This chat follows its client global again.",
+      );
     } catch (failure) {
       if (sequence === request) setError(errorMessage(failure));
     } finally {
@@ -193,40 +142,37 @@ export function OffpeakSettings(props: { ctx: Context }) {
 
   const chatDescription = () => {
     const session = currentSession();
-    if (!session) return "The Offpeak server has not answered for this chat yet.";
-    if (session.source === "session-override") {
-      return "Disabled for this chat only. Verified peak-priced requests may run here; other chats and both global settings are unchanged.";
+    if (!session) return "Open a chat to give it its own setting.";
+    if (session.override === "on") {
+      return "Explicitly protected. This survives the client global being switched off.";
+    }
+    if (session.override === "off") {
+      return "Explicitly allowed at peak. Verified peak-priced requests run immediately in this chat only.";
     }
     if (session.source === "client-default") {
-      return `Following the ${ownerName(session.ownership)} Protection default (${session.protection}). Turn this off to disable protection for this chat only.`;
+      return `Following the ${session.ownership === "desktop" ? "Desktop" : "CLI"} global (${session.protection}).`;
     }
-    if (session.source === "ambiguous") {
-      return "Shared session (open in both CLI and Desktop); protected. An explicit off switch applies to this chat only.";
-    }
-    if (session.source === "queue") {
-      return "Queue task; client defaults and chat controls do not apply.";
-    }
-    return "No reliable client registration; protected. Turn this off to explicitly bypass protection for this chat only.";
+    return "No client has registered this chat yet, so it stays protected. Pick a setting to make it explicit.";
   };
 
-  const desktopDescription = () =>
-    globalDefault("desktop") === "ON"
-      ? "On: Desktop chats without an explicit per-chat override are protected and wait for off-peak. CLI Protection is separate and is never changed here."
-      : "Off: Desktop chats without an explicit per-chat override may use verified peak-priced inference. CLI Protection is separate and is never changed here.";
+  const globalDescription = (client: "cli" | "desktop") =>
+    globalDefault(client) === "ON"
+      ? `On: ${client === "cli" ? "CLI" : "Desktop"} chats wait for off-peak and continue automatically.`
+      : `Off: ${client === "cli" ? "CLI" : "Desktop"} chats run at verified peak prices unless a chat is set to Always protect.`;
 
-  const copySessionID = (sessionID: string) => {
-    void props.ctx.system.copy(sessionID);
-    setNotice("Session ID copied.");
+  const title = () => {
+    const session = resolvedSession();
+    return session ? sessionDisplayName(session) : undefined;
   };
 
   const ui = props.ctx.ui;
   return (
     <ui.SettingsLayout
       title="Offpeak"
-      description="Independent peak-price protection for OpenCode CLI and OpenCode Desktop. These two global defaults never modify each other."
+      description="Two global switches and one optional per-chat override. Peak requests wait in place and continue when off-peak starts."
     >
       <ui.SettingsSection
-        title="Protection defaults"
+        title="Global protection"
         footer={
           <>
             <Show when={error()}>
@@ -243,183 +189,85 @@ export function OffpeakSettings(props: { ctx: Context }) {
           </>
         }
       >
-        <Show when={options().length > 1}>
-          <ui.SettingsRow
-            id="server"
-            title="Server"
-            description="The OpenCode server whose protection defaults and chats this page reads and writes."
-          >
-            <ui.Select
-              label="Server"
-              options={options()}
-              value={targetServerID()}
-              onChange={(value) => chooseServer(value)}
-            />
-          </ui.SettingsRow>
-        </Show>
+        <ui.SettingsRow
+          id="cli-protection"
+          title="CLI Protection"
+          description={globalDescription("cli")}
+        >
+          <ui.Switch
+            label="CLI Protection"
+            hideLabel
+            checked={globalDefault("cli") === "ON"}
+            disabled={status() === undefined || busy()}
+            onChange={(checked) => void updateClient("cli", checked)}
+          />
+        </ui.SettingsRow>
         <ui.SettingsRow
           id="desktop-protection"
           title="Desktop Protection"
-          description={desktopDescription()}
+          description={globalDescription("desktop")}
         >
           <ui.Switch
             label="Desktop Protection"
             hideLabel
             checked={globalDefault("desktop") === "ON"}
             disabled={status() === undefined || busy()}
-            onChange={(checked) => void updateDesktop(checked)}
+            onChange={(checked) => void updateClient("desktop", checked)}
           />
         </ui.SettingsRow>
-        <ui.SettingsRow
-          id="cli-protection"
-          title="CLI Protection"
-          description="Read-only on this page. Change it with /offpeak protection global on|off in the CLI; a CLI global command never modifies Desktop Protection."
-        >
-          <span>{status()?.defaults.cli ?? "Unavailable"}</span>
-        </ui.SettingsRow>
       </ui.SettingsSection>
 
-      <ui.SettingsSection title="Current chat">
-        <Show when={sessionOptions().length > 1}>
-          <ui.SettingsRow
-            id="session"
-            title="Chat"
-            description="The actual OpenCode title, project, and shortened session ID. The page follows the chat you were viewing whenever it is still open. Pick another open chat on this server to inspect or change it."
-          >
-            <ui.Select
-              label="Chat"
-              options={sessionOptions()}
-              value={targetSessionID()}
-              onChange={(value) => chooseSession(value)}
-            />
-          </ui.SettingsRow>
-        </Show>
+      <ui.SettingsSection title="This chat">
         <Show
-          when={targetSession()}
+          when={resolvedSession()}
           fallback={
-            <Show
-              when={opened().length > 0}
-              fallback={
-                <ui.SettingsRow
-                  id="no-session"
-                  title="No chat open"
-                  description="Open a chat to see its client ownership and effective protection."
-                />
-              }
-            >
-              <ui.SettingsRow
-                id="no-session-on-server"
-                title="No chat open on this server"
-                description="Pick another server above, or open a chat on this server, then return here."
-              />
-            </Show>
+            <ui.SettingsRow
+              id="no-session"
+              title="No chat open"
+              description="Open a chat, then return here to give it its own setting. The globals above still apply."
+            />
           }
         >
-          {(selected) => (
-            <>
-              <ui.SettingsRow
-                id="session-title"
-                title="Chat title"
-                description="The canonical OpenCode session title. Renames appear here through the Desktop's session store."
-              >
-                <span>{sessionTitle(selected())}</span>
-              </ui.SettingsRow>
-              <ui.SettingsRow
-                id="session-project"
-                title="Project"
-                description="The repository or project that owns this chat, when the Desktop reports it."
-              >
-                <span>{sessionProjectName(selected()) ?? "Unknown project"}</span>
-              </ui.SettingsRow>
-              <ui.SettingsRow
-                id="session-id"
-                title="Session ID"
-                description="The full OpenCode session ID for troubleshooting. The chat list shows a shortened form."
-              >
-                <span>{selected().id}</span>{" "}
-                <ui.Button
-                  variant="ghost"
-                  onClick={() => copySessionID(selected().id)}
-                  disabled={busy()}
-                >
-                  Copy
-                </ui.Button>
-              </ui.SettingsRow>
-              <Show
-                when={status()?.session}
-                fallback={
-                  <ui.SettingsRow
-                    id="session-loading"
-                    title="Chat status"
-                    description="The Offpeak server has not answered for this chat yet."
-                  />
-                }
-              >
-                {(current) => (
-                  <>
-                    <ui.SettingsRow
-                      id="ownership"
-                      title="Ownership"
-                      description="A chat opened by both clients is shared and always protected unless you explicitly disable this chat."
-                    >
-                      <span>{ownershipLabel(current().ownership)}</span>
-                    </ui.SettingsRow>
-                    <ui.SettingsRow
-                      id="chat-protection"
-                      title="Protection for this chat"
-                      description={chatDescription()}
-                    >
-                      <ui.Switch
-                        label="Protection for this chat"
-                        hideLabel
-                        checked={chatProtectionChecked()}
-                        disabled={busy() || current().ownership === "queue"}
-                        onChange={(checked) => void updateSession(checked ? "on" : "off")}
-                      />
-                    </ui.SettingsRow>
-                    <ui.SettingsRow
-                      id="effective-protection"
-                      title="Effective protection"
-                      description={sourceLabel(current().source)}
-                    >
-                      <span>{current().protection}</span>
-                    </ui.SettingsRow>
-                    <Show when={current().ownership === "unknown"}>
-                      <ui.SettingsRow
-                        id="register-session"
-                        title="Register this chat"
-                        description="The server has not seen a Desktop registration for this chat. Retry the supported session observation."
-                      >
-                        <ui.Button
-                          variant="neutral"
-                          onClick={() => void registerCurrent()}
-                          disabled={busy()}
-                        >
-                          Register
-                        </ui.Button>
-                      </ui.SettingsRow>
-                    </Show>
-                    <ui.SettingsRow
-                      id="peak-permitted"
-                      title="Peak-priced inference"
-                      description="Permission applies only to verified peak pricing. UNKNOWN pricing and invalid configuration always fail closed."
-                    >
-                      <span>{current().protection === "OFF" ? "Permitted" : "Blocked"}</span>
-                    </ui.SettingsRow>
-                  </>
-                )}
-              </Show>
-            </>
-          )}
+          <ui.SettingsRow id="session-title" title="Chat" description={title()}>
+            <span>{currentSession()?.protection ?? "…"}</span>
+          </ui.SettingsRow>
+          <ui.SettingsRow
+            id="chat-protection"
+            title="Off-peak protection"
+            description={chatDescription()}
+          >
+            <ui.Select
+              label="Off-peak protection for this chat"
+              options={[
+                {
+                  value: "auto",
+                  label:
+                    currentSession()?.ownership === "desktop"
+                      ? `Follow Desktop global (${globalDefault("desktop")})`
+                      : `Follow CLI global (${globalDefault("cli")})`,
+                },
+                { value: "on", label: "Always protect" },
+                { value: "off", label: "Allow peak" },
+              ]}
+              value={chatSetting()}
+              disabled={busy() || status() === undefined}
+              onChange={(value) => void updateSession(value)}
+            />
+          </ui.SettingsRow>
+          <Show when={currentSession()}>
+            <ui.SettingsRow
+              id="effective"
+              title="Effective now"
+              description={
+                currentSession()?.protection === "OFF"
+                  ? "Verified peak-priced requests may run immediately."
+                  : "Verified peak-priced requests wait for off-peak and continue automatically."
+              }
+            >
+              <span>{currentSession()?.protection ?? "ON"}</span>
+            </ui.SettingsRow>
+          </Show>
         </Show>
-      </ui.SettingsSection>
-
-      <ui.SettingsSection title="Controls">
-        <ui.SettingsRow
-          id="commands"
-          title="Commands"
-          description="/offpeak status shows both global defaults, this chat's override, the effective state, and the queue. /offpeak protection global on|off changes this Desktop default only. /offpeak protection chat on|off changes this chat only. The CLI uses the same commands against its own independent global default."
-        />
       </ui.SettingsSection>
     </ui.SettingsLayout>
   );

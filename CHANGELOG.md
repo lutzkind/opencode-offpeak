@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.5.0 - 2026-11-25
+
+### Changed
+
+- **The product is now two global switches and one per-chat choice.** CLI
+  Protection and Desktop Protection are independent persistent defaults, and
+  **This chat** can *follow the global*, *always protect*, or *allow peak*.
+  The explicit chat setting wins over either global in both directions, so a
+  chat can be protected while its client global is off, or allowed at peak
+  while the global is on.
+- **`/offpeak on|off` now means "protect this client", not "pause automation".**
+  The v0.4.x global `enabled` flag and the `auto`/`queue`/`guard` modes are
+  removed from the configuration and the request path. `offpeak.json` is now
+  pricing policy only; legacy `enabled`/`mode` fields are accepted and ignored.
+- **The queue feature is removed.** `/offpeak queue`, `list`, `cancel`,
+  `remove`, `retry`, `resume`, and `run-now` no longer exist. Existing
+  `opencode-offpeak/queue-v1` storage is left untouched but is not read,
+  executed, or deleted. Interactive holds, same-session recovery, compaction,
+  title handling, and the transport guard are unchanged.
+- **A chat follows the client that most recently opened it.** The old
+  first-client-wins / `ambiguous` fail-closed ownership is replaced by a
+  last-opener `owner`; an explicit per-chat setting always wins. Existing
+  documents migrate their `ambiguous` entries to the last registrant.
+- **The Desktop page is reduced to CLI Protection, Desktop Protection, and
+  Off-peak protection for this chat.** Both globals are writable from the page;
+  the chat selector, ownership rows, session ID, and command reference were
+  removed. The page retries a startup RPC for a few seconds instead of showing
+  a permanent error while the server plugin registers.
+- The TUI and GUI share the same canonical command grammar:
+  `/offpeak status|on|off|chat on|off|auto|cli on|off|desktop on|off`.
+  The v0.4.x `protection`, `client`, and `session` forms remain hidden aliases.
+
+### Fixed
+
+- **Desktop settings now visibly affect Desktop chats.** The last-opened
+  client owns the default, and the per-chat selector can force either state, so
+  a Desktop chat no longer stays protected merely because it was once seen by
+  the CLI (or vice versa).
+- A chat explicitly set to **Always protect** survives its client global being
+  switched off, and **Allow peak** survives the global being switched on.
+- `offpeak.json` no longer rejects an existing file that still contains
+  `enabled` or `mode`.
+
+### Compatibility
+
+OpenCode CLI `>=2.0.26 <2.5.0`; Desktop GUI 2.3.0+. Validated through OpenCode
+2.4.1. The full suite is green after the simplification.
+
 ## 0.4.4 - 2026-11-23
 
 ### Fixed

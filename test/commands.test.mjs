@@ -14,9 +14,9 @@ function plan(input, context = cli) {
   return planOffpeakCommand(input, context);
 }
 
-test("protection global is interface-scoped and never writes the other interface", () => {
-  const cliOff = plan("/offpeak protection global off");
-  assert.equal(cliOff.kind, "protection-global");
+test("on and off change only the calling surface's global", () => {
+  const cliOff = plan("/offpeak off");
+  assert.equal(cliOff.kind, "client-global");
   assert.deepEqual(cliOff.request, {
     action: "client-set",
     client: "cli",
@@ -24,39 +24,75 @@ test("protection global is interface-scoped and never writes the other interface
     sessionID: "ses_chat_a",
   });
 
-  const desktopOn = plan("protection global on", desktop);
-  assert.equal(desktopOn.kind, "protection-global");
+  const desktopOn = plan("on", desktop);
+  assert.equal(desktopOn.kind, "client-global");
   assert.deepEqual(desktopOn.request, {
     action: "client-set",
     client: "desktop",
     protection: "on",
     sessionID: "ses_chat_a",
   });
-  assert.notEqual(desktopOn.request.client, "cli");
 });
 
-test("protection chat maps to the explicit session override for this session only", () => {
-  assert.deepEqual(plan("/offpeak protection chat off").request, {
-    action: "session-off",
+test("explicit client forms change only the named global", () => {
+  assert.deepEqual(plan("/offpeak cli off").request, {
+    action: "client-set",
+    client: "cli",
+    protection: "off",
     sessionID: "ses_chat_a",
   });
-  assert.deepEqual(plan("protection chat on", desktop).request, {
-    action: "session-on",
+  assert.deepEqual(plan("desktop on", desktop).request, {
+    action: "client-set",
+    client: "desktop",
+    protection: "on",
     sessionID: "ses_chat_a",
+  });
+  assert.throws(() => plan("/offpeak cli sometimes"), /Usage: \/offpeak cli on\|off/);
+});
+
+test("chat on, off, and auto set that chat only", () => {
+  assert.deepEqual(plan("/offpeak chat off").request, {
+    action: "session-set",
+    sessionID: "ses_chat_a",
+    protection: "off",
+  });
+  assert.deepEqual(plan("chat on", desktop).request, {
+    action: "session-set",
+    sessionID: "ses_chat_a",
+    protection: "on",
+  });
+  assert.deepEqual(plan("chat auto").request, {
+    action: "session-set",
+    sessionID: "ses_chat_a",
+    protection: "auto",
   });
   assert.throws(
-    () => plan("/offpeak protection chat off", { ...cli, sessionID: undefined }),
-    /No current OpenCode session is focused/,
+    () => plan("/offpeak chat off", { ...cli, sessionID: undefined }),
+    /Open this chat/,
   );
+  assert.throws(() => plan("/offpeak chat sometimes"), /Usage: \/offpeak chat on\|off\|auto/);
 });
 
-test("protection commands reject incomplete or unknown forms with canonical usage", () => {
-  assert.throws(() => plan("/offpeak protection global sometimes"), /Usage: \/offpeak protection/);
-  assert.throws(() => plan("/offpeak protection chat"), /Usage: \/offpeak protection/);
-  assert.throws(() => plan("/offpeak protection elsewhere on"), /Usage: \/offpeak protection/);
+test("the v0.4.x protection forms remain hidden aliases over the same state", () => {
+  assert.deepEqual(plan("/offpeak protection global off").request, {
+    action: "client-set",
+    client: "cli",
+    protection: "off",
+    sessionID: "ses_chat_a",
+  });
+  assert.deepEqual(plan("/offpeak protection chat off").request, {
+    action: "session-set",
+    sessionID: "ses_chat_a",
+    protection: "off",
+  });
+  assert.deepEqual(plan("/offpeak session on").request, {
+    action: "session-set",
+    sessionID: "ses_chat_a",
+    protection: "on",
+  });
 });
 
-test("status carries the focused chat and formats both global defaults and queue state", async () => {
+test("status sends only the status request and formats the simplified model", async () => {
   const calls = [];
   const result = await runOffpeakCommand(
     {
@@ -64,23 +100,19 @@ test("status carries the focused chat and formats both global defaults and queue
         calls.push(input);
         return {
           status: {
-            enabled: true,
-            mode: "auto",
-            automaticExecution: "ACTIVE",
-            automaticResume: "ACTIVE",
-            pricingState: "PEAK",
             clientDefaults: { cli: "ON", desktop: "OFF" },
             client: {
-              ownership: "cli",
-              protection: "OFF",
+              ownership: "desktop",
+              protection: "ON",
               source: "session-override",
+              override: "on",
             },
-            sessionProtection: "OFF",
-            effectiveProtection: "OFF",
-            requestsAllowed: true,
-            queued: 2,
-            waiting: 1,
-            failed: 0,
+            effectiveProtection: "ON",
+            pricingState: "PEAK",
+            requestsAllowed: false,
+            nextTransition: 1795586400000,
+            displayTimeZone: "UTC",
+            interactiveWaiting: 0,
           },
         };
       },
@@ -88,7 +120,6 @@ test("status carries the focused chat and formats both global defaults and queue
     "/offpeak status",
     cli,
   );
-  const text = result.text;
   assert.deepEqual(calls, [
     {
       action: "status",
@@ -97,106 +128,59 @@ test("status carries the focused chat and formats both global defaults and queue
       modelID: "deepseek-v4.1-flash",
     },
   ]);
-  assert.match(text, /CLI global protection: ON/);
-  assert.match(text, /Desktop global protection: OFF/);
-  assert.match(text, /Protection for this chat: OFF \(explicit override/);
-  assert.match(text, /Effective protection: OFF/);
-  assert.match(text, /Queue: 2 queued, 1 waiting, 0 failed/);
+  assert.match(result.text, /CLI protection: ON/);
+  assert.match(result.text, /Desktop protection: OFF/);
+  assert.match(result.text, /This chat: always protect \(explicit\)/);
+  assert.match(result.text, /Requests: BLOCKED/);
+  assert.doesNotMatch(result.text, /Queue|Mode:|Plugin:/);
 });
 
-test("global protection feedback states what changed and confirms the other interface", () => {
+test("status reports a chat that follows its client global", async () => {
+  const result = await runOffpeakCommand(
+    {
+      control: async () => ({
+        status: {
+          clientDefaults: { cli: "OFF", desktop: "ON" },
+          client: {
+            ownership: "cli",
+            protection: "OFF",
+            source: "client-default",
+          },
+          pricingState: "PEAK",
+          requestsAllowed: true,
+          displayTimeZone: "UTC",
+        },
+      }),
+    },
+    "status",
+    cli,
+  );
+  assert.match(result.text, /This chat: follows the CLI global \(OFF\)/);
+  assert.match(result.text, /Requests: ALLOWED/);
+});
+
+test("global feedback names the changed client and leaves the other alone", () => {
+  const output = { client: { defaults: { cli: "OFF", desktop: "ON" } } };
+  const text = formatOffpeakResult(plan("/offpeak off"), output, cli);
+  assert.match(text, /^CLI protection: OFF$/m);
+  assert.match(text, /Desktop protection: ON \(not modified\)/);
+});
+
+test("chat feedback shows explicit settings and the effective state", () => {
   const output = {
-    client: { defaults: { cli: "OFF", desktop: "ON" } },
+    client: {
+      defaults: { cli: "ON", desktop: "ON" },
+      session: {
+        sessionID: "ses_chat_a",
+        ownership: "cli",
+        protection: "OFF",
+        source: "session-override",
+        override: "off",
+      },
+    },
   };
-  const text = formatOffpeakResult(plan("/offpeak protection global off"), output, cli);
-  assert.match(text, /^CLI global protection: OFF$/m);
-  assert.match(text, /Desktop global protection: ON \(not modified\)/);
-  assert.match(text, /Applies to CLI sessions/);
-
-  const desktopText = formatOffpeakResult(
-    plan("protection global off", desktop),
-    { client: { defaults: { cli: "ON", desktop: "OFF" } } },
-    desktop,
-  );
-  assert.match(desktopText, /^Desktop global protection: OFF$/m);
-  assert.match(desktopText, /CLI global protection: ON \(not modified\)/);
-});
-
-test("chat feedback shows the override or the followed interface global", () => {
-  const off = formatOffpeakResult(
-    plan("/offpeak protection chat off"),
-    {
-      message: "Session off-peak protection disabled.",
-      client: {
-        defaults: { cli: "ON", desktop: "ON" },
-        session: {
-          sessionID: "ses_chat_a",
-          ownership: "cli",
-          protection: "OFF",
-          source: "session-override",
-        },
-      },
-    },
-    cli,
-  );
-  assert.match(off, /Protection for this chat: OFF \(explicit override/);
-  assert.match(off, /CLI global protection: ON \(not modified\)/);
-  assert.match(off, /Desktop global protection: ON \(not modified\)/);
-
-  const on = formatOffpeakResult(
-    plan("/offpeak protection chat on"),
-    {
-      message: "Session off-peak protection enabled.",
-      client: {
-        defaults: { cli: "ON", desktop: "ON" },
-        session: {
-          sessionID: "ses_chat_a",
-          ownership: "cli",
-          protection: "ON",
-          source: "client-default",
-        },
-      },
-    },
-    cli,
-  );
-  assert.match(on, /Protection for this chat: follows the CLI global \(ON\)/);
-  assert.match(on, /Effective protection: ON/);
-});
-
-test("chat on follows a globally OFF interface without inventing an ON override", () => {
-  const text = formatOffpeakResult(
-    plan("/offpeak protection chat on"),
-    {
-      client: {
-        defaults: { cli: "OFF", desktop: "ON" },
-        session: {
-          sessionID: "ses_chat_a",
-          ownership: "cli",
-          protection: "OFF",
-          source: "client-default",
-        },
-      },
-    },
-    cli,
-  );
-  assert.match(text, /Protection for this chat: follows the CLI global \(OFF\)/);
+  const text = formatOffpeakResult(plan("chat off"), output, cli);
+  assert.match(text, /This chat: allow peak \(explicit\)/);
   assert.match(text, /Effective protection: OFF/);
-});
-
-test("legacy /offpeak client and /offpeak session retain their original server actions", () => {
-  assert.deepEqual(plan("/offpeak client").request, {
-    action: "client",
-    sessionID: "ses_chat_a",
-  });
-  assert.deepEqual(plan("/offpeak client desktop off").request, {
-    action: "client-set",
-    client: "desktop",
-    protection: "off",
-    sessionID: "ses_chat_a",
-  });
-  assert.deepEqual(plan("/offpeak session off").request, {
-    action: "session-off",
-    sessionID: "ses_chat_a",
-  });
-  assert.throws(() => plan("/offpeak session sometimes"), /Usage: \/offpeak session on\|off/);
+  assert.match(text, /CLI protection: ON \(unchanged\)/);
 });

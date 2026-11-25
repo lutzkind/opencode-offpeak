@@ -214,9 +214,13 @@ export async function readClientStatus(
   return result.client;
 }
 
-/** Writes only the Desktop default through the selected server's typed RPC. */
-export async function setDesktopProtection(
+/**
+ * Writes one client's global default through the selected server's typed RPC.
+ * The two clients are independent: this never writes the other one.
+ */
+export async function setClientProtection(
   context: GuiContextLike,
+  client: "cli" | "desktop",
   protection: "on" | "off",
   preferredServerID?: string,
   sessionID?: string,
@@ -225,7 +229,7 @@ export async function setDesktopProtection(
   if (!server) throw new Error("No OpenCode server is available for Offpeak client settings.");
   const result = (await server.client.rpc(OFFPEAK_RPC).control({
     action: "client-set",
-    client: "desktop",
+    client,
     protection,
     ...(sessionID ? { sessionID } : {}),
   })) as OffpeakRpcOutput;
@@ -233,25 +237,36 @@ export async function setDesktopProtection(
   return result.client;
 }
 
-/**
- * Sets the explicit per-session override through the server that owns the
- * session, then re-reads the authoritative status. The server's session action
- * answers with a message and state only, so the page always renders the
- * effective protection instead of guessing it.
- */
-export async function setSessionProtection(
+/** Writes only the Desktop default through the selected server's typed RPC. */
+export async function setDesktopProtection(
   context: GuiContextLike,
   protection: "on" | "off",
   preferredServerID?: string,
   sessionID?: string,
 ): Promise<OffpeakClientStatus> {
+  return setClientProtection(context, "desktop", protection, preferredServerID, sessionID);
+}
+
+/**
+ * Sets the explicit per-chat setting through the server that owns the session:
+ * `on` always protects, `off` allows verified peak pricing, and `auto` removes
+ * the setting so the chat follows its client global again.
+ */
+export async function setSessionProtection(
+  context: GuiContextLike,
+  protection: "on" | "off" | "auto",
+  preferredServerID?: string,
+  sessionID?: string,
+): Promise<OffpeakClientStatus> {
   const server = resolveTargetServer(context, preferredServerID);
   if (!server) throw new Error("No OpenCode server is available for Offpeak session settings.");
-  if (!sessionID) throw new Error("Open a session to change its off-peak protection.");
-  await server.client.rpc(OFFPEAK_RPC).control({
-    action: protection === "off" ? "session-off" : "session-on",
+  if (!sessionID) throw new Error("Open a chat to change its off-peak protection.");
+  const result = (await server.client.rpc(OFFPEAK_RPC).control({
+    action: "session-set",
     sessionID,
-  });
+    protection,
+  })) as OffpeakRpcOutput;
+  if (result.client) return result.client;
   return readClientStatus(context, preferredServerID, sessionID);
 }
 
@@ -278,10 +293,6 @@ export function ownershipLabel(ownership: string | undefined): string {
       return "CLI session";
     case "desktop":
       return "Desktop session";
-    case "ambiguous":
-      return "Shared session (CLI + Desktop); protected";
-    case "queue":
-      return "Queue task; client defaults do not apply";
     default:
       return "Unknown client; protected";
   }
@@ -290,15 +301,11 @@ export function ownershipLabel(ownership: string | undefined): string {
 export function sourceLabel(source: string | undefined): string {
   switch (source) {
     case "session-override":
-      return "Explicit session override";
+      return "Explicit chat setting";
     case "client-default":
-      return "Client default";
-    case "ambiguous":
-      return "Shared ownership; fail-closed";
-    case "queue":
-      return "Queue task; explicit task override only";
+      return "Client global";
     default:
-      return "No reliable client registration; fail-closed";
+      return "No client registration yet; protected";
   }
 }
 
@@ -314,7 +321,7 @@ export function peakInferencePermitted(status: OffpeakClientStatus | undefined):
  * this switch owns.
  */
 export function sessionOverrideActive(status: OffpeakClientStatus | undefined): boolean {
-  return status?.session?.source === "session-override";
+  return status?.session?.override !== undefined || status?.session?.source === "session-override";
 }
 
 /**
