@@ -41,6 +41,7 @@ test("supported OpenCode versions match the tested 2.0.26–2.4.x range", () => 
     "2.4.0",
     "v2.4.0",
     "2.4.1",
+    "2.4.2",
     "2.4.99",
   ]) {
     assert.equal(isSupportedOpenCodeVersion(version), true, version);

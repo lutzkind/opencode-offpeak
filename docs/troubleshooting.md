@@ -3,7 +3,7 @@
 ## `/offpeak` is not recognized
 
 Confirm the installed CLI is within `>=2.0.26 <2.5.0`, install with
-`opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.0`,
+`opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.1`,
 then restart OpenCode. Check `opencode plugin list` and the server logs.
 
 OpenCode 2.4 loads plugins asynchronously again, so a TUI opened moments ago can
@@ -25,7 +25,7 @@ the remote server's configuration and not from `cli.json`. Add the package there
 
 ```jsonc
 {
-  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.0"]
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.1"]
 }
 ```
 
@@ -75,6 +75,15 @@ persists until changed.
 The TUI keeps its normal "working" indicator while the request is held because
 OpenCode exposes no waiting state. The hold toast and `/offpeak status` are the
 authoritative signals.
+
+## A held request did not release when protection was turned off
+
+Until v0.5.1, a command handled by one OpenCode location could not wake a hold
+owned by another location, so the request waited for the next off-peak boundary
+even though `/offpeak status` already showed `protection: OFF`. Update to
+`#v0.5.1` and retry. If it still waits, check that the chat's effective
+protection is `OFF` and that the model is not `UNKNOWN`; the status output shows
+both.
 
 ## Manual compaction during peak
 

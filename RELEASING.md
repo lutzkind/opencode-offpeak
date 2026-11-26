@@ -2,24 +2,25 @@
 
 ## Current public distribution
 
-`v0.5.0` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
+`v0.5.1` is complete and publicly installable from its exact GitHub tag with OpenCode v2:
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.1
 ```
 
-`v0.1.0` through `v0.4.4` remain available at their own tags. `v0.5.0` is the
+`v0.1.0` through `v0.5.0` remain available at their own tags. `v0.5.1` is the
 canonical release: two independent persistent client globals (CLI and Desktop),
 one per-chat override (`on` / `off` / follow-global), no queue and no execution
-modes. It keeps the native Desktop composer slash command, the committed
-`dist/gui-experimental.cjs` bundle for bare git-tag installs, background
-compaction and title recovery, and the read-only canonical `pricing` RPC
-consumed by `opencode-free-first` `peak-only`. The verified server/TUI range is
-`>=2.0.26 <2.5.0` and is validated through OpenCode 2.4.1.
+modes, and a process-wide settings wake so a protection change releases a held
+request from any OpenCode location. It keeps the native Desktop composer slash
+command, the committed `dist/gui-experimental.cjs` bundle for bare git-tag
+installs, background compaction and title recovery, and the read-only canonical
+`pricing` RPC consumed by `opencode-free-first` `peak-only`. The verified
+server/TUI range is `>=2.0.26 <2.5.0` and is validated through OpenCode 2.4.2.
 
 Desktop users must also list the same tag in Desktop's own
 `opencode.json(c)`; installing it only on the remote server enforces pricing
-there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer; this release validates its slash command and title APIs against 2.4.1. The validation covers the real
+there but does not deploy the local GUI. The Desktop app must be 2.3.0 or newer; this release validates its slash command and title APIs against 2.4.1 and the live Desktop/local server on 2.4.2. The validation covers the real
 packed-plugin TUI load and `/offpeak status` on both hosts, the packaged
 Desktop GUI bundle smoke test, the full deterministic suite, the
 zero-paid-traffic CLI/Desktop peak fixture run and real-TUI client test, and

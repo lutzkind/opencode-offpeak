@@ -111,11 +111,14 @@ hold, timer, or persistence side effect.
 - `opencode-offpeak/queue-v1` — legacy v0.4.x queue records. Not read, executed,
   or deleted by v0.5.0.
 
-All documents are versioned JSON in OpenCode plugin storage. Client writes read
-the latest document under a process-wide lock and apply only their own delta, so
-a stale OpenCode location cannot revert another location's newer setting. Reads
-happen before every protection decision; a read failure falls back to both
-globals `ON`, unknown ownership, and refused writes (fail-closed).
+All documents are versioned JSON in OpenCode plugin storage. Client and chat
+writes read the latest document under a process-wide lock and apply only their
+own delta, so a stale OpenCode location cannot revert another location's newer
+setting. A settings change also wakes every engine in the process; each hold
+re-reads both documents before re-evaluating, so a switch to `OFF` releases a
+request even when another location handled the command. Reads happen before
+every protection decision; a read failure falls back to both globals `ON`,
+unknown ownership, no chat override, and refused writes (fail-closed).
 
 `session.deleted` removes a chat's ownership and override. Bounded lazy cleanup
 on start-up and explicit chat commands reaps only sessions that a supported
@@ -126,7 +129,7 @@ on start-up and explicit chat commands reaps only sessions that a supported
 `package.json` declares `engines.opencode >=2.0.26 <2.5.0`. Both entrypoints
 check `context.app.version` at setup and refuse an unsupported host with an
 explicit error. The range has been validated at 2.0.26, 2.0.27, 2.0.30, 2.1.3,
-2.2.6, 2.3.0, 2.3.2, 2.4.0, and 2.4.1.
+2.2.6, 2.3.0, 2.3.2, 2.4.0, 2.4.1, and 2.4.2.
 
 OpenCode 2.3 added plugin surfaces and deprecated `generate`; OpenCode 2.3.1
 enabled background compaction by default; 2.3.2 changed only

@@ -1,5 +1,38 @@
 # Decisions
 
+## 2026-11-26: A settings change wakes every location (v0.5.1)
+
+OpenCode loads one plugin setup per project directory, but the plugin RPC has
+no location selector. A `/offpeak off`, `/offpeak desktop off`, or
+`/offpeak chat off` can therefore be handled by a different engine than the one
+holding the request. v0.5.0 updated shared storage correctly, but only the
+handling engine called its own signal; the holder kept its in-memory copies
+until the next off-peak boundary. This reproduced live on Desktop: a chat with
+`ownership: desktop`, `protection: OFF`, `source: client-default` was still
+held after `/off`.
+
+Decision: settings changes broadcast through a process-wide wake set that every
+engine subscribes to in `start()` and leaves in `dispose()`. On wake, the hold
+loop re-reads the client defaults/ownership document and the per-chat override
+document before re-evaluating, so the same request commits immediately. Reads
+also happen before every guard, status read, and recovery flush. Per-chat
+override writes use the same read-merge-write discipline already used for
+client defaults, under a second process-wide lock, so two locations editing
+different chats cannot clobber each other. No timer, polling loop, heartbeat,
+second process, or storage format change is introduced.
+
+Rejected alternatives:
+
+- Polling the two documents while a request is held. It would work across
+  processes, but it breaks the no-polling invariant and is unnecessary for the
+  supported single-server-process model that already relies on a process-wide
+  write lock.
+- Writing only the changed chat instead of read-merge-writing. OpenCode plugin
+  storage has no compare-and-swap for the whole document, so a blind write from
+  a stale engine can still drop a concurrent override.
+- Requiring users to set an explicit per-chat override. The client global is a
+  documented control and must work from whichever location handles the command.
+
 ## 2026-11-25: Protection is two client globals plus one per-chat choice (v0.5.0)
 
 The v0.4.x surface had accumulated an installation-wide `enabled` toggle, three

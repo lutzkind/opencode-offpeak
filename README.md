@@ -24,7 +24,7 @@ that is the only automation.
 ## Install
 
 ```sh
-opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.0
+opencode plugin add git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.1
 ```
 
 Restart OpenCode after installation. The plugin is enabled with both client
@@ -39,7 +39,7 @@ Desktop's local config:
 
 ```jsonc
 {
-  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.0"]
+  "plugins": ["git+https://github.com/lutzkind/opencode-offpeak.git#v0.5.1"]
 }
 ```
 
@@ -120,7 +120,7 @@ during migration so an existing file keeps working without an edit.
 
 ## Compatibility
 
-OpenCode CLI `>=2.0.26 <2.5.0`; validated through **2.4.1**. The Desktop GUI
+OpenCode CLI `>=2.0.26 <2.5.0`; validated through **2.4.2**. The Desktop GUI
 entrypoint requires Desktop 2.3.0+ and is validated against the 2.4.1 GUI SDK.
 Both entrypoints refuse to initialize on an unsupported host with a clear
 error instead of failing later.

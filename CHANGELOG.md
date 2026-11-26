@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.1 - 2026-11-26
+
+### Fixed
+
+- **Turning protection off now releases a held request even when another
+  OpenCode location handled the command.** OpenCode loads one plugin setup per
+  project directory, while the typed RPC has no location selector, so
+  `/offpeak off`, `/offpeak desktop off`, or `/offpeak chat off` could be
+  handled by a different engine than the one holding the request. That engine
+  updated storage but could not wake the holder, and the request waited until
+  the next off-peak boundary. Every engine now subscribes to a process-wide
+  settings-change signal and re-reads both shared documents after a wake, so
+  the hold releases immediately.
+- **Per-chat overrides are read-merge-written under a process-wide lock.**
+  Two locations changing different chats can no longer drop each other's
+  override, and `clientStatus`/`status` re-read the override document so a
+  command handled elsewhere is visible immediately.
+- Recovery delivery also re-reads both documents, so a persisted continuation
+  is admitted when protection is switched off through another location.
+- An unreadable per-chat override document now forces protection `ON` instead
+  of following a possibly-`OFF` global (fail-closed).
+
 ## 0.5.0 - 2026-11-25
 
 ### Changed

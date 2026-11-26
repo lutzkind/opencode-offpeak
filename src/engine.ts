@@ -217,6 +217,41 @@ const COMPACTION_RECOVERY_ORIGIN = "pending-compaction" as const;
  */
 const CLIENT_SETTINGS_WRITE_LOCK = new Mutex();
 
+/**
+ * The explicit per-chat overrides are also one global document, written by
+ * whichever location's engine handled the command. Read-merge-write under a
+ * process-wide lock keeps one location from dropping another location's
+ * override.
+ */
+const SESSION_SETTINGS_WRITE_LOCK = new Mutex();
+
+/**
+ * Protection changes can reach an engine other than the one that handled the
+ * command: OpenCode loads one plugin setup per location, while RPC has no
+ * location selector. This process-wide wake set lets every engine re-read the
+ * shared documents and release a hold immediately instead of waiting for the
+ * next pricing boundary. All locations load this module once in one server
+ * process, so the set is shared by every engine there.
+ */
+const SETTINGS_WAKE_SUBSCRIBERS = new Set<() => void>();
+
+function subscribeSettingsWake(listener: () => void): () => void {
+  SETTINGS_WAKE_SUBSCRIBERS.add(listener);
+  return () => {
+    SETTINGS_WAKE_SUBSCRIBERS.delete(listener);
+  };
+}
+
+function broadcastSettingsChange(): void {
+  for (const listener of SETTINGS_WAKE_SUBSCRIBERS) {
+    try {
+      listener();
+    } catch {
+      // One engine's wake-up must not prevent the others from re-reading.
+    }
+  }
+}
+
 export interface RetryFailureInput {
   sessionID: string;
   providerID: string;
@@ -406,6 +441,7 @@ export class OffpeakEngine {
    */
   readonly #sessionProtections = new Map<string, SessionProtectionOverride>();
   readonly #sessionOverridesRepo: SessionOverridesRepository | undefined;
+  #sessionSettingsError: string | undefined;
   /**
    * Persistent client-level defaults. Both start ON, so an installation that
    * predates this feature and every session whose client is unknown stay
@@ -429,6 +465,7 @@ export class OffpeakEngine {
   #nextInteractiveWaiter = 0;
   #recoveryTimer: NodeJS.Timeout | undefined;
   #watcher: FSWatcher | undefined;
+  #unsubscribeSettingsWake: (() => void) | undefined;
   #disposed = false;
   #pumping: Promise<void> | undefined;
   #pumpRequested = false;
@@ -473,6 +510,11 @@ export class OffpeakEngine {
     } catch (error) {
       this.#onError(error);
     }
+    this.#unsubscribeSettingsWake = subscribeSettingsWake(() => {
+      if (this.#disposed) return;
+      this.#signal.notify();
+      this.#requestPump();
+    });
     try {
       mkdirSync(path.dirname(this.#config.path), { recursive: true, mode: 0o700 });
       this.#watcher = watch(path.dirname(this.#config.path), (_event, filename) => {
@@ -488,6 +530,8 @@ export class OffpeakEngine {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
+    this.#unsubscribeSettingsWake?.();
+    this.#unsubscribeSettingsWake = undefined;
     this.#holds.clear();
     this.#refusals.clear();
     this.#consumedRefusals.clear();
@@ -522,22 +566,24 @@ export class OffpeakEngine {
   ): Promise<"ON" | "OFF"> {
     const id = sessionID.trim();
     if (!id) throw new Error("A session ID is required for a session protection change.");
-    const existing = this.#sessionProtections.get(id);
-    if (protection === "auto") {
-      if (existing === undefined) return this.sessionProtection(id);
-      this.#sessionProtections.delete(id);
-      await this.#persistSessionProtections();
-    } else {
-      if (existing?.protection === protection) return protection === "off" ? "OFF" : "ON";
-      this.#sessionProtections.set(id, {
+    await this.#mutateSessionProtections((document) => {
+      const existing = document.sessions[id];
+      if (protection === "auto") {
+        if (existing === undefined) return false;
+        delete document.sessions[id];
+        return true;
+      }
+      if (existing?.protection === protection) return false;
+      document.sessions[id] = {
         protection,
         updatedAt: new Date(this.#clock.now()).toISOString(),
-      });
-      await this.#persistSessionProtections();
-    }
-    // Wake held requests and recovery delivery so a switch to OFF releases
-    // still-valid waiting work immediately; a switch to ON restores the
-    // normal waiting behavior for future requests.
+      };
+      return true;
+    });
+    // Wake every location's engine and recovery delivery so a switch to OFF
+    // releases still-valid waiting work immediately; a switch to ON restores
+    // the normal waiting behavior for future requests.
+    broadcastSettingsChange();
     this.#signal.notify();
     this.#requestPump();
     return this.sessionProtection(id);
@@ -554,6 +600,7 @@ export class OffpeakEngine {
    */
   async clientStatus(current?: { sessionID?: string }): Promise<ClientStatus> {
     await this.#refreshClientSettings();
+    await this.#refreshSessionProtections();
     const sessionID = current?.sessionID?.trim();
     const session = sessionID !== undefined ? this.#sessionStatus(sessionID) : undefined;
     return {
@@ -586,10 +633,10 @@ export class OffpeakEngine {
       return true;
     });
     if (!result.changed) return this.clientStatus();
-    // A changed default must take effect for existing sessions immediately:
-    // wake held requests and recovery delivery through the same signal used by
-    // every other configuration change. No timer and no polling are added.
-    this.#signal.notify();
+    // A changed default must take effect for existing sessions immediately in
+    // every location: wake held requests and recovery delivery through the
+    // process-wide signal. No timer and no polling are added.
+    broadcastSettingsChange();
     this.#requestPump();
     return this.clientStatus();
   }
@@ -621,8 +668,9 @@ export class OffpeakEngine {
     });
     if (result.changed && changedOwner) {
       // The chat now follows a different client default. Wake a held request
-      // so it re-evaluates immediately instead of waiting for the old window.
-      this.#signal.notify();
+      // in every location so it re-evaluates immediately instead of waiting
+      // for the old window.
+      broadcastSettingsChange();
       this.#requestPump();
     }
     return this.clientStatus({ sessionID: id });
@@ -634,7 +682,11 @@ export class OffpeakEngine {
    * never removes state for a session that still exists.
    */
   async forgetSession(sessionID: string): Promise<void> {
-    const overrideRemoved = this.#sessionProtections.delete(sessionID);
+    const override = await this.#mutateSessionProtections((document) => {
+      if (!(sessionID in document.sessions)) return false;
+      delete document.sessions[sessionID];
+      return true;
+    });
     const ownership = this.#clientSettingsLoaded
       ? await this.#mutateClients((document) => {
           if (!(sessionID in document.sessions)) return false;
@@ -642,8 +694,7 @@ export class OffpeakEngine {
           return true;
         })
       : { changed: false };
-    if (!overrideRemoved && !ownership.changed) return;
-    if (overrideRemoved) await this.#persistSessionProtections();
+    if (override.changed || ownership.changed) broadcastSettingsChange();
   }
 
   /**
@@ -653,7 +704,6 @@ export class OffpeakEngine {
    */
   async pruneSessionProtections(): Promise<void> {
     if (this.#sessionProtections.size === 0 && this.#clientSessions.size === 0) return;
-    let overridesChanged = false;
     const reaped = new Set<string>();
     for (const sessionID of [
       ...new Set([...this.#sessionProtections.keys(), ...this.#clientSessions.keys()]),
@@ -665,11 +715,22 @@ export class OffpeakEngine {
         // the session may still exist and its state must be kept.
         if (!isSessionNotFound(error)) continue;
         reaped.add(sessionID);
-        if (this.#sessionProtections.delete(sessionID)) overridesChanged = true;
       }
     }
-    if (reaped.size > 0 && this.#clientSettingsLoaded) {
-      await this.#mutateClients((document) => {
+    if (reaped.size === 0) return;
+    const overrides = await this.#mutateSessionProtections((document) => {
+      let changed = false;
+      for (const sessionID of reaped) {
+        if (sessionID in document.sessions) {
+          delete document.sessions[sessionID];
+          changed = true;
+        }
+      }
+      return changed;
+    });
+    let ownershipChanged = false;
+    if (this.#clientSettingsLoaded) {
+      const ownership = await this.#mutateClients((document) => {
         let changed = false;
         for (const sessionID of reaped) {
           if (sessionID in document.sessions) {
@@ -679,8 +740,9 @@ export class OffpeakEngine {
         }
         return changed;
       });
+      ownershipChanged = ownership.changed;
     }
-    if (overridesChanged) await this.#persistSessionProtections();
+    if (overrides.changed || ownershipChanged) broadcastSettingsChange();
   }
 
   /**
@@ -718,6 +780,7 @@ export class OffpeakEngine {
     sessionID?: string;
   }): Promise<EngineStatus> {
     await this.#refreshClientSettings();
+    await this.#refreshSessionProtections();
     if (current?.sessionID !== undefined) await this.#pruneSessionOverride(current.sessionID);
     const settings = await this.#config.read();
     const selected =
@@ -851,10 +914,12 @@ export class OffpeakEngine {
     input: GuardInput,
     deferralOrigin: RecoveryOrigin | undefined,
   ): Promise<void> {
-    // Another OpenCode location may have changed a global default or another
-    // client may have opened this chat. Re-read before the decision; an
-    // unreadable document falls back to protected, never to an inferred bypass.
+    // Another OpenCode location may have changed a global default, a chat
+    // override, or another client may have opened this chat. Re-read before
+    // the decision; an unreadable document falls back to protected, never to
+    // an inferred bypass.
     await this.#refreshClientSettings();
+    await this.#refreshSessionProtections();
     const first = await this.#config.read();
     if (!first.config)
       throw new PricingBlockedError(`Offpeak pricing guard failed closed: ${first.error}`);
@@ -985,6 +1050,12 @@ export class OffpeakEngine {
           signalVersion,
           Math.max(1, decision.nextTransition - this.#clock.now()),
         );
+        // The setting may have been changed by another location's engine (RPC
+        // has no location selector). Re-read both shared documents after every
+        // wake so a switch to OFF releases this hold immediately, not at the
+        // next pricing boundary.
+        await this.#refreshClientSettings();
+        await this.#refreshSessionProtections();
       }
       throw new PricingBlockedError("Offpeak plugin is shutting down; request blocked.");
     } finally {
@@ -1313,26 +1384,69 @@ export class OffpeakEngine {
   async #loadSessionProtections(): Promise<void> {
     const repo = this.#sessionOverridesRepo;
     if (!repo) return;
-    const document = await repo.load();
-    this.#sessionProtections.clear();
-    for (const [sessionID, override] of Object.entries(document.sessions)) {
-      this.#sessionProtections.set(sessionID, override);
+    this.#applySessionOverrideDocument(await repo.load());
+    this.#sessionSettingsError = undefined;
+  }
+
+  /**
+   * Re-reads the shared override document. Used before a protection decision
+   * and after another location wakes this engine, so an explicit setting made
+   * through a different plugin instance is visible here immediately.
+   */
+  async #refreshSessionProtections(): Promise<void> {
+    const repo = this.#sessionOverridesRepo;
+    if (!repo) return;
+    try {
+      this.#applySessionOverrideDocument(await repo.load());
+      this.#sessionSettingsError = undefined;
+    } catch (error) {
+      // Fail closed: while the override document is unreadable, every chat is
+      // treated as protected rather than following a possibly-OFF global.
+      this.#sessionProtections.clear();
+      this.#sessionSettingsError =
+        error instanceof Error ? error.message : "Stored chat overrides are unavailable.";
+      this.#onError(error);
     }
   }
 
-  async #persistSessionProtections(): Promise<void> {
+  #applySessionOverrideDocument(document: SessionOverridesDocument): void {
+    this.#sessionProtections.clear();
+    for (const [sessionID, override] of Object.entries(document.sessions)) {
+      this.#sessionProtections.set(sessionID, { ...override });
+    }
+  }
+
+  /**
+   * Applies one delta to the latest stored override document under a
+   * process-wide lock. The caller never writes a stale whole snapshot: an
+   * override stored by another location is preserved even when this engine's
+   * in-memory copy predates it.
+   */
+  async #mutateSessionProtections(
+    mutate: (document: SessionOverridesDocument) => boolean,
+  ): Promise<{ document: SessionOverridesDocument; changed: boolean }> {
     const repo = this.#sessionOverridesRepo;
-    if (!repo) return;
-    const document: SessionOverridesDocument = {
-      schemaVersion: 1,
-      sessions: Object.fromEntries(
-        [...this.#sessionProtections.entries()].map(([sessionID, override]) => [
-          sessionID,
-          { ...override },
-        ]),
-      ),
-    };
-    await this.#lock.run(() => repo.save(document));
+    if (!repo) {
+      const document: SessionOverridesDocument = {
+        schemaVersion: 1,
+        sessions: Object.fromEntries(
+          [...this.#sessionProtections.entries()].map(([sessionID, override]) => [
+            sessionID,
+            { ...override },
+          ]),
+        ),
+      };
+      const changed = mutate(document);
+      this.#applySessionOverrideDocument(document);
+      return { document, changed };
+    }
+    return SESSION_SETTINGS_WRITE_LOCK.run(async () => {
+      const document = await repo.load();
+      const changed = mutate(document);
+      if (changed) await repo.save(document);
+      this.#applySessionOverrideDocument(document);
+      return { document, changed };
+    });
   }
 
   #applyClientDocument(document: ClientsDocument): void {
@@ -1465,6 +1579,14 @@ export class OffpeakEngine {
    * 3. an unregistered session is protected (fail-closed).
    */
   #sessionStatus(sessionID: string): ClientSessionStatus {
+    if (this.#sessionSettingsError) {
+      return {
+        sessionID,
+        ownership: this.#clientSessions.get(sessionID)?.owner ?? "unknown",
+        protection: "ON",
+        source: "unknown",
+      };
+    }
     const override = this.#sessionProtections.get(sessionID);
     const ownership = this.#clientSessions.get(sessionID);
     const state: ClientOwnershipState = ownership?.owner ?? "unknown";
@@ -1582,6 +1704,8 @@ export class OffpeakEngine {
       this.#scheduleRecovery(undefined);
       return;
     }
+    await this.#refreshClientSettings();
+    await this.#refreshSessionProtections();
     const settings = await this.#config.read();
     if (!settings.config || this.#disposed) return;
     let next: number | undefined;

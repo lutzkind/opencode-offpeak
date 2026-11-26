@@ -1,6 +1,6 @@
 {
   "name": "opencode-offpeak",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Hold peak-priced OpenCode requests until off-peak, with independent CLI and Desktop switches and a per-chat override.",
   "author": "Lutz Kind",
   "license": "MIT",

@@ -10,6 +10,7 @@ import {
   OffpeakEngine,
   PricingBlockedError,
   RecoveryRepository,
+  SESSION_OVERRIDES_STORAGE_KEY,
   SessionOverridesRepository,
 } from "../dist/index.js";
 
@@ -139,6 +140,111 @@ async function harness(now = "2026-10-12T01:30:00Z", options = {}) {
 const selectedModel = { providerID: "opencode-go", modelID: "deepseek-v4.1-flash" };
 const PEAK = "2026-10-12T02:00:00Z";
 const OFF_PEAK = "2026-10-12T05:00:00Z";
+
+/**
+ * A second engine for another location in the same server process. OpenCode
+ * loads one plugin setup per project directory, so a command can be handled by
+ * a different engine than the one holding a request.
+ */
+async function secondary(h, location = "other-location") {
+  const engine = new OffpeakEngine({
+    recoveries: new RecoveryRepository(h.storage),
+    sessionOverrides: new SessionOverridesRepository(h.storage),
+    clients: new ClientsRepository(h.storage),
+    location,
+    config: h.config,
+    sessions: h.sessions,
+    clock: h.clock,
+  });
+  await engine.start();
+  return engine;
+}
+
+test("a client global changed through another location releases a live hold immediately", async () => {
+  const h = await harness(PEAK);
+  const other = await secondary(h);
+  try {
+    await other.registerSessionClient("cross-location-global", "desktop");
+    let released = false;
+    const held = h.engine
+      .guardModelRequest({
+        sessionID: "cross-location-global",
+        ...selectedModel,
+        kind: "primary",
+        transport: "model",
+      })
+      .then(
+        () => {
+          released = true;
+        },
+        () => {
+          released = true;
+        },
+      );
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal(released, false);
+    await other.setClientProtection("desktop", "off");
+    await until(() => released);
+    await held;
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 0);
+  } finally {
+    await other.dispose();
+    await h.close();
+  }
+});
+
+test("a chat override changed through another location releases a live hold and is visible there", async () => {
+  const h = await harness(PEAK);
+  const other = await secondary(h);
+  try {
+    await other.registerSessionClient("cross-location-chat", "desktop");
+    let released = false;
+    const held = h.engine
+      .guardModelRequest({
+        sessionID: "cross-location-chat",
+        ...selectedModel,
+        kind: "primary",
+        transport: "model",
+      })
+      .then(
+        () => {
+          released = true;
+        },
+        () => {
+          released = true;
+        },
+      );
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal(released, false);
+    await other.setSessionProtection("cross-location-chat", "off");
+    await until(() => released);
+    await held;
+    const status = await h.engine.clientStatus({ sessionID: "cross-location-chat" });
+    assert.equal(status.session.protection, "OFF");
+    assert.equal(status.session.source, "session-override");
+    assert.equal(status.session.override, "off");
+  } finally {
+    await other.dispose();
+    await h.close();
+  }
+});
+
+test("overrides written through different locations are both preserved", async () => {
+  const h = await harness(PEAK);
+  const first = await secondary(h, "location-one");
+  const second = await secondary(h, "location-two");
+  try {
+    await first.setSessionProtection("override-one", "off");
+    await second.setSessionProtection("override-two", "on");
+    const document = await new SessionOverridesRepository(h.storage).load();
+    assert.equal(document.sessions["override-one"].protection, "off");
+    assert.equal(document.sessions["override-two"].protection, "on");
+  } finally {
+    await first.dispose();
+    await second.dispose();
+    await h.close();
+  }
+});
 
 test("both client defaults start ON and an absent document is not rewritten", async () => {
   const h = await harness();
@@ -446,6 +552,35 @@ test("invalid stored client settings fail closed and are never overwritten", asy
       schemaVersion: 1,
       defaults: {},
     });
+  } finally {
+    await h.close();
+  }
+});
+
+test("an unreadable chat override document forces protection ON even when the global is OFF", async () => {
+  const storage = new MemoryStorage();
+  await storage.set(SESSION_OVERRIDES_STORAGE_KEY, { schemaVersion: 99, sessions: {} });
+  const h = await harness("2026-10-12T02:00:00Z", { storage });
+  try {
+    await h.engine.setClientProtection("desktop", "off");
+    const status = await h.engine.clientStatus({ sessionID: "unreadable-overrides" });
+    assert.equal(status.session.protection, "ON");
+    assert.equal(status.session.source, "unknown");
+    const held = h.engine
+      .guardModelRequest({
+        sessionID: "unreadable-overrides",
+        ...selectedModel,
+        kind: "primary",
+        transport: "model",
+      })
+      .then(
+        () => "released",
+        () => "blocked",
+      );
+    await until(async () => (await h.engine.status(selectedModel)).interactiveWaiting === 1);
+    assert.equal((await h.engine.status(selectedModel)).interactiveWaiting, 1);
+    await h.engine.dispose();
+    assert.equal(await held, "blocked");
   } finally {
     await h.close();
   }
