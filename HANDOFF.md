@@ -1,5 +1,36 @@
 # Handoff — 2026-11-18
 
+## 2026-11-26 Release a hold from any location (`v0.5.1`)
+
+**Trigger.** A Desktop/local chat was held at peak while `clientStatus` already reported
+`ownership: desktop`, `protection: OFF`, `source: client-default`. `/offpeak off` persisted
+the setting but the request did not continue until the next pricing boundary.
+
+**Root cause.** OpenCode loads one plugin setup per project location in one server process,
+and the typed RPC has no location selector. The engine that handled the command saved the
+shared document and woke only itself; the engine holding the request kept stale in-memory
+client defaults and overrides. A second issue let a stale engine overwrite another
+location's per-chat override when it saved the whole map.
+
+**Fix.** A process-wide `SETTINGS_WAKE_SUBSCRIBERS` set wakes every engine after a persisted
+client/override change. Holds, guards, status reads, and recovery flushes re-read both shared
+documents before deciding. Per-chat overrides use a process-wide read-merge-write lock, and
+an unreadable override document fails closed to protection `ON`. No timer, polling loop,
+second process, queue, or storage-format change was added.
+
+**Tests.** 149/149 pass; lint and typecheck clean; GUI bundle rebuilt and unchanged;
+`npm pack --dry-run` 80 files / 166.7 kB. New deterministic coverage for cross-location
+client changes, cross-location chat overrides, merge preservation, and unreadable overrides.
+
+**Release.** Commit `e8e79d2`; tag `v0.5.1`; asset `opencode-offpeak-0.5.1.tgz`
+(166729 bytes, SHA-256 `7edb2d22…a493af`); GitHub release published.
+
+**Deployment.** Host config pins `#v0.5.1`; `opencode reload` loaded it on the live
+OpenCode 2.4.2 service; `/api/plugin` reports `active` with server/TUI/GUI features. Live
+defaults remain CLI ON / Desktop OFF. The user's Desktop app must list `#v0.5.1` in its own
+`opencode.json(c)` and be fully restarted; this host cannot update it.
+
+
 ## 2026-11-25 Simplified protection (`v0.5.0`)
 
 **Trigger.** The user reported that the plugin had become overcomplicated and
